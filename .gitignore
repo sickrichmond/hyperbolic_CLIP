@@ -29,3 +29,5 @@ hf_cache/
 # OS
 .DS_Store
 Thumbs.db
+
+claude_setup/

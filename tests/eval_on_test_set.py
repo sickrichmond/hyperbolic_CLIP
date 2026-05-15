@@ -76,7 +76,7 @@ class TestSetDataset(Dataset):
 
 def main():
     device = "cuda"
-    ckpt = torch.load("step1_checkpoint.pt", map_location=device, weights_only=False)
+    ckpt = torch.load("step1_checkpoint_large.pt", map_location=device, weights_only=False)
 
     model = HyperbolicCLIP(hyperbolic_dim=128, curv=ckpt["curv"]).to(device)
     model.clip.load_state_dict(ckpt["lora_state"])

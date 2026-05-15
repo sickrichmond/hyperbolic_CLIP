@@ -28,7 +28,7 @@ def main():
 
             for step in range(3):
                 x_hyp, tangent = model(pixel)
-                loss, logs = loss_fn(x_hyp, tangent, is_real)
+                loss, logs = loss_fn(tangent, is_real)
                 optim.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.trainable_parameters(), 1.0)
