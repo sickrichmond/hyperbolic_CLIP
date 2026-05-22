@@ -190,8 +190,13 @@ class IABCLIPDataset(Dataset):
                 loaded_csvs.add(csv_name)
             self._fake_idx[prefix] = _load_by_index(caps_p, csv_name, cap_col)
 
-        # Walk images
+        # Walk images — keep only samples that have a caption.
+        # Real images: 2000 per class but captions cover only 1000 (the ones
+        # that were selected to generate the synthetic counterparts).
+        # Dropping uncaptioned samples ensures every training example carries
+        # meaningful attribution-augmented text.
         self.samples: list[tuple[Path, str, str]] = []
+        n_dropped = 0
         for gen in generators:
             for sem in semantics:
                 img_dir = _img_dir(root_p, gen, sem)
@@ -200,27 +205,34 @@ class IABCLIPDataset(Dataset):
                     continue
                 imgs = sorted(p for p in img_dir.iterdir()
                                if p.suffix in _IMAGE_EXTS)
-                if max_per_class is not None:
-                    imgs = imgs[:max_per_class]
                 for p in imgs:
-                    self.samples.append((p, gen, sem))
+                    if self._get_raw_caption_static(p, gen, sem):
+                        self.samples.append((p, gen, sem))
+                    else:
+                        n_dropped += 1
+                    if max_per_class is not None and \
+                            sum(1 for _, g, s in self.samples if g == gen and s == sem) >= max_per_class:
+                        break
 
         self.processor = CLIPImageProcessor.from_pretrained(processor_name)
         self.tokenizer = CLIPTokenizer.from_pretrained(processor_name)
 
         n_real = sum(1 for _, g, _ in self.samples if g == "real")
         n_fake = len(self.samples) - n_real
-        n_no_cap = sum(1 for p, g, sem in self.samples if not self._get_raw_caption(p, g, sem))
         print(
             f"\nIABCLIPDataset: {len(self.samples)} samples "
-            f"({n_real} real, {n_fake} fake) — "
-            f"{n_no_cap} without caption"
+            f"({n_real} real, {n_fake} fake)"
+            + (f" — dropped {n_dropped} without caption" if n_dropped else "")
         )
 
-    def _get_raw_caption(self, img_path: Path, generator: str, semantic: str) -> str:
+    def _get_raw_caption_static(self, img_path: Path, generator: str, semantic: str) -> str:
+        """Caption lookup usable during __init__ before self.samples is complete."""
         if generator == "real":
             return _lookup_real(self._real_idx.get(semantic, {}), img_path)
         return _lookup_fake(self._fake_idx, img_path)
+
+    def _get_raw_caption(self, img_path: Path, generator: str, semantic: str) -> str:
+        return self._get_raw_caption_static(img_path, generator, semantic)
 
     def __len__(self) -> int:
         return len(self.samples)

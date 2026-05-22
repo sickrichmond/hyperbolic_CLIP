@@ -47,16 +47,20 @@ class AttributionCLIP(nn.Module):
 
     def encode_image(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """Returns L2-normalised image embeddings, shape (B, D)."""
-        feats = self.clip.get_image_features(pixel_values=pixel_values)
+        # Call sub-modules directly: PEFT doesn't proxy get_image_features correctly
+        # on CLIPModel (returns raw BaseModelOutputWithPooling instead of the tensor).
+        vision_out = self.clip.vision_model(pixel_values=pixel_values)
+        feats = self.clip.visual_projection(vision_out.pooler_output)
         return F.normalize(feats, dim=-1)
 
     def encode_text(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
     ) -> torch.Tensor:
         """Returns L2-normalised text embeddings, shape (B, D)."""
-        feats = self.clip.get_text_features(
+        text_out = self.clip.text_model(
             input_ids=input_ids, attention_mask=attention_mask
         )
+        feats = self.clip.text_projection(text_out.pooler_output)
         return F.normalize(feats, dim=-1)
 
     def forward(

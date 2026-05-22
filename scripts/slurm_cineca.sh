@@ -1,0 +1,66 @@
+#!/bin/bash
+# ============================================================================
+# CINECA Leonardo — Attribution-CLIP fine-tuning (Stage 1)
+# CLIP ViT-L/14, LoRA on both encoders, InfoNCE loss
+#
+# Submit:  sbatch scripts/slurm_cineca.sh
+#
+# Data setup (run once from your local machine):
+#   rsync -avz --progress /mnt/data3/rtrebiani/iab_dataset/ \
+#       <username>@login.leonardo.cineca.it:$WORK/iab_dataset/
+#   rsync -avz --progress /mnt/data3/rtrebiani/iab_captions/ \
+#       <username>@login.leonardo.cineca.it:$WORK/iab_captions/
+#   rsync -avz --progress /mnt/data3/rtrebiani/hyperbolic_CLIP/ \
+#       <username>@login.leonardo.cineca.it:$WORK/hyperbolic_CLIP/
+# ============================================================================
+
+#SBATCH --account=<YOUR_ACCOUNT>         # e.g. IscrB_myproject — fill this in
+#SBATCH --partition=boost_usr_prod       # A100 partition on Leonardo
+#SBATCH --job-name=attr_clip_flux
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node=1
+#SBATCH --cpus-per-task=32              # 8 workers × 4 GPUs
+#SBATCH --gpus-per-node=4              # 4× A100 80GB
+#SBATCH --time=04:00:00
+#SBATCH --output=%x_%j.out
+#SBATCH --error=%x_%j.err
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=richitrebbia@gmail.com
+
+# ── Environment ───────────────────────────────────────────────────────────────
+module load anaconda3/2023.03-2
+module load cuda/12.1
+source activate deepfake-hyp       # 'conda activate' doesn't work in SLURM — use 'source activate'
+
+export HF_HOME=$WORK/hf_cache      # avoid filling home quota
+export TOKENIZERS_PARALLELISM=false
+
+REPO=$WORK/hyperbolic_CLIP
+DATA=$WORK/iab_dataset
+CAPS=$WORK/iab_captions
+OUT=$WORK/checkpoints
+
+mkdir -p $OUT
+cd $REPO
+
+# ── Training ──────────────────────────────────────────────────────────────────
+# ViT-L/14: 768D embeddings, stronger backbone than ViT-B/32.
+# batch_size=1024 → 1022 negatives per InfoNCE step (4× more than with 256).
+# lora_r=16 gives slightly more capacity for the larger backbone.
+
+CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
+    --dataset_path  $DATA \
+    --captions_dir  $CAPS \
+    --generators    FLUX real \
+    --semantics     COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
+    --clip_name     openai/clip-vit-large-patch14 \
+    --lora_r        16 \
+    --lora_alpha    32 \
+    --batch_size    1024 \
+    --num_epochs    3 \
+    --lr            5e-5 \
+    --weight_decay  0.01 \
+    --num_workers   8 \
+    --output        $OUT/attribution_FLUX_vitl14.pt
+
+echo "Done: $OUT/attribution_FLUX_vitl14.pt"

@@ -136,6 +136,10 @@ def main():
             nn.utils.clip_grad_norm_(core.trainable_parameters(), 1.0)
             optimizer.step()
             scheduler.step()
+            # Clamp the raw logit_scale parameter so temperature stays reasonable.
+            # Without this it jumps to the exp-clamp ceiling in the first few steps.
+            with torch.no_grad():
+                core.clip.base_model.model.logit_scale.clamp_(0, math.log(100))
 
             total_loss += loss.item()
             if step % 50 == 0 or step == steps_per_epoch:
