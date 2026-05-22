@@ -14,7 +14,7 @@
 #       <username>@login.leonardo.cineca.it:$WORK/hyperbolic_CLIP/
 # ============================================================================
 
-#SBATCH --account=<YOUR_ACCOUNT>         # e.g. IscrB_myproject — fill this in
+#SBATCH --account=EUHPC_D26_009B         # e.g. IscrB_myproject — fill this in
 #SBATCH --partition=boost_usr_prod       # A100 partition on Leonardo
 #SBATCH --job-name=attr_clip_flux
 #SBATCH --nodes=1
