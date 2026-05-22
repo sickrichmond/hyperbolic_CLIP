@@ -20,7 +20,7 @@ echo "CUDA module: cuda/12.6"
 # ── Create venv ───────────────────────────────────────────────────────────────
 VENV="$WORK/hyp_fine_tuning"
 
-if [ -d "$VENV" ]; then
+if [ -f "$VENV/bin/activate" ]; then
     echo "Venv already exists at $VENV, skipping creation."
 else
     echo "Creating venv at $VENV ..."
