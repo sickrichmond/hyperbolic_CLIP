@@ -28,15 +28,9 @@
 #SBATCH --mail-user=richitrebbia@gmail.com
 
 # ── Environment ───────────────────────────────────────────────────────────────
-# Load whichever conda/CUDA modules are available on this allocation
-for _m in anaconda3/2023.03-2 anaconda3/2023.09 anaconda3/2024.02 \
-           miniconda3/24.1.2-0 miniconda3/23.5.2-0 miniconda3/4.12.0; do
-    module load "$_m" 2>/dev/null && break
-done
-for _m in cuda/12.1 cuda/12.3 cuda/12.4 cuda/11.8; do
-    module load "$_m" 2>/dev/null && break
-done
-source activate deepfake-hyp       # 'conda activate' doesn't work in SLURM — use 'source activate'
+module load python/3.11.7
+module load cuda/12.6
+source $WORK/hyp_fine_tuning/bin/activate
 
 export HF_HOME=$WORK/hf_cache      # avoid filling home quota
 export TOKENIZERS_PARALLELISM=false
