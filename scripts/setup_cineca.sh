@@ -12,8 +12,33 @@ echo "=== Attribution-CLIP setup on CINECA Leonardo ==="
 echo "WORK: $WORK"
 
 # ── Load modules ──────────────────────────────────────────────────────────────
-module load anaconda3/2023.03-2
-module load cuda/12.1
+# Find the right anaconda/miniconda module name (varies by allocation/year)
+_CONDA_MOD=""
+for _m in anaconda3/2023.03-2 anaconda3/2023.09 anaconda3/2024.02 \
+           miniconda3/24.1.2-0 miniconda3/23.5.2-0 miniconda3/4.12.0; do
+    if module load "$_m" 2>/dev/null; then
+        _CONDA_MOD="$_m"
+        echo "Loaded conda module: $_CONDA_MOD"
+        break
+    fi
+done
+if [ -z "$_CONDA_MOD" ]; then
+    echo "ERROR: no anaconda/miniconda module found. Run 'module avail anaconda' and set the name manually."
+    exit 1
+fi
+
+# Find the right CUDA module
+_CUDA_MOD=""
+for _m in cuda/12.1 cuda/12.3 cuda/12.4 cuda/11.8; do
+    if module load "$_m" 2>/dev/null; then
+        _CUDA_MOD="$_m"
+        echo "Loaded CUDA module: $_CUDA_MOD"
+        break
+    fi
+done
+if [ -z "$_CUDA_MOD" ]; then
+    echo "WARNING: no CUDA module loaded. PyTorch GPU support may not work."
+fi
 
 # ── Create conda environment ──────────────────────────────────────────────────
 ENV_NAME="deepfake-hyp"
