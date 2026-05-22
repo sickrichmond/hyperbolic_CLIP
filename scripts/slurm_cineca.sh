@@ -35,9 +35,9 @@ source $WORK/hyp_fine_tuning/bin/activate
 export HF_HOME=$WORK/hf_cache      # avoid filling home quota
 export TOKENIZERS_PARALLELISM=false
 
-REPO=$WORK/hyperbolic_CLIP
+REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP
 DATA=$WORK/iab_dataset
-CAPS=$WORK/iab_captions
+CAPS=$WORK/hyp_fine_tuning/iab_captions
 OUT=$WORK/checkpoints
 
 mkdir -p $OUT
