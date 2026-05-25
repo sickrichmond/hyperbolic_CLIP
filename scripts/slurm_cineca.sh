@@ -59,7 +59,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --lora_r        16 \
     --lora_alpha    32 \
     --batch_size    512 \
-    --num_epochs    3 \
+    --num_epochs    10 \
     --lr            5e-5 \
     --weight_decay  0.01 \
     --num_workers   8 \
