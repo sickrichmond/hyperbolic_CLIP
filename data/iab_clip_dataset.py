@@ -265,4 +265,5 @@ class IABCLIPDataset(Dataset):
             "is_real":        torch.tensor(is_real, dtype=torch.bool),
             "generator":      generator,
             "semantic":       semantic,
+            "raw_caption":    raw_cap,
         }
