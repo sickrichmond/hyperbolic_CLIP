@@ -26,6 +26,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 
@@ -115,6 +116,7 @@ def main():
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.num_epochs * steps_per_epoch, eta_min=1e-6
     )
+    scaler = GradScaler("cuda")
 
     # ── Training loop ─────────────────────────────────────────────────────────
     for epoch in range(1, args.num_epochs + 1):
@@ -127,17 +129,18 @@ def main():
             inp_ids = batch["input_ids"].to(device)
             att_msk = batch["attention_mask"].to(device)
 
-            img_emb, txt_emb = model(pixel, inp_ids, att_msk)
-            logit_scale = core.logit_scale
-            loss = clip_contrastive_loss(img_emb, txt_emb, logit_scale)
+            with autocast("cuda"):
+                img_emb, txt_emb = model(pixel, inp_ids, att_msk)
+                logit_scale = core.logit_scale
+                loss = clip_contrastive_loss(img_emb, txt_emb, logit_scale)
 
             optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(core.trainable_parameters(), 1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
-            # Clamp the raw logit_scale parameter so temperature stays reasonable.
-            # Without this it jumps to the exp-clamp ceiling in the first few steps.
             with torch.no_grad():
                 core.clip.base_model.model.logit_scale.clamp_(0, math.log(100))
 

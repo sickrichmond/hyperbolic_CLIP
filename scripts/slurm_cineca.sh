@@ -58,7 +58,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --clip_name     openai/clip-vit-large-patch14 \
     --lora_r        16 \
     --lora_alpha    32 \
-    --batch_size    1024 \
+    --batch_size    512 \
     --num_epochs    3 \
     --lr            5e-5 \
     --weight_decay  0.01 \
