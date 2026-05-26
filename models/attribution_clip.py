@@ -4,15 +4,19 @@ import torch.nn.functional as F
 from transformers import CLIPModel
 from peft import LoraConfig, get_peft_model
 
+from geometry.lorentz import exp_map0
+
 
 class AttributionCLIP(nn.Module):
     """
-    Full CLIP model (vision + text encoders) with LoRA adapters on both.
+    CLIP (vision + text) with LoRA on both encoders, plus a shared projection
+    head to the Lorentz model of hyperbolic space.
 
-    Returns L2-normalised embeddings in the shared CLIP space.
-    No hyperbolic projection — attribution is done via cosine similarity
-    to static text anchors (Stage 1).  Hyperbolic / entailment-cone
-    projection is added in Stage 2 on top of this model.
+    Image and text are encoded through CLIP+LoRA into the shared CLIP space,
+    then a small MLP head produces tangent vectors at the origin which are
+    lifted onto the hyperboloid by exp_map0. The same head is used for both
+    modalities so that image and text-anchor embeddings live in the same
+    hyperbolic space and entailment cones can be computed between them.
     """
 
     def __init__(
@@ -21,16 +25,18 @@ class AttributionCLIP(nn.Module):
         lora_r: int = 8,
         lora_alpha: int = 16,
         lora_dropout: float = 0.1,
+        hyperbolic_dim: int = 128,
+        curv: float = 1.0,
+        init_scale: float = 0.1,
     ):
         super().__init__()
-        self.clip = CLIPModel.from_pretrained(clip_name, use_safetensors=True)
+        self.curv = curv
+        self.hyperbolic_dim = hyperbolic_dim
 
-        # Freeze everything; LoRA will re-enable gradients for its own params.
+        self.clip = CLIPModel.from_pretrained(clip_name, use_safetensors=True)
         for p in self.clip.parameters():
             p.requires_grad = False
 
-        # Apply LoRA to q_proj and v_proj in both vision and text transformers.
-        # get_peft_model finds all matching layer names across the full model.
         lora_cfg = LoraConfig(
             r=lora_r,
             lora_alpha=lora_alpha,
@@ -40,43 +46,64 @@ class AttributionCLIP(nn.Module):
         )
         self.clip = get_peft_model(self.clip, lora_cfg)
 
-        # Unfreeze logit_scale so temperature adapts during training.
-        self.clip.base_model.model.logit_scale.requires_grad_(True)
+        clip_dim = self.clip.base_model.model.config.projection_dim
+        self.projection = nn.Sequential(
+            nn.Linear(clip_dim, clip_dim),
+            nn.GELU(),
+            nn.Linear(clip_dim, hyperbolic_dim),
+        )
+        # Small init so initial tangent norms stay moderate; otherwise
+        # sinh(||v||) inside exp_map0 blows up immediately.
+        with torch.no_grad():
+            self.projection[-1].weight.mul_(init_scale)
+            if self.projection[-1].bias is not None:
+                self.projection[-1].bias.zero_()
 
-    # ── Encoding ──────────────────────────────────────────────────────────────
+    # ── CLIP-space encoding (L2-normalised, in shared CLIP space) ─────────────
 
-    def encode_image(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """Returns L2-normalised image embeddings, shape (B, D)."""
-        # Call sub-modules directly: PEFT doesn't proxy get_image_features correctly
-        # on CLIPModel (returns raw BaseModelOutputWithPooling instead of the tensor).
+    def _clip_image(self, pixel_values: torch.Tensor) -> torch.Tensor:
         vision_out = self.clip.vision_model(pixel_values=pixel_values)
         feats = self.clip.visual_projection(vision_out.pooler_output)
         return F.normalize(feats, dim=-1)
 
-    def encode_text(
-        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
-    ) -> torch.Tensor:
-        """Returns L2-normalised text embeddings, shape (B, D)."""
-        text_out = self.clip.text_model(
-            input_ids=input_ids, attention_mask=attention_mask
-        )
+    def _clip_text(self, input_ids: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        text_out = self.clip.text_model(input_ids=input_ids, attention_mask=attention_mask)
         feats = self.clip.text_projection(text_out.pooler_output)
         return F.normalize(feats, dim=-1)
 
-    def forward(
-        self,
-        pixel_values: torch.Tensor,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
+    # ── Hyperbolic projection ────────────────────────────────────────────────
+
+    def to_hyperbolic(self, clip_emb: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """clip_emb: (B, D_clip). Returns (x_hyp, tangent), both (B, D_hyp).
+
+        Forces fp32 throughout: sinh/acosh/asin in the hyperbolic ops are unstable
+        under fp16 autocast and easily produce NaN.
+        """
+        with torch.amp.autocast("cuda", enabled=False):
+            clip_emb = clip_emb.float()
+            tangent = self.projection(clip_emb)
+            x_hyp = exp_map0(tangent, curv=self.curv)
+        return x_hyp, tangent
+
+    def encode_image(self, pixel_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.to_hyperbolic(self._clip_image(pixel_values))
+
+    def encode_text(
+        self, input_ids: torch.Tensor, attention_mask: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns (image_embeds, text_embeds), both L2-normalised."""
-        return self.encode_image(pixel_values), self.encode_text(input_ids, attention_mask)
+        return self.to_hyperbolic(self._clip_text(input_ids, attention_mask))
+
+    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+        """
+        DataParallel-friendly forward: only image branch.
+        Returns image hyperbolic embedding (B, D_hyp).
+        Encode anchors separately via encode_text() on the primary GPU —
+        they have shape (K, *) not (B, *), so they can't be split by DataParallel.
+        """
+        x_hyp, _ = self.encode_image(pixel_values)
+        return x_hyp
 
     # ── Convenience ───────────────────────────────────────────────────────────
-
-    @property
-    def logit_scale(self) -> torch.Tensor:
-        return self.clip.base_model.model.logit_scale.exp().clamp(max=100)
 
     def trainable_parameters(self) -> list[nn.Parameter]:
         return [p for p in self.parameters() if p.requires_grad]
@@ -86,5 +113,6 @@ class AttributionCLIP(nn.Module):
         trainable = sum(p.numel() for p in self.trainable_parameters())
         print(
             f"AttributionCLIP: {trainable:,} / {total:,} params trainable "
-            f"({100 * trainable / total:.2f}%)"
+            f"({100 * trainable / total:.2f}%)  "
+            f"hyperbolic_dim={self.hyperbolic_dim}, curv={self.curv}"
         )

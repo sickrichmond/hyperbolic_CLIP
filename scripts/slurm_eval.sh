@@ -26,7 +26,9 @@ python -m tests.eval_attribution \
     --checkpoint   $WORK/checkpoints/attribution_FLUX_vitl14.pt \
     --dataset_path $WORK/iab_dataset \
     --captions_dir $WORK/hyp_fine_tuning/iab_captions \
-    --generators   FLUX real \
+    --generators   real FLUX \
     --semantics    COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
+    --split        val \
+    --val_frac     0.2 \
     --batch_size   256 \
     --num_workers  4

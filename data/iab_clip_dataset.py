@@ -162,9 +162,25 @@ class IABCLIPDataset(Dataset):
         max_per_class: Optional[int] = None,
         caption_real: str = CAPTION_REAL,
         caption_fake: str = CAPTION_FAKE,
+        split: str = "all",
+        val_frac: float = 0.2,
+        seed: int = 42,
     ):
+        """
+        split: "train" | "val" | "all"
+            - "all": every captioned sample
+            - "train": 1 - val_frac of samples per (generator, semantic) class
+            - "val":  val_frac of samples per (generator, semantic) class
+            Deterministic shuffle by (img_path, seed) ensures the same split
+            across runs.
+        """
+        if split not in {"train", "val", "all"}:
+            raise ValueError(f"split must be train/val/all, got {split!r}")
         self.caption_real = caption_real
         self.caption_fake = caption_fake
+        self.split = split
+        self.val_frac = val_frac
+        self.seed = seed
         caps_p = Path(captions_dir)
         root_p = Path(root)
 
@@ -191,10 +207,8 @@ class IABCLIPDataset(Dataset):
             self._fake_idx[prefix] = _load_by_index(caps_p, csv_name, cap_col)
 
         # Walk images — keep only samples that have a caption.
-        # Real images: 2000 per class but captions cover only 1000 (the ones
-        # that were selected to generate the synthetic counterparts).
-        # Dropping uncaptioned samples ensures every training example carries
-        # meaningful attribution-augmented text.
+        # Then deterministically split into train/val per (generator, semantic).
+        import random
         self.samples: list[tuple[Path, str, str]] = []
         n_dropped = 0
         for gen in generators:
@@ -205,14 +219,27 @@ class IABCLIPDataset(Dataset):
                     continue
                 imgs = sorted(p for p in img_dir.iterdir()
                                if p.suffix in _IMAGE_EXTS)
+                # Filter to captioned samples
+                captioned = []
                 for p in imgs:
                     if self._get_raw_caption_static(p, gen, sem):
-                        self.samples.append((p, gen, sem))
+                        captioned.append(p)
                     else:
                         n_dropped += 1
-                    if max_per_class is not None and \
-                            sum(1 for _, g, s in self.samples if g == gen and s == sem) >= max_per_class:
-                        break
+                # Deterministic shuffle, then split
+                rng = random.Random(f"{seed}:{gen}:{sem}")
+                rng.shuffle(captioned)
+                n_val = int(round(len(captioned) * val_frac))
+                if split == "train":
+                    chosen = captioned[n_val:]
+                elif split == "val":
+                    chosen = captioned[:n_val]
+                else:  # "all"
+                    chosen = captioned
+                if max_per_class is not None:
+                    chosen = chosen[:max_per_class]
+                for p in chosen:
+                    self.samples.append((p, gen, sem))
 
         self.processor = CLIPImageProcessor.from_pretrained(processor_name)
         self.tokenizer = CLIPTokenizer.from_pretrained(processor_name)
@@ -220,7 +247,7 @@ class IABCLIPDataset(Dataset):
         n_real = sum(1 for _, g, _ in self.samples if g == "real")
         n_fake = len(self.samples) - n_real
         print(
-            f"\nIABCLIPDataset: {len(self.samples)} samples "
+            f"\nIABCLIPDataset[{split}]: {len(self.samples)} samples "
             f"({n_real} real, {n_fake} fake)"
             + (f" — dropped {n_dropped} without caption" if n_dropped else "")
         )
