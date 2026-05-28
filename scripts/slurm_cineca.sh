@@ -63,7 +63,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --lora_alpha      32 \
     --hyperbolic_dim  128 \
     --curv            1.0 \
-    --margin          0.1 \
+    --min_radius      0.5 \
+    --margin          0.3 \
     --lambda_neg      1.0 \
     --batch_size      256 \
     --num_epochs      10 \
@@ -71,6 +72,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --weight_decay    0.01 \
     --val_frac        0.2 \
     --num_workers     8 \
-    --output          $OUT/attribution_FLUX_vitl14.pt
+    --output          $OUT/attribution_FLUX_vitl14_narrow.pt
 
 echo "Done: $OUT/attribution_FLUX_vitl14.pt"
