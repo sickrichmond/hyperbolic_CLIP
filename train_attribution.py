@@ -74,6 +74,10 @@ def parse_args():
     p.add_argument("--min_radius",     type=float, default=0.1)
     p.add_argument("--margin",         type=float, default=0.1)
     p.add_argument("--lambda_neg",     type=float, default=1.0)
+    p.add_argument("--lambda_norm",    type=float, default=0.0,
+                   help="Weight of the anchor-norm regulariser (0 disables it).")
+    p.add_argument("--target_norm",    type=float, default=0.0,
+                   help="Target ‖t_anchor‖. With curv=1, ψ ≈ π/8 at ‖t‖≈2.6, π/16 at ‖t‖≈5.")
     p.add_argument("--batch_size",     type=int,   default=256)
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
@@ -219,6 +223,7 @@ def main():
     cone_loss = EntailmentConeLoss(
         curv=args.curv, min_radius=args.min_radius,
         margin=args.margin, lambda_neg=args.lambda_neg,
+        lambda_norm=args.lambda_norm, target_norm=args.target_norm,
     )
 
     # Tokenized anchors stay constant; only the text-encoder weights change.
@@ -235,9 +240,9 @@ def main():
     # ── Training loop ─────────────────────────────────────────────────────────
     for epoch in range(1, args.num_epochs + 1):
         model.train()
-        sums = {"loss": 0.0, "loss_pos": 0.0, "loss_neg": 0.0,
+        sums = {"loss": 0.0, "loss_pos": 0.0, "loss_neg": 0.0, "loss_norm": 0.0,
                 "cone_acc": 0.0, "inside_pos": 0.0,
-                "mean_psi": 0.0, "mean_xi_pos": 0.0}
+                "mean_psi": 0.0, "mean_xi_pos": 0.0, "mean_anc_norm": 0.0}
         bar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.num_epochs}")
         for step, batch in enumerate(bar, 1):
             pixel = batch["pixel_values"].to(device)
@@ -258,24 +263,28 @@ def main():
             scheduler.step()
 
             sums["loss"]        += loss.item()
-            for k in ("loss_pos", "loss_neg", "cone_acc", "inside_pos",
-                      "mean_psi", "mean_xi_pos"):
+            for k in ("loss_pos", "loss_neg", "loss_norm", "cone_acc", "inside_pos",
+                      "mean_psi", "mean_xi_pos", "mean_anc_norm"):
                 sums[k] += stats[k].item()
             if step % 25 == 0 or step == steps_per_epoch:
                 bar.set_postfix(
                     loss=f"{sums['loss']/step:.3f}",
                     pos=f"{sums['loss_pos']/step:.3f}",
                     neg=f"{sums['loss_neg']/step:.3f}",
+                    norm=f"{sums['loss_norm']/step:.3f}",
                     acc=f"{sums['cone_acc']/step:.3f}",
                     psi=f"{sums['mean_psi']/step:.3f}",
+                    anc=f"{sums['mean_anc_norm']/step:.2f}",
                 )
 
         avg = {k: v / steps_per_epoch for k, v in sums.items()}
         print(f"\nEpoch {epoch}: train loss={avg['loss']:.4f} "
-              f"(pos={avg['loss_pos']:.4f} neg={avg['loss_neg']:.4f}) "
+              f"(pos={avg['loss_pos']:.4f} neg={avg['loss_neg']:.4f} "
+              f"norm={avg['loss_norm']:.4f}) "
               f"train cone_acc={100*avg['cone_acc']:.1f}%  "
               f"inside={100*avg['inside_pos']:.1f}%  "
               f"ψ̄={avg['mean_psi']:.3f}  ξ̄_pos={avg['mean_xi_pos']:.3f}  "
+              f"‖t̄‖={avg['mean_anc_norm']:.2f}  "
               f"lr={scheduler.get_last_lr()[0]:.2e}")
 
         # ── Validation ───────────────────────────────────────────────────────

@@ -33,12 +33,24 @@ class EntailmentConeLoss(nn.Module):
         min_radius: float = 0.1,
         margin: float = 0.1,
         lambda_neg: float = 1.0,
+        lambda_norm: float = 0.0,
+        target_norm: float = 0.0,
     ):
+        """
+        lambda_norm, target_norm: optional anchor-norm regulariser.
+          L_norm = mean_c max(0, target_norm - ‖t_c‖)²
+        Forces anchor space-components to grow past target_norm. This breaks the
+        half_aperture clamp (which triggers when ‖t‖ < 2·min_radius / √curv) and
+        actually narrows the entailment cones. With lambda_norm=0 (default) the
+        term is skipped.
+        """
         super().__init__()
         self.curv = curv
         self.min_radius = min_radius
         self.margin = margin
         self.lambda_neg = lambda_neg
+        self.lambda_norm = lambda_norm
+        self.target_norm = target_norm
 
     def forward(
         self,
@@ -71,7 +83,14 @@ class EntailmentConeLoss(nn.Module):
         viol_neg = torch.clamp(psi_b + self.margin - xi, min=0.0)
         loss_neg = viol_neg[neg_mask].mean() if neg_mask.any() else torch.tensor(0.0, device=device)
 
-        loss = loss_pos.mean() + self.lambda_neg * loss_neg
+        # Anchor norm regulariser: pull ‖t_c‖ above target so half_aperture is no longer clamped.
+        anc_norms = x_anc.norm(dim=-1)                                  # (K,)
+        if self.lambda_norm > 0 and self.target_norm > 0:
+            loss_norm = torch.clamp(self.target_norm - anc_norms, min=0.0).pow(2).mean()
+        else:
+            loss_norm = torch.tensor(0.0, device=device)
+
+        loss = loss_pos.mean() + self.lambda_neg * loss_neg + self.lambda_norm * loss_norm
 
         with torch.no_grad():
             inside = (xi_pos < psi_pos).float().mean()                 # in-cone rate for positives
@@ -81,10 +100,12 @@ class EntailmentConeLoss(nn.Module):
         stats = {
             "loss_pos":     loss_pos.mean().detach(),
             "loss_neg":     loss_neg.detach() if isinstance(loss_neg, torch.Tensor) else torch.tensor(0.0, device=device),
+            "loss_norm":    loss_norm.detach(),
             "inside_pos":   inside.detach(),
             "cone_acc":     acc.detach(),
             "mean_psi":     psi.mean().detach(),
             "mean_xi_pos":  xi_pos.mean().detach(),
+            "mean_anc_norm": anc_norms.mean().detach(),
         }
         return loss, stats
 
