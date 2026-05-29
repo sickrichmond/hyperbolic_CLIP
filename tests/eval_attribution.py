@@ -141,6 +141,34 @@ def main():
         print(f"  {c:10s}: {100*per_class[c]:5.1f}%  ({hits}/{len(idx)})")
     print(f"  {'balanced avg':10s}: {100 * sum(per_class.values()) / len(per_class):5.1f}%")
 
+    # ── Confusion matrix + precision / recall / F1 (per class) ───────────────
+    print("\n--- Confusion matrix (rows = ground truth, cols = prediction) ---")
+    K = len(class_names)
+    cmat = [[0] * K for _ in range(K)]
+    name_to_idx = {n: i for i, n in enumerate(class_names)}
+    for pred, gt in zip(all_pred, all_gt):
+        cmat[name_to_idx[gt]][name_to_idx[pred]] += 1
+    header = "             " + "  ".join(f"{c:>8s}" for c in class_names)
+    print(header)
+    for i, c in enumerate(class_names):
+        row = f"  gt={c:8s} " + "  ".join(f"{cmat[i][j]:>8d}" for j in range(K))
+        print(row)
+
+    print("\n--- Precision / Recall / F1 per class ---")
+    p_list, r_list, f_list = [], [], []
+    for c in class_names:
+        i = name_to_idx[c]
+        tp = cmat[i][i]
+        fp = sum(cmat[r][i] for r in range(K) if r != i)   # predicted c but gt was something else
+        fn = sum(cmat[i][r] for r in range(K) if r != i)   # gt was c but predicted something else
+        precision = tp / (tp + fp) if (tp + fp) else 0.0
+        recall    = tp / (tp + fn) if (tp + fn) else 0.0
+        f1        = 2 * precision * recall / (precision + recall) if (precision + recall) else 0.0
+        p_list.append(precision); r_list.append(recall); f_list.append(f1)
+        print(f"  {c:10s}: P={100*precision:5.1f}%  R={100*recall:5.1f}%  F1={100*f1:5.1f}%  "
+              f"(TP={tp} FP={fp} FN={fn})")
+    print(f"  {'macro avg':10s}: P={100*sum(p_list)/K:5.1f}%  R={100*sum(r_list)/K:5.1f}%  F1={100*sum(f_list)/K:5.1f}%")
+
     print("\n--- Per-semantic accuracy ---")
     by_sem: dict[str, list[bool]] = {}
     for pred, gt, sem in zip(all_pred, all_gt, all_sem):
