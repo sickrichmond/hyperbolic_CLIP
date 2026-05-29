@@ -165,14 +165,18 @@ class IABCLIPDataset(Dataset):
         split: str = "all",
         val_frac: float = 0.2,
         seed: int = 42,
+        include_uncaptioned: bool = False,
     ):
         """
         split: "train" | "val" | "all"
-            - "all": every captioned sample
-            - "train": 1 - val_frac of samples per (generator, semantic) class
-            - "val":  val_frac of samples per (generator, semantic) class
-            Deterministic shuffle by (img_path, seed) ensures the same split
-            across runs.
+            - "all":   every captioned sample (plus uncaptioned if include_uncaptioned)
+            - "train": 1 - val_frac of CAPTIONED samples per (generator, semantic)
+            - "val":   val_frac of captioned samples per class, plus ALL
+                       uncaptioned samples of that class when include_uncaptioned=True
+                       (these never appear in train since the hierarchical loss
+                       needs a caption — using them only at eval is loss-free).
+
+        Deterministic shuffle ensures the same split across runs.
         """
         if split not in {"train", "val", "all"}:
             raise ValueError(f"split must be train/val/all, got {split!r}")
@@ -181,6 +185,7 @@ class IABCLIPDataset(Dataset):
         self.split = split
         self.val_frac = val_frac
         self.seed = seed
+        self.include_uncaptioned = include_uncaptioned
         caps_p = Path(captions_dir)
         root_p = Path(root)
 
@@ -206,11 +211,13 @@ class IABCLIPDataset(Dataset):
                 loaded_csvs.add(csv_name)
             self._fake_idx[prefix] = _load_by_index(caps_p, csv_name, cap_col)
 
-        # Walk images — keep only samples that have a caption.
-        # Then deterministically split into train/val per (generator, semantic).
+        # Walk images, partition by caption presence, deterministically split
+        # captioned ones into train/val. Uncaptioned (almost always real images
+        # whose Qwen caption wasn't generated) optionally augment the val set.
         import random
         self.samples: list[tuple[Path, str, str]] = []
         n_dropped = 0
+        n_uncap_in_val = 0
         for gen in generators:
             for sem in semantics:
                 img_dir = _img_dir(root_p, gen, sem)
@@ -219,14 +226,13 @@ class IABCLIPDataset(Dataset):
                     continue
                 imgs = sorted(p for p in img_dir.iterdir()
                                if p.suffix in _IMAGE_EXTS)
-                # Filter to captioned samples
-                captioned = []
+                captioned, uncaptioned = [], []
                 for p in imgs:
                     if self._get_raw_caption_static(p, gen, sem):
                         captioned.append(p)
                     else:
-                        n_dropped += 1
-                # Deterministic shuffle, then split
+                        uncaptioned.append(p)
+
                 rng = random.Random(f"{seed}:{gen}:{sem}")
                 rng.shuffle(captioned)
                 n_val = int(round(len(captioned) * val_frac))
@@ -234,8 +240,18 @@ class IABCLIPDataset(Dataset):
                     chosen = captioned[n_val:]
                 elif split == "val":
                     chosen = captioned[:n_val]
+                    if include_uncaptioned:
+                        chosen = chosen + uncaptioned
+                        n_uncap_in_val += len(uncaptioned)
+                    else:
+                        n_dropped += len(uncaptioned)
                 else:  # "all"
-                    chosen = captioned
+                    chosen = captioned + (uncaptioned if include_uncaptioned else [])
+                    if not include_uncaptioned:
+                        n_dropped += len(uncaptioned)
+                # For train/all, uncaptioned that we DID NOT include count as dropped.
+                if split == "train":
+                    n_dropped += len(uncaptioned)
                 if max_per_class is not None:
                     chosen = chosen[:max_per_class]
                 for p in chosen:
@@ -246,11 +262,12 @@ class IABCLIPDataset(Dataset):
 
         n_real = sum(1 for _, g, _ in self.samples if g == "real")
         n_fake = len(self.samples) - n_real
-        print(
-            f"\nIABCLIPDataset[{split}]: {len(self.samples)} samples "
-            f"({n_real} real, {n_fake} fake)"
-            + (f" — dropped {n_dropped} without caption" if n_dropped else "")
-        )
+        msg = f"\nIABCLIPDataset[{split}]: {len(self.samples)} samples ({n_real} real, {n_fake} fake)"
+        if n_uncap_in_val:
+            msg += f" — incl. {n_uncap_in_val} uncaptioned (eval-only)"
+        if n_dropped:
+            msg += f" — dropped {n_dropped} without caption"
+        print(msg)
 
     def _get_raw_caption_static(self, img_path: Path, generator: str, semantic: str) -> str:
         """Caption lookup usable during __init__ before self.samples is complete."""

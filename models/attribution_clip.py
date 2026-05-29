@@ -93,15 +93,27 @@ class AttributionCLIP(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.to_hyperbolic(self._clip_text(input_ids, attention_mask))
 
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        caption_ids: torch.Tensor | None = None,
+        caption_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
-        DataParallel-friendly forward: only image branch.
-        Returns image hyperbolic embedding (B, D_hyp).
-        Encode anchors separately via encode_text() on the primary GPU —
-        they have shape (K, *) not (B, *), so they can't be split by DataParallel.
+        DataParallel-friendly forward.
+
+        Image-only mode (caption_ids is None): returns x_img (B, D_hyp).
+        Hierarchical mode: returns (x_img, x_cap), both (B, D_hyp). Both inputs
+        are sliced along dim 0 by DataParallel — same B for both.
+
+        Anchors are NOT processed here: they have shape (K, *) not (B, *) and
+        must be encoded separately on the primary GPU via encode_text().
         """
-        x_hyp, _ = self.encode_image(pixel_values)
-        return x_hyp
+        x_img, _ = self.encode_image(pixel_values)
+        if caption_ids is None:
+            return x_img
+        x_cap, _ = self.encode_text(caption_ids, caption_mask)
+        return x_img, x_cap
 
     # ── Convenience ───────────────────────────────────────────────────────────
 

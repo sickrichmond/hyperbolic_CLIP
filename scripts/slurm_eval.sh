@@ -23,7 +23,7 @@ export TRANSFORMERS_OFFLINE=1
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
 python -m tests.eval_attribution \
-    --checkpoint   $WORK/checkpoints/attribution_FLUX_vitl14_strict.pt \
+    --checkpoint   $WORK/checkpoints/attribution_FLUX_vitl14_hier.pt \
     --dataset_path $WORK/iab_dataset \
     --captions_dir $WORK/hyp_fine_tuning/iab_captions \
     --generators   real FLUX \

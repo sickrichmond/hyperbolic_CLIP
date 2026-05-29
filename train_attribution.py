@@ -74,6 +74,11 @@ def parse_args():
     p.add_argument("--min_radius",     type=float, default=0.1)
     p.add_argument("--margin",         type=float, default=0.1)
     p.add_argument("--lambda_neg",     type=float, default=1.0)
+    p.add_argument("--lambda_cap_in_class", type=float, default=0.0,
+                   help="Hierarchical: weight of caption-in-class-anchor cone term.")
+    p.add_argument("--lambda_img_in_cap",   type=float, default=0.0,
+                   help="Hierarchical: weight of image-in-own-caption cone term "
+                        "(batch negatives).")
     p.add_argument("--lambda_norm",    type=float, default=0.0,
                    help="Weight of the anchor-norm regulariser (0 disables it).")
     p.add_argument("--target_norm",    type=float, default=0.0,
@@ -182,6 +187,7 @@ def main():
         split="val",
         val_frac=args.val_frac,
         seed=args.seed,
+        include_uncaptioned=True,   # eval is image-only — use every available image
     )
 
     sampler = make_balanced_sampler(train_ds)
@@ -223,8 +229,14 @@ def main():
     cone_loss = EntailmentConeLoss(
         curv=args.curv, min_radius=args.min_radius,
         margin=args.margin, lambda_neg=args.lambda_neg,
+        lambda_cap_in_class=args.lambda_cap_in_class,
+        lambda_img_in_cap=args.lambda_img_in_cap,
         lambda_norm=args.lambda_norm, target_norm=args.target_norm,
     )
+    use_caps = (args.lambda_cap_in_class > 0 or args.lambda_img_in_cap > 0)
+    if use_caps:
+        print(f"Hierarchical mode: λ_cap_in_class={args.lambda_cap_in_class} "
+              f"λ_img_in_cap={args.lambda_img_in_cap}")
 
     # Tokenized anchors stay constant; only the text-encoder weights change.
     tokenizer = CLIPTokenizer.from_pretrained(args.clip_name)
@@ -238,21 +250,33 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Training loop ─────────────────────────────────────────────────────────
+    base_keys = ["loss_img_in_cls", "loss_cap_in_cls", "loss_img_in_cap", "loss_norm",
+                 "cone_acc", "inside_img", "mean_psi_anc", "mean_xi_img_anc",
+                 "mean_anc_norm"]
+    cap_keys  = ["inside_cap", "inside_img_cap", "mean_psi_cap",
+                 "mean_xi_cap_anc", "mean_xi_img_cap", "mean_cap_norm"]
+
     for epoch in range(1, args.num_epochs + 1):
         model.train()
-        sums = {"loss": 0.0, "loss_pos": 0.0, "loss_neg": 0.0, "loss_norm": 0.0,
-                "cone_acc": 0.0, "inside_pos": 0.0,
-                "mean_psi": 0.0, "mean_xi_pos": 0.0, "mean_anc_norm": 0.0}
+        sums = {"loss": 0.0, **{k: 0.0 for k in base_keys}}
+        if use_caps:
+            sums.update({k: 0.0 for k in cap_keys})
         bar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.num_epochs}")
         for step, batch in enumerate(bar, 1):
-            pixel = batch["pixel_values"].to(device)
-            labels = torch.tensor([name_to_idx[g] for g in batch["generator"]],
-                                  device=device, dtype=torch.long)
+            pixel    = batch["pixel_values"].to(device)
+            cap_ids  = batch["input_ids"].to(device)        # already tokenized augmented caption
+            cap_mask = batch["attention_mask"].to(device)
+            labels   = torch.tensor([name_to_idx[g] for g in batch["generator"]],
+                                    device=device, dtype=torch.long)
 
             with autocast("cuda"):
-                x_img = model(pixel)                             # DataParallel splits batch across GPUs
-                x_anc, _ = core.encode_text(anchor_ids, anchor_mask)  # K=2, fast, primary GPU
-            loss, stats = cone_loss(x_img, x_anc, labels)
+                if use_caps:
+                    x_img, x_cap = model(pixel, cap_ids, cap_mask)
+                else:
+                    x_img = model(pixel)
+                    x_cap = None
+                x_anc, _ = core.encode_text(anchor_ids, anchor_mask)
+            loss, stats = cone_loss(x_img, x_anc, labels, x_cap=x_cap)
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -262,30 +286,46 @@ def main():
             scaler.update()
             scheduler.step()
 
-            sums["loss"]        += loss.item()
-            for k in ("loss_pos", "loss_neg", "loss_norm", "cone_acc", "inside_pos",
-                      "mean_psi", "mean_xi_pos", "mean_anc_norm"):
+            sums["loss"] += loss.item()
+            for k in base_keys:
                 sums[k] += stats[k].item()
+            if use_caps:
+                for k in cap_keys:
+                    sums[k] += stats[k].item()
+
             if step % 25 == 0 or step == steps_per_epoch:
-                bar.set_postfix(
-                    loss=f"{sums['loss']/step:.3f}",
-                    pos=f"{sums['loss_pos']/step:.3f}",
-                    neg=f"{sums['loss_neg']/step:.3f}",
-                    norm=f"{sums['loss_norm']/step:.3f}",
-                    acc=f"{sums['cone_acc']/step:.3f}",
-                    psi=f"{sums['mean_psi']/step:.3f}",
-                    anc=f"{sums['mean_anc_norm']/step:.2f}",
-                )
+                post = {
+                    "loss": f"{sums['loss']/step:.3f}",
+                    "ic":   f"{sums['loss_img_in_cls']/step:.3f}",
+                    "acc":  f"{sums['cone_acc']/step:.3f}",
+                    "ψa":   f"{sums['mean_psi_anc']/step:.3f}",
+                }
+                if use_caps:
+                    post["cc"] = f"{sums['loss_cap_in_cls']/step:.3f}"
+                    post["ip"] = f"{sums['loss_img_in_cap']/step:.3f}"
+                    post["ψc"] = f"{sums['mean_psi_cap']/step:.3f}"
+                bar.set_postfix(**post)
 
         avg = {k: v / steps_per_epoch for k, v in sums.items()}
-        print(f"\nEpoch {epoch}: train loss={avg['loss']:.4f} "
-              f"(pos={avg['loss_pos']:.4f} neg={avg['loss_neg']:.4f} "
-              f"norm={avg['loss_norm']:.4f}) "
-              f"train cone_acc={100*avg['cone_acc']:.1f}%  "
-              f"inside={100*avg['inside_pos']:.1f}%  "
-              f"ψ̄={avg['mean_psi']:.3f}  ξ̄_pos={avg['mean_xi_pos']:.3f}  "
-              f"‖t̄‖={avg['mean_anc_norm']:.2f}  "
-              f"lr={scheduler.get_last_lr()[0]:.2e}")
+        line1 = (f"\nEpoch {epoch}: train loss={avg['loss']:.4f}  "
+                 f"L_img_cls={avg['loss_img_in_cls']:.4f}")
+        if use_caps:
+            line1 += (f"  L_cap_cls={avg['loss_cap_in_cls']:.4f}"
+                      f"  L_img_cap={avg['loss_img_in_cap']:.4f}")
+        line1 += f"  L_norm={avg['loss_norm']:.4f}  lr={scheduler.get_last_lr()[0]:.2e}"
+        print(line1)
+        print(f"           cone_acc={100*avg['cone_acc']:.1f}%  "
+              f"inside_img={100*avg['inside_img']:.1f}%  "
+              f"ψ_anc={avg['mean_psi_anc']:.3f}  "
+              f"ξ_img→anc={avg['mean_xi_img_anc']:.3f}  "
+              f"‖t̄_anc‖={avg['mean_anc_norm']:.2f}")
+        if use_caps:
+            print(f"           inside_cap={100*avg['inside_cap']:.1f}%  "
+                  f"inside_img_in_cap={100*avg['inside_img_cap']:.1f}%  "
+                  f"ψ_cap={avg['mean_psi_cap']:.3f}  "
+                  f"ξ_cap→anc={avg['mean_xi_cap_anc']:.3f}  "
+                  f"ξ_img→cap={avg['mean_xi_img_cap']:.3f}  "
+                  f"‖t̄_cap‖={avg['mean_cap_norm']:.2f}")
 
         # ── Validation ───────────────────────────────────────────────────────
         val = run_validation(core, val_loader, anchor_texts, tokenizer,
