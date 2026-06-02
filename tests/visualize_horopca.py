@@ -45,13 +45,14 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--embeddings", required=True, help=".npz from extract_embeddings.py")
-    p.add_argument("--output",     required=True, help="PNG file to write")
+    p.add_argument("--output_prefix", required=True,
+                   help="Prefix for the two PNGs produced; "
+                        "<prefix>_by_class.png and <prefix>_by_semantic.png are written.")
     p.add_argument("--n_pca",      type=int,   default=8,
                    help="Output dimension of HoroPCA before UMAP.")
     p.add_argument("--n_neighbors", type=int,  default=30, help="UMAP n_neighbors.")
     p.add_argument("--min_dist",    type=float, default=0.1, help="UMAP min_dist.")
     p.add_argument("--seed",        type=int,   default=42)
-    p.add_argument("--color_by",    choices=["class", "semantic"], default="class")
     p.add_argument("--max_points",  type=int, default=3000,
                    help="Subsample to this many points before HoroPCA. HoroPCA "
                         "builds (N, N) bilinear matrices internally, so memory "
@@ -151,27 +152,39 @@ def main():
     Y_imgs    = Y_all[:len(Z_imgs)]
     Y_anchors = Y_all[len(Z_imgs):]
 
-    # ─── 3D scatter plot (HySAC paper style) ─────────────────────────────────
+    # ─── Two plots from the SAME UMAP layout ─────────────────────────────────
+    out_prefix = Path(args.output_prefix)
+    out_prefix.parent.mkdir(parents=True, exist_ok=True)
+
+    # By class (real vs FLUX) — HySAC palette
+    if len(class_names) == 2:
+        palette = {"real": "#E53935", "FLUX": "#7E57C2"}
+        class_colors = [palette.get(n, plt.get_cmap("tab10")(i))
+                        for i, n in enumerate(class_names)]
+    else:
+        class_colors = [plt.get_cmap("tab10")(i) for i in range(len(class_names))]
+    _plot_3d(Y_imgs, Y_anchors,
+             groups=labels, group_names=class_names, colors=class_colors,
+             class_names=class_names, anchor_colors=class_colors,
+             out=out_prefix.with_name(out_prefix.name + "_by_class.png"))
+
+    # By semantic (10 classes)
+    uniq_sem = sorted(set(semantics))
+    sem_to_idx = {s: i for i, s in enumerate(uniq_sem)}
+    sem_groups = np.array([sem_to_idx[s] for s in semantics])
+    sem_cmap = plt.get_cmap("tab10" if len(uniq_sem) <= 10 else "tab20")
+    sem_colors = [sem_cmap(i) for i in range(len(uniq_sem))]
+    _plot_3d(Y_imgs, Y_anchors,
+             groups=sem_groups, group_names=uniq_sem, colors=sem_colors,
+             class_names=class_names, anchor_colors=["#444"] * len(class_names),
+             out=out_prefix.with_name(out_prefix.name + "_by_semantic.png"))
+
+
+def _plot_3d(Y_imgs, Y_anchors, *, groups, group_names, colors,
+             class_names, anchor_colors, out: Path) -> None:
+    """Render a single 3D scatter and save it to `out`."""
     fig = plt.figure(figsize=(11, 9))
     ax = fig.add_subplot(111, projection="3d")
-
-    if args.color_by == "class":
-        groups, group_names = labels, class_names
-        # Match the HySAC figure: red = real, purple = synthetic.
-        # Fallback to tab10 if more than 2 classes.
-        if len(class_names) == 2:
-            palette = {"real": "#E53935", "FLUX": "#7E57C2"}
-            colors = [palette.get(n, plt.get_cmap("tab10")(i))
-                      for i, n in enumerate(class_names)]
-        else:
-            colors = [plt.get_cmap("tab10")(i) for i in range(len(class_names))]
-    else:
-        uniq_sem = sorted(set(semantics))
-        sem_to_idx = {s: i for i, s in enumerate(uniq_sem)}
-        groups = np.array([sem_to_idx[s] for s in semantics])
-        group_names = uniq_sem
-        cmap = plt.get_cmap("tab10" if len(uniq_sem) <= 10 else "tab20")
-        colors = [cmap(i) for i in range(len(uniq_sem))]
 
     for k, name in enumerate(group_names):
         mask = (groups == k)
@@ -179,12 +192,10 @@ def main():
                    s=6, alpha=0.55, color=colors[k],
                    label=f"{name} ({mask.sum()})", linewidth=0)
 
-    # Anchors as black-edged stars on top
     for k, name in enumerate(class_names):
-        c = colors[k] if args.color_by == "class" else "#444"
         ax.scatter(Y_anchors[k, 0], Y_anchors[k, 1], Y_anchors[k, 2],
                    marker="*", s=320, edgecolor="black", linewidth=1.5,
-                   color=c, depthshade=False,
+                   color=anchor_colors[k], depthshade=False,
                    label=f"anchor: {name}")
 
     ax.set_xlabel("UMAP Dimension 1")
@@ -197,9 +208,8 @@ def main():
     ax.legend(loc="upper left", fontsize=9, frameon=True)
     plt.tight_layout()
 
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=160)
+    plt.close(fig)
     print(f"Saved figure → {out}")
 
 

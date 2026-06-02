@@ -51,16 +51,10 @@ python -m tests.extract_embeddings \
     --num_workers  4 \
     --output       $EMB
 
-# ── 2. HoroPCA + UMAP, coloured by class (real vs FLUX) ──────────────────────
+# ── 2. HoroPCA + UMAP, produces both <prefix>_by_class.png and ──────────────
+#       <prefix>_by_semantic.png from the SAME embedding layout so the two
+#       plots are point-by-point comparable.
 python -m tests.visualize_horopca \
-    --embeddings $EMB \
-    --output     $FIG_DIR/val_hier_horopca_by_class.png \
-    --n_pca      8 \
-    --color_by   class
-
-# ── 3. Same, coloured by semantic class ──────────────────────────────────────
-python -m tests.visualize_horopca \
-    --embeddings $EMB \
-    --output     $FIG_DIR/val_hier_horopca_by_semantic.png \
-    --n_pca      8 \
-    --color_by   semantic
+    --embeddings    $EMB \
+    --output_prefix $FIG_DIR/val_hier_horopca \
+    --n_pca         8
