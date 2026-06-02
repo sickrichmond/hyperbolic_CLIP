@@ -84,15 +84,20 @@ def _patch_torch_solve():
 
 
 def run_horopca(x_ball: np.ndarray, n_components: int, seed: int) -> np.ndarray:
-    """Apply HoroPCA to Poincaré-ball points, return (N, n_components)."""
+    """Apply HoroPCA to Poincaré-ball points, return (N, n_components).
+
+    fit_optim runs hundreds of gradient steps with autograd through asinh/acosh.
+    On CPU this is very slow (>1h for N=3000) — we move everything to GPU when
+    available."""
     import torch
     _patch_torch_solve()
     from learning.pca import HoroPCA   # type: ignore  (lives in external/HoroPCA)
 
-    # Force everything to fp64 — HoroPCA's Minkowski ops mix dtypes internally
-    # and asinh/acosh in the hyperbolic primitives benefit from higher precision.
-    X = torch.as_tensor(x_ball, dtype=torch.float64)
-    pca = HoroPCA(dim=x_ball.shape[1], n_components=n_components).double()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Force fp64 — HoroPCA's Minkowski ops mix dtypes and asinh/acosh benefit
+    # from higher precision.
+    X = torch.as_tensor(x_ball, dtype=torch.float64, device=device)
+    pca = HoroPCA(dim=x_ball.shape[1], n_components=n_components).double().to(device)
     pca.fit(X, iterative=False, optim=True)
     with torch.no_grad():
         Z = pca.map_to_ball(X).cpu().numpy()
