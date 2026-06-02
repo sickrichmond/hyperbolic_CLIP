@@ -75,8 +75,10 @@ def run_horopca(x_ball: np.ndarray, n_components: int, seed: int) -> np.ndarray:
     import torch
     from learning.pca import HoroPCA   # type: ignore  (lives in external/HoroPCA)
 
+    # Force everything to fp64 — HoroPCA's Minkowski ops mix dtypes internally
+    # and asinh/acosh in the hyperbolic primitives benefit from higher precision.
     X = torch.as_tensor(x_ball, dtype=torch.float64)
-    pca = HoroPCA(dim=x_ball.shape[1], n_components=n_components)
+    pca = HoroPCA(dim=x_ball.shape[1], n_components=n_components).double()
     pca.fit(X, iterative=False, optim=True)
     Z = pca.map_to_ball(X).detach().cpu().numpy()
     return Z
