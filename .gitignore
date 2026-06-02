@@ -31,3 +31,11 @@ hf_cache/
 Thumbs.db
 
 claude_setup/
+
+# Cloned third-party repos (e.g. HoroPCA)
+external/
+
+# Embedding dumps and figures
+*.npz
+*.png
+*.pdf
