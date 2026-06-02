@@ -70,9 +70,21 @@ def lorentz_to_poincare(x_space: np.ndarray, curv: float) -> np.ndarray:
     return x_space / (x_time + 1.0 / np.sqrt(curv))
 
 
+def _patch_torch_solve():
+    """HoroPCA calls the removed torch.solve(B, A) → (solution, LU). Reimplement
+    it on top of torch.linalg.solve(A, B), which is the recommended replacement."""
+    import torch
+    if not getattr(torch, "_horopca_solve_patched", False):
+        def _solve(B, A):
+            return torch.linalg.solve(A, B), None
+        torch.solve = _solve
+        torch._horopca_solve_patched = True
+
+
 def run_horopca(x_ball: np.ndarray, n_components: int, seed: int) -> np.ndarray:
     """Apply HoroPCA to Poincaré-ball points, return (N, n_components)."""
     import torch
+    _patch_torch_solve()
     from learning.pca import HoroPCA   # type: ignore  (lives in external/HoroPCA)
 
     # Force everything to fp64 — HoroPCA's Minkowski ops mix dtypes internally
