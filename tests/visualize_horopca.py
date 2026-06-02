@@ -52,8 +52,10 @@ def parse_args():
     p.add_argument("--min_dist",    type=float, default=0.1, help="UMAP min_dist.")
     p.add_argument("--seed",        type=int,   default=42)
     p.add_argument("--color_by",    choices=["class", "semantic"], default="class")
-    p.add_argument("--max_points",  type=int, default=10000,
-                   help="Subsample to this many points before UMAP (speed).")
+    p.add_argument("--max_points",  type=int, default=3000,
+                   help="Subsample to this many points before HoroPCA. HoroPCA "
+                        "builds (N, N) bilinear matrices internally, so memory "
+                        "scales quadratically. Keep ≲ 5000 unless you have RAM.")
     return p.parse_args()
 
 
@@ -92,7 +94,8 @@ def run_horopca(x_ball: np.ndarray, n_components: int, seed: int) -> np.ndarray:
     X = torch.as_tensor(x_ball, dtype=torch.float64)
     pca = HoroPCA(dim=x_ball.shape[1], n_components=n_components).double()
     pca.fit(X, iterative=False, optim=True)
-    Z = pca.map_to_ball(X).detach().cpu().numpy()
+    with torch.no_grad():
+        Z = pca.map_to_ball(X).cpu().numpy()
     return Z
 
 
