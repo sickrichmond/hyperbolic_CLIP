@@ -32,10 +32,10 @@ export TRANSFORMERS_OFFLINE=1
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
 CKPT=$WORK/checkpoints/attribution_FLUX_vitl14_hier.pt
-EMB=$WORK/embeddings/val_hier.npz
-FIG_DIR=$WORK/figures
+EMB=$WORK/hyp_fine_tuning/embeddings/val_hier.npz
+FIG_DIR=$WORK/hyp_fine_tuning/figures
 
-mkdir -p $WORK/embeddings $FIG_DIR
+mkdir -p $WORK/hyp_fine_tuning/embeddings $FIG_DIR
 
 # ── 1. Extract embeddings (val split, image-only) ────────────────────────────
 python -m tests.extract_embeddings \
