@@ -73,7 +73,7 @@ def lorentz_to_poincare(x_space: np.ndarray, curv: float) -> np.ndarray:
 def run_horopca(x_ball: np.ndarray, n_components: int, seed: int) -> np.ndarray:
     """Apply HoroPCA to Poincaré-ball points, return (N, n_components)."""
     import torch
-    from horopca import HoroPCA   # type: ignore  (imported from cloned repo)
+    from learning.pca import HoroPCA   # type: ignore  (lives in external/HoroPCA)
 
     X = torch.as_tensor(x_ball, dtype=torch.float64)
     pca = HoroPCA(dim=x_ball.shape[1], n_components=n_components)
