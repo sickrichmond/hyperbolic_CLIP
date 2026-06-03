@@ -95,12 +95,15 @@ def parse_args():
 
 
 def make_balanced_sampler(dataset: IABCLIPDataset) -> WeightedRandomSampler:
-    is_real = [g == "real" for _, g, _ in dataset.samples]
-    n_real = sum(is_real)
-    n_fake = len(is_real) - n_real
-    if n_real == 0 or n_fake == 0:
-        raise RuntimeError(f"Dataset needs both real and fake: {n_real} real, {n_fake} fake")
-    weights = [1.0 / n_real if r else 1.0 / n_fake for r in is_real]
+    """K-way balanced sampler: every class sampled with equal probability."""
+    from collections import Counter
+    counts = Counter(g for _, g, _ in dataset.samples)
+    if len(counts) < 2:
+        raise RuntimeError(f"Dataset needs at least 2 classes, got: {dict(counts)}")
+    if any(n == 0 for n in counts.values()):
+        raise RuntimeError(f"Empty class in dataset: {dict(counts)}")
+    weights = [1.0 / counts[g] for _, g, _ in dataset.samples]
+    print(f"Balanced sampler classes: {dict(counts)}")
     return WeightedRandomSampler(weights, num_samples=len(dataset), replacement=True)
 
 

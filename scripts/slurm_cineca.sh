@@ -56,7 +56,7 @@ cd $REPO
 CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --dataset_path    $DATA \
     --captions_dir    $CAPS \
-    --generators      real FLUX \
+    --generators      real FLUX SD3 gemini \
     --semantics       COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
     --clip_name       openai/clip-vit-large-patch14 \
     --lora_r          16 \
@@ -69,13 +69,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --lambda_cap_in_class 1.0 \
     --lambda_img_in_cap   0.5 \
     --lambda_norm     0.5 \
-    --target_norm     3.0 \
+    --target_norm     4.0 \
     --batch_size      256 \
     --num_epochs      5 \
     --lr              5e-5 \
     --weight_decay    0.01 \
     --val_frac        0.2 \
     --num_workers     8 \
-    --output          $OUT/attribution_FLUX_vitl14_hier.pt
+    --output          $OUT/attribution_k4_vitl14.pt
 
 echo "Done: $OUT/attribution_FLUX_vitl14.pt"

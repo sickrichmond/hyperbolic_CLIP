@@ -201,11 +201,22 @@ def extract_and_route(zip_path: Path, model_name: str, semantic_name: str,
     sandbox.mkdir(parents=True, exist_ok=True)
 
     # Use Python's zipfile (no external tools needed).
-    # Fall back to 7z only for split archives (.z01, .z02 … siblings present).
-    siblings = list(zip_path.parent.glob(zip_path.stem + ".z[0-9]*"))
-    use_7z = bool(siblings) or not zipfile.is_zipfile(zip_path)
-    if use_7z:
-        subprocess.run(["7z", "x", "-y", f"-o{sandbox}", str(zip_path)], check=True)
+    # Split archives (.z01, .z02, ..., .zip with the central directory at the
+    # end) are first concatenated in order, then opened as a single zip.
+    siblings = sorted(zip_path.parent.glob(zip_path.stem + ".z[0-9]*"))
+    if siblings:
+        parts = sorted(siblings) + [zip_path]   # .zip is the final part (central dir)
+        combined = zip_path.parent / f"{zip_path.stem}_combined.zip"
+        print(f"  Concatenating {len(parts)} parts → {combined.name}")
+        with open(combined, "wb") as out:
+            for p in parts:
+                with open(p, "rb") as inp:
+                    shutil.copyfileobj(inp, out, length=4 * 1024 * 1024)
+        try:
+            with zipfile.ZipFile(combined, "r") as zf:
+                zf.extractall(sandbox)
+        finally:
+            combined.unlink(missing_ok=True)
     else:
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(sandbox)
