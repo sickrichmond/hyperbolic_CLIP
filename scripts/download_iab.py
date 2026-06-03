@@ -200,18 +200,25 @@ def extract_and_route(zip_path: Path, model_name: str, semantic_name: str,
     sandbox = dataset_path / f"_tmp_{model_name}_{semantic_name}"
     sandbox.mkdir(parents=True, exist_ok=True)
 
-    # Use Python's zipfile (no external tools needed).
-    # Split archives (.z01, .z02, ..., .zip with the central directory at the
-    # end) are first concatenated in order, then opened as a single zip.
+    # Use Python's zipfile when possible. Split archives (.z01, .z02, ...,
+    # .zip with the central directory at the end) need to be reassembled by
+    # `zip -F`, which is the Info-ZIP standard tool for the job.
     siblings = sorted(zip_path.parent.glob(zip_path.stem + ".z[0-9]*"))
     if siblings:
-        parts = sorted(siblings) + [zip_path]   # .zip is the final part (central dir)
         combined = zip_path.parent / f"{zip_path.stem}_combined.zip"
-        print(f"  Concatenating {len(parts)} parts → {combined.name}")
-        with open(combined, "wb") as out:
-            for p in parts:
-                with open(p, "rb") as inp:
-                    shutil.copyfileobj(inp, out, length=4 * 1024 * 1024)
+        print(f"  Reassembling {len(siblings)+1} split parts via `zip -F` → {combined.name}")
+        try:
+            subprocess.run(
+                ["zip", "-F", str(zip_path), "--out", str(combined)],
+                check=True,
+            )
+        except subprocess.CalledProcessError:
+            # Fall back to the more aggressive fix (handles missing/odd parts).
+            print("  `zip -F` failed; retrying with `zip -FF`")
+            subprocess.run(
+                ["zip", "-FF", str(zip_path), "--out", str(combined)],
+                input=b"y\n", check=True,
+            )
         try:
             with zipfile.ZipFile(combined, "r") as zf:
                 zf.extractall(sandbox)
