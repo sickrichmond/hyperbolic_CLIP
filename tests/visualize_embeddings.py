@@ -108,62 +108,100 @@ def _class_colors(classes):
     return {c: cmap(i % 10) for i, c in enumerate(classes)}
 
 
-def plot_umap(x_imgs, x_ancs, x_caps, gt, classes, out_path, with_captions=False):
-    # Fit on images only — anchors live at a very different norm scale than
-    # images and would distort the layout if included in the fit. We project
-    # them afterwards using the trained UMAP model so they appear in the right
-    # neighbourhood of their cluster.
-    # n_neighbors=50 (more global structure, less "spaghetti"),
-    # min_dist=0.4 (cluster blobs, not threads).
+def compute_umap_3d(x_imgs, x_ancs, x_caps=None):
+    """Fit 3-D UMAP on images only, project anchors and captions afterwards.
+
+    Anchors live at a very different norm scale than images and would distort
+    the layout if included in the fit. Captions, if provided, are also
+    projected so they share the same coordinate system.
+    """
     try:
         import umap
-        reducer = umap.UMAP(n_neighbors=50, min_dist=0.4, spread=1.5,
-                            n_components=2, random_state=42)
-        imgs_2d = reducer.fit_transform(x_imgs)
-        ancs_2d = reducer.transform(x_ancs)
-        caps_2d = reducer.transform(x_caps) if with_captions else None
+        reducer = umap.UMAP(
+            n_neighbors=80, min_dist=0.7, spread=2.0,
+            n_components=3, metric="euclidean", random_state=42,
+        )
+        imgs_d = reducer.fit_transform(x_imgs)
+        ancs_d = reducer.transform(x_ancs)
+        caps_d = reducer.transform(x_caps) if x_caps is not None else None
     except ImportError:
-        print("umap-learn not installed; falling back to sklearn TSNE on union.")
+        print("umap-learn not installed; falling back to sklearn TSNE.")
         from sklearn.manifold import TSNE
         all_pts = np.concatenate(
-            [x_imgs, x_ancs] + ([x_caps] if with_captions else []), axis=0
+            [x_imgs, x_ancs] + ([x_caps] if x_caps is not None else []), axis=0
         )
-        all_2d = TSNE(n_components=2, perplexity=30, random_state=42).fit_transform(all_pts)
+        all_d = TSNE(n_components=3, perplexity=30,
+                     random_state=42).fit_transform(all_pts)
         n_img, K = len(x_imgs), len(x_ancs)
-        imgs_2d = all_2d[:n_img]
-        ancs_2d = all_2d[n_img:n_img + K]
-        caps_2d = all_2d[n_img + K:] if with_captions else None
+        imgs_d = all_d[:n_img]
+        ancs_d = all_d[n_img:n_img + K]
+        caps_d = all_d[n_img + K:] if x_caps is not None else None
+    return imgs_d, ancs_d, caps_d
 
-    n_img, K = len(x_imgs), len(x_ancs)
 
-    fig, ax = plt.subplots(figsize=(11, 10))
-    colors = _class_colors(classes)
-    for c in classes:
-        m = np.array([g == c for g in gt])
+def _plot_3d_scatter(imgs_d, ancs_d, caps_d, point_labels, point_classes,
+                     anchor_names, anchor_color_by_class, title, out_path):
+    """Generic 3-D scatter plot used by both 'by class' and 'by semantic' views.
+
+    point_labels        list[str] of length N, the category of each image point
+    point_classes       ordered list of categories to colour-code (for legend)
+    anchor_names        list[str] of length K, names of anchors (for legend/labels)
+    anchor_color_by_class  if True, anchors take the colour of their class
+                          (use for 'by class' plot); if False, anchors are grey
+                          (use for 'by semantic', since anchors don't belong to
+                          any semantic)
+    """
+    n_img, K = len(imgs_d), len(ancs_d)
+    point_colors = _class_colors(point_classes)
+    anchor_colors = (_class_colors(anchor_names) if anchor_color_by_class
+                     else {n: (0.35, 0.35, 0.35, 1.0) for n in anchor_names})
+
+    fig = plt.figure(figsize=(12, 10))
+    ax = fig.add_subplot(111, projection="3d")
+    for c in point_classes:
+        m = np.array([g == c for g in point_labels])
         if m.any():
-            ax.scatter(imgs_2d[m, 0], imgs_2d[m, 1], c=[colors[c]], s=6,
-                       alpha=0.45, label=f"{c} ({m.sum()})")
-    if with_captions and caps_2d is not None:
-        for c in classes:
-            m = np.array([g == c for g in gt])
+            ax.scatter(imgs_d[m, 0], imgs_d[m, 1], imgs_d[m, 2],
+                       c=[point_colors[c]], s=6, alpha=0.5,
+                       label=f"{c} ({m.sum()})")
+    if caps_d is not None:
+        for c in point_classes:
+            m = np.array([g == c for g in point_labels])
             if m.any():
-                ax.scatter(caps_2d[m, 0], caps_2d[m, 1], c=[colors[c]], s=20,
-                           marker="^", alpha=0.5, edgecolors="black", linewidths=0.3)
-    for i, c in enumerate(classes):
-        ax.scatter(ancs_2d[i, 0], ancs_2d[i, 1], c=[colors[c]], s=600,
-                   marker="*", edgecolors="black", linewidths=1.8, zorder=10,
-                   label=f"{c} anchor")
-        ax.annotate(c, (ancs_2d[i, 0], ancs_2d[i, 1]),
-                    xytext=(10, 10), textcoords="offset points",
-                    fontsize=11, fontweight="bold", zorder=11)
-    ax.set_title(f"UMAP of hyperbolic embeddings ({n_img} images, {K} anchors"
-                 + (f", +{len(caps_2d)} captions" if with_captions else "") + ")")
-    ax.set_xticks([]); ax.set_yticks([])
+                ax.scatter(caps_d[m, 0], caps_d[m, 1], caps_d[m, 2],
+                           c=[point_colors[c]], s=20, marker="^", alpha=0.55,
+                           edgecolors="black", linewidths=0.3)
+    for i, name in enumerate(anchor_names):
+        ax.scatter(ancs_d[i, 0], ancs_d[i, 1], ancs_d[i, 2],
+                   c=[anchor_colors[name]], s=600, marker="*",
+                   edgecolors="black", linewidths=1.8,
+                   label=f"anchor: {name}", depthshade=False)
+        ax.text(ancs_d[i, 0], ancs_d[i, 1], ancs_d[i, 2], f"  {name}",
+                fontsize=11, fontweight="bold")
+    ax.set_xlabel("UMAP Dimension 1")
+    ax.set_ylabel("UMAP Dimension 2")
+    ax.set_zlabel("UMAP Dimension 3")
+    ax.set_title(title)
     ax.legend(loc="best", fontsize=8, framealpha=0.85)
     plt.tight_layout()
     plt.savefig(out_path, dpi=140, bbox_inches="tight")
     plt.close()
     print(f"  saved → {out_path}")
+
+
+def plot_umap_by_class(imgs_d, ancs_d, caps_d, gt, classes, out_path):
+    """3-D UMAP coloured by generator class (real/FLUX/SD3/gemini)."""
+    title = f"UMAP of hyperbolic embeddings — coloured by generator ({len(imgs_d)} images)"
+    _plot_3d_scatter(imgs_d, ancs_d, caps_d, gt, classes, classes,
+                     anchor_color_by_class=True, title=title, out_path=out_path)
+
+
+def plot_umap_by_semantic(imgs_d, ancs_d, caps_d, sem, classes_sem,
+                          anchor_names, out_path):
+    """3-D UMAP coloured by semantic class (COCO/FFHQ/...)."""
+    title = f"UMAP of hyperbolic embeddings — coloured by semantic class ({len(imgs_d)} images)"
+    _plot_3d_scatter(imgs_d, ancs_d, caps_d, sem, classes_sem, anchor_names,
+                     anchor_color_by_class=False, title=title, out_path=out_path)
 
 
 def plot_poincare_disk(x_imgs, x_ancs, x_caps, gt, classes, out_path,
@@ -337,9 +375,17 @@ def main():
     psi = half_aperture(x_ancs_t.float(), curv=curv, min_radius=min_radius).cpu().numpy()
     print(f"  ψ per cone: {dict(zip(class_names, [f'{p:.3f}' for p in psi]))}")
 
-    # Plots
-    plot_umap(x_imgs, x_ancs, x_caps, gt, class_names,
-              out_dir / "umap.png", with_captions=args.show_captions)
+    # ── Plots ─────────────────────────────────────────────────────────────────
+    # UMAP is fitted ONCE on the images; both plots share coordinates so they
+    # are point-by-point comparable.
+    print("Computing 3-D UMAP (fit on images, project anchors/captions)…")
+    imgs_d, ancs_d, caps_d = compute_umap_3d(x_imgs, x_ancs,
+                                             x_caps=x_caps if args.show_captions else None)
+
+    plot_umap_by_class(imgs_d, ancs_d, caps_d, gt, class_names,
+                       out_dir / "umap_by_class.png")
+    plot_umap_by_semantic(imgs_d, ancs_d, caps_d, sem, args.semantics,
+                          class_names, out_dir / "umap_by_semantic.png")
     plot_poincare_disk(x_imgs, x_ancs, x_caps, gt, class_names,
                        out_dir / "poincare_disk.png", curv=curv,
                        with_captions=args.show_captions)
