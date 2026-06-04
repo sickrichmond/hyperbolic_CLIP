@@ -109,26 +109,32 @@ def _class_colors(classes):
 
 
 def plot_umap(x_imgs, x_ancs, x_caps, gt, classes, out_path, with_captions=False):
+    # Fit on images only — anchors live at a very different norm scale than
+    # images and would distort the layout if included in the fit. We project
+    # them afterwards using the trained UMAP model so they appear in the right
+    # neighbourhood of their cluster.
+    # n_neighbors=50 (more global structure, less "spaghetti"),
+    # min_dist=0.4 (cluster blobs, not threads).
     try:
         import umap
+        reducer = umap.UMAP(n_neighbors=50, min_dist=0.4, spread=1.5,
+                            n_components=2, random_state=42)
+        imgs_2d = reducer.fit_transform(x_imgs)
+        ancs_2d = reducer.transform(x_ancs)
+        caps_2d = reducer.transform(x_caps) if with_captions else None
     except ImportError:
-        print("umap-learn not installed; falling back to sklearn TSNE.")
+        print("umap-learn not installed; falling back to sklearn TSNE on union.")
         from sklearn.manifold import TSNE
         all_pts = np.concatenate(
             [x_imgs, x_ancs] + ([x_caps] if with_captions else []), axis=0
         )
         all_2d = TSNE(n_components=2, perplexity=30, random_state=42).fit_transform(all_pts)
-    else:
-        all_pts = np.concatenate(
-            [x_imgs, x_ancs] + ([x_caps] if with_captions else []), axis=0
-        )
-        all_2d = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2,
-                           random_state=42).fit_transform(all_pts)
+        n_img, K = len(x_imgs), len(x_ancs)
+        imgs_2d = all_2d[:n_img]
+        ancs_2d = all_2d[n_img:n_img + K]
+        caps_2d = all_2d[n_img + K:] if with_captions else None
 
     n_img, K = len(x_imgs), len(x_ancs)
-    imgs_2d = all_2d[:n_img]
-    ancs_2d = all_2d[n_img:n_img + K]
-    caps_2d = all_2d[n_img + K:] if with_captions else None
 
     fig, ax = plt.subplots(figsize=(11, 10))
     colors = _class_colors(classes)
@@ -147,6 +153,9 @@ def plot_umap(x_imgs, x_ancs, x_caps, gt, classes, out_path, with_captions=False
         ax.scatter(ancs_2d[i, 0], ancs_2d[i, 1], c=[colors[c]], s=600,
                    marker="*", edgecolors="black", linewidths=1.8, zorder=10,
                    label=f"{c} anchor")
+        ax.annotate(c, (ancs_2d[i, 0], ancs_2d[i, 1]),
+                    xytext=(10, 10), textcoords="offset points",
+                    fontsize=11, fontweight="bold", zorder=11)
     ax.set_title(f"UMAP of hyperbolic embeddings ({n_img} images, {K} anchors"
                  + (f", +{len(caps_2d)} captions" if with_captions else "") + ")")
     ax.set_xticks([]); ax.set_yticks([])
