@@ -45,7 +45,9 @@ pip install \
     numpy \
     tqdm \
     requests \
-    scikit-learn
+    scikit-learn \
+    matplotlib \
+    umap-learn
 
 # ── Persistent env vars ───────────────────────────────────────────────────────
 grep -qxF 'export HF_HOME=$WORK/hf_cache' ~/.bashrc || \

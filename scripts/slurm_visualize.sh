@@ -1,22 +1,19 @@
 #!/bin/bash
 # ============================================================================
-# Extract embeddings + HoroPCA + UMAP visualisation.
+# Visualise hyperbolic embeddings (UMAP + Poincaré disk + ξ distribution).
 #
-# One-time setup (run on login node first):
-#   pip install umap-learn
-#   git clone https://github.com/HazyResearch/HoroPCA \
-#       $WORK/hyp_fine_tuning/hyperbolic_CLIP/external/HoroPCA
-#   pip install -r $WORK/hyp_fine_tuning/hyperbolic_CLIP/external/HoroPCA/requirements.txt
+# One-time setup (run on login node from $WORK/hyp_fine_tuning/hyperbolic_CLIP):
+#   source $WORK/hyp_fine_tuning/bin/activate
+#   pip install umap-learn matplotlib
 # ============================================================================
 #SBATCH --account=EUHPC_D26_009B
 #SBATCH --partition=boost_usr_prod
-#SBATCH --job-name=visualize_horopca
+#SBATCH --job-name=viz_attribution
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=1
-#SBATCH --mem=128G
-#SBATCH --time=08:00:00
+#SBATCH --time=00:30:00
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 #SBATCH --mail-type=END,FAIL
@@ -32,29 +29,22 @@ export TRANSFORMERS_OFFLINE=1
 
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
-CKPT=$WORK/checkpoints/attribution_FLUX_vitl14_hier.pt
-EMB=$WORK/hyp_fine_tuning/embeddings/val_hier.npz
-FIG_DIR=$WORK/hyp_fine_tuning/figures
+# Override via env vars when needed, e.g. CKPT=... OUT=... sbatch scripts/slurm_visualize.sh
+CKPT=${CKPT:-$WORK/checkpoints/attribution_k4_vitl14.pt}
+OUT=${OUT:-$WORK/viz/k4_hier}
+GENERATORS=${GENERATORS:-"real FLUX SD3 gemini"}
 
-mkdir -p $WORK/hyp_fine_tuning/embeddings $FIG_DIR
+python -m tests.visualize_embeddings \
+    --checkpoint    $CKPT \
+    --dataset_path  $WORK/iab_dataset \
+    --captions_dir  $WORK/hyp_fine_tuning/iab_captions \
+    --generators    $GENERATORS \
+    --semantics     COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
+    --split         val \
+    --val_frac      0.2 \
+    --max_per_class 500 \
+    --batch_size    128 \
+    --num_workers   4 \
+    --output_dir    $OUT
 
-# ── 1. Extract embeddings (val split, image-only) ────────────────────────────
-python -m tests.extract_embeddings \
-    --checkpoint   $CKPT \
-    --dataset_path $WORK/iab_dataset \
-    --captions_dir $WORK/hyp_fine_tuning/iab_captions \
-    --generators   real FLUX \
-    --semantics    COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
-    --split        val \
-    --val_frac     0.2 \
-    --batch_size   256 \
-    --num_workers  4 \
-    --output       $EMB
-
-# ── 2. HoroPCA + UMAP, produces both <prefix>_by_class.png and ──────────────
-#       <prefix>_by_semantic.png from the SAME embedding layout so the two
-#       plots are point-by-point comparable.
-python -m tests.visualize_horopca \
-    --embeddings    $EMB \
-    --output_prefix $FIG_DIR/val_hier_horopca \
-    --n_pca         8
+echo "Plots saved to $OUT"
