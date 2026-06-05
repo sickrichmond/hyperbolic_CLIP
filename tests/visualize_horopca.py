@@ -75,8 +75,12 @@ def parse_args():
     p.add_argument("--val_frac",      type=float, default=0.2)
     p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--max_per_class", type=int,   default=500,
-                   help="Cap images per (generator, semantic). HoroPCA builds "
-                        "internal (N, N) matrices — keep ≲ 5000 unless RAM lets you.")
+                   help="Cap images per (generator, semantic) loaded from disk.")
+    p.add_argument("--horopca_max_points", type=int, default=4000,
+                   help="Random subsample size used to FIT HoroPCA. Even with "
+                        "frechet_variance the gradient steps in fp64 are slow; "
+                        "this keeps the fit under a few minutes and the 2-D "
+                        "disk visually clean. Anchors are always kept.")
     p.add_argument("--batch_size",    type=int,   default=128)
     p.add_argument("--num_workers",   type=int,   default=4)
     p.add_argument("--output_dir",    required=True)
@@ -135,15 +139,22 @@ def _load_horopca():
     return HoroPCA
 
 
-def run_horopca_2d(all_pts_poincare: np.ndarray) -> np.ndarray:
-    """Fit HoroPCA → 2-D on (N, D) Poincaré-ball points. Returns (N, 2)."""
+def run_horopca_2d(fit_pts: np.ndarray, project_pts: np.ndarray) -> np.ndarray:
+    """Fit HoroPCA on `fit_pts`, project ALL of `project_pts`. Returns (N, 2).
+
+    `frechet_variance=True` switches the variance objective from O(N²) pairwise
+    distances to O(N) distances-from-mean, avoiding the OOM that plain pairwise
+    triggers above a few thousand points.
+    """
     HoroPCA = _load_horopca()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    X = torch.as_tensor(all_pts_poincare, dtype=torch.float64, device=device)
-    pca = HoroPCA(dim=all_pts_poincare.shape[1], n_components=2).double().to(device)
-    pca.fit(X, iterative=False, optim=True)
+    X_fit = torch.as_tensor(fit_pts,     dtype=torch.float64, device=device)
+    X_all = torch.as_tensor(project_pts, dtype=torch.float64, device=device)
+    pca = HoroPCA(dim=fit_pts.shape[1], n_components=2,
+                  frechet_variance=True).double().to(device)
+    pca.fit(X_fit, iterative=False, optim=True)
     with torch.no_grad():
-        return pca.map_to_ball(X).cpu().numpy()
+        return pca.map_to_ball(X_all).cpu().numpy()
 
 
 # ────────────────────────── embedding extraction ─────────────────────────────
@@ -313,10 +324,17 @@ def main():
     # ── Poincaré disk (2-D HoroPCA) ──────────────────────────────────────────
     p_imgs = lorentz_to_poincare(x_imgs, curv=curv)
     p_ancs = lorentz_to_poincare(x_ancs, curv=curv)
-    all_pts = np.concatenate([p_imgs, p_ancs], axis=0)
-    print(f"Running HoroPCA → 2-D on {len(all_pts)} points "
-          f"(this can take a few minutes)…")
-    coords_2d = run_horopca_2d(all_pts)
+
+    # Fit HoroPCA on a random subsample (anchors always included), then project
+    # every image so the plot still shows the full val set.
+    rng = np.random.default_rng(args.seed)
+    n_keep = min(args.horopca_max_points, len(p_imgs))
+    fit_idx = rng.choice(len(p_imgs), size=n_keep, replace=False)
+    fit_pts = np.concatenate([p_imgs[fit_idx], p_ancs], axis=0)
+    project_pts = np.concatenate([p_imgs, p_ancs], axis=0)
+    print(f"Running HoroPCA → 2-D: fit on {len(fit_pts)} points, "
+          f"projecting {len(project_pts)} (this can take a few minutes)…")
+    coords_2d = run_horopca_2d(fit_pts, project_pts)
     imgs_2d = coords_2d[:len(p_imgs)]
     ancs_2d = coords_2d[len(p_imgs):]
     plot_poincare_disk(imgs_2d, ancs_2d, gt, class_names,
