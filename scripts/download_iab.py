@@ -188,6 +188,33 @@ def build_groups(files: list[dict], model_classes: list[str],
     return dict(groups)
 
 
+def _extract_zip(zip_path: Path, sandbox: Path) -> None:
+    """
+    Extract a zip into `sandbox`. Tries Python's zipfile first; on failure
+    (e.g. "Bad magic number for file header" — some large IAB archives have an
+    overlapping-component layout that Python's strict reader rejects but that is
+    otherwise valid), falls back to Info-ZIP `unzip` with the zip-bomb heuristic
+    disabled.
+    """
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(sandbox)
+    except zipfile.BadZipFile:
+        print(f"  Python zipfile rejected {zip_path.name}; falling back to `unzip`")
+        env = dict(os.environ, UNZIP_DISABLE_ZIPBOMB_DETECTION="TRUE")
+        # -o overwrite, -q quiet, -d destination. unzip returns 1 for warnings
+        # (the overlapped-components notice) even when all files extract OK, so
+        # we accept return codes 0 and 1.
+        result = subprocess.run(
+            ["unzip", "-o", "-q", str(zip_path), "-d", str(sandbox)],
+            env=env,
+        )
+        if result.returncode not in (0, 1):
+            raise RuntimeError(
+                f"unzip failed on {zip_path.name} (exit {result.returncode})"
+            )
+
+
 def extract_and_route(zip_path: Path, model_name: str, semantic_name: str,
                       dataset_path: Path) -> int:
     super_cat = SEMANTIC_TO_SUPER.get(semantic_name, semantic_name)
@@ -220,13 +247,11 @@ def extract_and_route(zip_path: Path, model_name: str, semantic_name: str,
                 input=b"y\n", check=True,
             )
         try:
-            with zipfile.ZipFile(combined, "r") as zf:
-                zf.extractall(sandbox)
+            _extract_zip(combined, sandbox)
         finally:
             combined.unlink(missing_ok=True)
     else:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(sandbox)
+        _extract_zip(zip_path, sandbox)
 
     count = 0
     for root, _, fnames in os.walk(sandbox):
