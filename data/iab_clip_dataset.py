@@ -286,6 +286,15 @@ class IABCLIPDataset(Dataset):
         is_real = generator == "real"
 
         img = Image.open(img_path).convert("RGB")
+
+        # grok3 images carry a visible watermark in the bottom-right corner.
+        # Matching the IAB benchmark, crop it out (100 px wide × 50 px tall)
+        # so the model cannot attribute grok3 by the watermark alone.
+        if generator == "grok3":
+            w, h = img.size
+            if w > 100 and h > 50:
+                img = img.crop((0, 0, w - 100, h - 50))
+
         pixel = self.processor(images=img, return_tensors="pt")["pixel_values"][0]
 
         raw_cap = self._get_raw_caption(img_path, generator, semantic)
