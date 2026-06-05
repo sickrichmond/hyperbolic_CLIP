@@ -39,6 +39,7 @@ import zipfile
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import Optional
 
 import requests
 import urllib3
@@ -188,31 +189,43 @@ def build_groups(files: list[dict], model_classes: list[str],
     return dict(groups)
 
 
+def _find_7z() -> Optional[str]:
+    """Locate a 7-Zip binary (7zz/7zzs static build, or system 7z)."""
+    for name in ("7zz", "7zzs", "7z", "7za"):
+        path = shutil.which(name)
+        if path:
+            return path
+    return None
+
+
 def _extract_zip(zip_path: Path, sandbox: Path) -> None:
     """
-    Extract a zip into `sandbox`. Tries Python's zipfile first; on failure
-    (e.g. "Bad magic number for file header" — some large IAB archives have an
-    overlapping-component layout that Python's strict reader rejects but that is
-    otherwise valid), falls back to Info-ZIP `unzip` with the zip-bomb heuristic
-    disabled.
+    Extract a zip into `sandbox`.
+
+    Many IAB archives are spanned/streamed zips with an overlapping-component
+    layout that Python's `zipfile` and Info-ZIP `unzip` 6.0 cannot extract
+    reliably (they read local headers at offsets that don't line up). 7-Zip
+    handles them correctly — this is also what the official IAB download script
+    uses. We therefore prefer 7z when available and fall back to Python zipfile
+    only for simple archives.
     """
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(sandbox)
-    except zipfile.BadZipFile:
-        print(f"  Python zipfile rejected {zip_path.name}; falling back to `unzip`")
-        env = dict(os.environ, UNZIP_DISABLE_ZIPBOMB_DETECTION="TRUE")
-        # -o overwrite, -q quiet, -d destination. unzip returns 1 for warnings
-        # (the overlapped-components notice) even when all files extract OK, so
-        # we accept return codes 0 and 1.
+    sevenz = _find_7z()
+    if sevenz is not None:
+        # 7z x -y -o<dir> <zip>  — extract with full paths, overwrite, quiet-ish.
         result = subprocess.run(
-            ["unzip", "-o", "-q", str(zip_path), "-d", str(sandbox)],
-            env=env,
+            [sevenz, "x", "-y", f"-o{sandbox}", str(zip_path)],
+            stdout=subprocess.DEVNULL,
         )
-        if result.returncode not in (0, 1):
+        if result.returncode != 0:
             raise RuntimeError(
-                f"unzip failed on {zip_path.name} (exit {result.returncode})"
+                f"7z failed on {zip_path.name} (exit {result.returncode})"
             )
+        return
+
+    # No 7z available — try Python's zipfile (works for the simple archives).
+    print(f"  WARNING: no 7z binary found; trying Python zipfile for {zip_path.name}")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(sandbox)
 
 
 def extract_and_route(zip_path: Path, model_name: str, semantic_name: str,
@@ -227,31 +240,10 @@ def extract_and_route(zip_path: Path, model_name: str, semantic_name: str,
     sandbox = dataset_path / f"_tmp_{model_name}_{semantic_name}"
     sandbox.mkdir(parents=True, exist_ok=True)
 
-    # Use Python's zipfile when possible. Split archives (.z01, .z02, ...,
-    # .zip with the central directory at the end) need to be reassembled by
-    # `zip -F`, which is the Info-ZIP standard tool for the job.
-    siblings = sorted(zip_path.parent.glob(zip_path.stem + ".z[0-9]*"))
-    if siblings:
-        combined = zip_path.parent / f"{zip_path.stem}_combined.zip"
-        print(f"  Reassembling {len(siblings)+1} split parts via `zip -F` → {combined.name}")
-        try:
-            subprocess.run(
-                ["zip", "-F", str(zip_path), "--out", str(combined)],
-                check=True,
-            )
-        except subprocess.CalledProcessError:
-            # Fall back to the more aggressive fix (handles missing/odd parts).
-            print("  `zip -F` failed; retrying with `zip -FF`")
-            subprocess.run(
-                ["zip", "-FF", str(zip_path), "--out", str(combined)],
-                input=b"y\n", check=True,
-            )
-        try:
-            _extract_zip(combined, sandbox)
-        finally:
-            combined.unlink(missing_ok=True)
-    else:
-        _extract_zip(zip_path, sandbox)
+    # 7z handles both single and split archives natively (it follows the
+    # .z01/.z02 siblings automatically when pointed at the main .zip), so no
+    # manual reassembly is needed — just hand it the main .zip.
+    _extract_zip(zip_path, sandbox)
 
     count = 0
     for root, _, fnames in os.walk(sandbox):
