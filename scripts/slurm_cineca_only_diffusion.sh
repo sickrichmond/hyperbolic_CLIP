@@ -16,7 +16,7 @@
 
 #SBATCH --account=EUHPC_D26_009B         # e.g. IscrB_myproject — fill this in
 #SBATCH --partition=boost_usr_prod       # A100 partition on Leonardo
-#SBATCH --job-name=attr_clip_flux
+#SBATCH --job-name=attr_clip_diffusion
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=32              # 8 workers × 4 GPUs
@@ -56,7 +56,7 @@ cd $REPO
 CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --dataset_path    $DATA \
     --captions_dir    $CAPS \
-    --generators      real SD3 SD3_5 SDXL FLUX Gemini \
+    --generators      real SD3 SD3_5 SDXL FLUX \
     --semantics       COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
     --clip_name       openai/clip-vit-large-patch14 \
     --lora_r          16 \
