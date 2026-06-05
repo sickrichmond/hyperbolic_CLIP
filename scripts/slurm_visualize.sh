@@ -1,10 +1,11 @@
 #!/bin/bash
 # ============================================================================
-# Visualise hyperbolic embeddings (UMAP + Poincaré disk + ξ distribution).
+# Visualise hyperbolic embeddings (Poincaré disk via HoroPCA + 3-D UMAP).
 #
 # One-time setup (run on login node from $WORK/hyp_fine_tuning/hyperbolic_CLIP):
 #   source $WORK/hyp_fine_tuning/bin/activate
-#   pip install umap-learn matplotlib
+#   pip install umap-learn matplotlib networkx
+#   git clone https://github.com/HazyResearch/HoroPCA $WORK/hyp_fine_tuning/horopca
 # ============================================================================
 #SBATCH --account=EUHPC_D26_009B
 #SBATCH --partition=boost_usr_prod
@@ -26,6 +27,7 @@ source $WORK/hyp_fine_tuning/bin/activate
 export HF_HOME=$WORK/hf_cache
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_OFFLINE=1
+export HOROPCA_DIR=${HOROPCA_DIR:-$WORK/hyp_fine_tuning/horopca}
 
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
@@ -34,7 +36,7 @@ CKPT=${CKPT:-$WORK/checkpoints/attribution_k4_vitl14.pt}
 OUT=${OUT:-$WORK/viz/k4_hier}
 GENERATORS=${GENERATORS:-"real FLUX SD3 gemini"}
 
-python -m tests.visualize_embeddings \
+python -m tests.visualize_horopca \
     --checkpoint    $CKPT \
     --dataset_path  $WORK/iab_dataset \
     --captions_dir  $WORK/hyp_fine_tuning/iab_captions \

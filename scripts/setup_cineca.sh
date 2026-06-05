@@ -47,7 +47,17 @@ pip install \
     requests \
     scikit-learn \
     matplotlib \
-    umap-learn
+    umap-learn \
+    networkx
+
+# ── HoroPCA repo (visualisation) ──────────────────────────────────────────────
+HOROPCA_DIR="$WORK/hyp_fine_tuning/horopca"
+if [ -d "$HOROPCA_DIR/.git" ]; then
+    echo "HoroPCA repo already present at $HOROPCA_DIR"
+else
+    echo "Cloning HoroPCA → $HOROPCA_DIR"
+    git clone https://github.com/HazyResearch/HoroPCA "$HOROPCA_DIR"
+fi
 
 # ── Persistent env vars ───────────────────────────────────────────────────────
 grep -qxF 'export HF_HOME=$WORK/hf_cache' ~/.bashrc || \

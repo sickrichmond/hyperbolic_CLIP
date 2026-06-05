@@ -1,82 +1,111 @@
 """
-Visualise Lorentz-space embeddings with HoroPCA + UMAP.
+Visualise hyperbolic embeddings from an AttributionCLIP checkpoint.
 
-Pipeline:
-  1. Load embeddings from .npz (saved by tests/extract_embeddings.py).
-  2. Convert Lorentz space components → Poincaré-ball coordinates (HoroPCA's
-     native input space).
-  3. HoroPCA: reduce D → n_pca dims (hyperbolic PCA on horocycles).
-  4. UMAP: project the HoroPCA output to 3D with euclidean metric.
-  5. 3D scatter plot, colored by class (style matching the HySAC paper).
+Self-contained: loads the model + dataset, embeds images, then produces three
+plots:
 
-Requires:
-  - HoroPCA cloned at external/HoroPCA (so we can import its modules)
-  - umap-learn installed in the env
-  - matplotlib
+  1. Poincaré disk (2-D) via HoroPCA — hyperbolic-native dimensionality
+     reduction. Lorentz → Poincaré ball → 2-D via horospherical projections.
+
+  2. UMAP 3-D coloured by generator class (real/FLUX/SD3/gemini …),
+     anchors plotted as class-coloured stars.
+
+  3. UMAP 3-D coloured by semantic class (COCO/FFHQ/…), anchors plotted as
+     grey stars (anchors don't belong to any semantic).
+
+The two UMAP plots share the same fitted UMAP model so they are point-by-point
+comparable. UMAP is fitted on images only — anchors live at a different norm
+scale and would distort the layout; they are placed at the per-class centroid
+in UMAP space (semantically: "this anchor represents this cluster").
+
+We deliberately do NOT use plain Euclidean PCA: the embeddings live in
+hyperbolic space and Euclidean PCA would silently misrepresent radial
+distances. If HoroPCA isn't available the script raises a hard error.
 
 Usage:
     python -m tests.visualize_horopca \\
-        --embeddings $WORK/embeddings/val_hier.npz \\
-        --output     $WORK/figures/val_hier_horopca.png \\
-        --n_pca      8
+        --checkpoint   $WORK/checkpoints/attribution_k4_vitl14.pt \\
+        --dataset_path $WORK/iab_dataset \\
+        --captions_dir $WORK/hyp_fine_tuning/iab_captions \\
+        --generators   real FLUX SD3 gemini \\
+        --semantics    COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \\
+        --split        val \\
+        --max_per_class 500 \\
+        --output_dir   $WORK/viz/k4_hier
+
+HoroPCA repo:
+    Set HOROPCA_DIR env var, or clone to <repo>/external/HoroPCA, or
+    $WORK/hyp_fine_tuning/horopca:
+        git clone https://github.com/HazyResearch/HoroPCA <repo>/external/HoroPCA
 """
 import argparse
+import os
 import sys
+import warnings
 from pathlib import Path
 
 import numpy as np
+import torch
 import matplotlib
-matplotlib.use("Agg")   # headless on compute nodes
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from transformers import CLIPTokenizer
 
-# Make the HoroPCA repo importable
-REPO_ROOT = Path(__file__).resolve().parents[1]
-HOROPCA_PATH = REPO_ROOT / "external" / "HoroPCA"
-if not HOROPCA_PATH.exists():
-    sys.exit(
-        f"HoroPCA not found at {HOROPCA_PATH}.\n"
-        f"Clone it first:\n"
-        f"  git clone https://github.com/HazyResearch/HoroPCA {HOROPCA_PATH}"
-    )
-sys.path.insert(0, str(HOROPCA_PATH))
+warnings.filterwarnings("ignore", category=UserWarning, module="PIL")
+
+from models.attribution_clip import AttributionCLIP
+from data.iab_clip_dataset import IABCLIPDataset
+from geometry.lorentz import half_aperture
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--embeddings", required=True, help=".npz from extract_embeddings.py")
-    p.add_argument("--output_prefix", required=True,
-                   help="Prefix for the two PNGs produced; "
-                        "<prefix>_by_class.png and <prefix>_by_semantic.png are written.")
-    p.add_argument("--n_pca",      type=int,   default=8,
-                   help="Output dimension of HoroPCA before UMAP.")
-    p.add_argument("--n_neighbors", type=int,  default=30, help="UMAP n_neighbors.")
-    p.add_argument("--min_dist",    type=float, default=0.1, help="UMAP min_dist.")
-    p.add_argument("--seed",        type=int,   default=42)
-    p.add_argument("--max_points",  type=int, default=3000,
-                   help="Subsample to this many points before HoroPCA. HoroPCA "
-                        "builds (N, N) bilinear matrices internally, so memory "
-                        "scales quadratically. Keep ≲ 5000 unless you have RAM.")
+    p.add_argument("--checkpoint",    required=True)
+    p.add_argument("--dataset_path",  required=True)
+    p.add_argument("--captions_dir",  required=True)
+    p.add_argument("--generators",    nargs="+", required=True)
+    p.add_argument("--semantics",     nargs="+",
+                   default=["COCO", "cat", "dog", "wild", "FFHQ", "celebahq",
+                             "bedroom", "church", "classroom", "ImageNet-1k"])
+    p.add_argument("--split",         choices=["train", "val", "all"], default="val")
+    p.add_argument("--val_frac",      type=float, default=0.2)
+    p.add_argument("--seed",          type=int,   default=42)
+    p.add_argument("--max_per_class", type=int,   default=500,
+                   help="Cap images per (generator, semantic). HoroPCA builds "
+                        "internal (N, N) matrices — keep ≲ 5000 unless RAM lets you.")
+    p.add_argument("--batch_size",    type=int,   default=128)
+    p.add_argument("--num_workers",   type=int,   default=4)
+    p.add_argument("--output_dir",    required=True)
     return p.parse_args()
 
 
-def lorentz_to_poincare(x_space: np.ndarray, curv: float) -> np.ndarray:
-    """
-    Lorentz space components → Poincaré-ball coordinates.
+# ────────────────────────── geometry helpers ─────────────────────────────────
 
-    Lorentz point (with curvature c):  x_time = sqrt(1/c + ||x_space||²)
-    Stereographic projection from (-1/√c, 0) onto the disk gives:
-        x_ball = x_space / (x_time + 1/√c)
-    Result lies in the open ball of radius 1/√c.
-    """
+def lorentz_to_poincare(x_space: np.ndarray, curv: float) -> np.ndarray:
+    """Stereographic map of Lorentz space-components onto the Poincaré ball."""
     x_time = np.sqrt(1.0 / curv + np.sum(x_space ** 2, axis=-1, keepdims=True))
     return x_space / (x_time + 1.0 / np.sqrt(curv))
 
 
+def class_centroids(imgs_d: np.ndarray, gt, classes) -> np.ndarray:
+    """Per-class centroid in (UMAP) space. Used to place anchor stars meaningfully."""
+    cents = np.zeros((len(classes), imgs_d.shape[1]))
+    for i, c in enumerate(classes):
+        m = np.array([g == c for g in gt])
+        if m.any():
+            cents[i] = imgs_d[m].mean(axis=0)
+    return cents
+
+
+# ────────────────────────── HoroPCA loading ──────────────────────────────────
+
 def _patch_torch_solve():
-    """HoroPCA calls the removed torch.solve(B, A) → (solution, LU). Reimplement
-    it on top of torch.linalg.solve(A, B), which is the recommended replacement."""
-    import torch
+    """HoroPCA uses the removed torch.solve(B, A) → (solution, LU) API.
+    Re-implement on top of torch.linalg.solve (the modern replacement)."""
     if not getattr(torch, "_horopca_solve_patched", False):
         def _solve(B, A):
             return torch.linalg.solve(A, B), None
@@ -84,133 +113,230 @@ def _patch_torch_solve():
         torch._horopca_solve_patched = True
 
 
-def run_horopca(x_ball: np.ndarray, n_components: int, seed: int) -> np.ndarray:
-    """Apply HoroPCA to Poincaré-ball points, return (N, n_components).
-
-    fit_optim runs hundreds of gradient steps with autograd through asinh/acosh.
-    On CPU this is very slow (>1h for N=3000) — we move everything to GPU when
-    available."""
-    import torch
+def _load_horopca():
+    """Locate and import HoroPCA. Hard error if the repo isn't found."""
+    repo_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        os.environ.get("HOROPCA_DIR"),
+        str(repo_root / "external" / "HoroPCA"),
+        os.path.expandvars("$WORK/hyp_fine_tuning/horopca"),
+    ]
+    horopca_path = next((p for p in candidates if p and Path(p).exists()), None)
+    if horopca_path is None:
+        raise FileNotFoundError(
+            "HoroPCA repo not found. Set HOROPCA_DIR, or clone the repo to "
+            "<repo>/external/HoroPCA, or $WORK/hyp_fine_tuning/horopca:\n"
+            "  git clone https://github.com/HazyResearch/HoroPCA <repo>/external/HoroPCA"
+        )
+    if horopca_path not in sys.path:
+        sys.path.insert(0, horopca_path)
     _patch_torch_solve()
-    from learning.pca import HoroPCA   # type: ignore  (lives in external/HoroPCA)
+    from learning.pca import HoroPCA   # type: ignore  (external repo)
+    return HoroPCA
 
+
+def run_horopca_2d(all_pts_poincare: np.ndarray) -> np.ndarray:
+    """Fit HoroPCA → 2-D on (N, D) Poincaré-ball points. Returns (N, 2)."""
+    HoroPCA = _load_horopca()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    # Force fp64 — HoroPCA's Minkowski ops mix dtypes and asinh/acosh benefit
-    # from higher precision.
-    X = torch.as_tensor(x_ball, dtype=torch.float64, device=device)
-    pca = HoroPCA(dim=x_ball.shape[1], n_components=n_components).double().to(device)
+    X = torch.as_tensor(all_pts_poincare, dtype=torch.float64, device=device)
+    pca = HoroPCA(dim=all_pts_poincare.shape[1], n_components=2).double().to(device)
     pca.fit(X, iterative=False, optim=True)
     with torch.no_grad():
-        Z = pca.map_to_ball(X).cpu().numpy()
-    return Z
+        return pca.map_to_ball(X).cpu().numpy()
 
 
-def main():
-    args = parse_args()
-    rng = np.random.default_rng(args.seed)
+# ────────────────────────── embedding extraction ─────────────────────────────
 
-    data = np.load(args.embeddings, allow_pickle=True)
-    lorentz       = data["lorentz"]                 # (N, D)
-    anchors       = data["anchors"]                 # (K, D)
-    labels        = data["labels"]                  # (N,)
-    class_names   = list(data["class_names"])
-    generators    = list(data["generators"])
-    semantics     = list(data["semantics"])
-    curv          = float(data["curv"][0])
+@torch.no_grad()
+def extract_embeddings(model, loader, device):
+    all_img, all_gt, all_sem = [], [], []
+    for batch in tqdm(loader, desc="embedding"):
+        pixel = batch["pixel_values"].to(device)
+        x_img, _ = model.encode_image(pixel)
+        all_img.append(x_img.cpu())
+        all_gt.extend(batch["generator"])
+        all_sem.extend(batch["semantic"])
+    return torch.cat(all_img, dim=0).numpy(), all_gt, all_sem
 
-    print(f"Loaded {len(lorentz)} embeddings ({lorentz.shape[1]}D), "
-          f"{len(anchors)} anchors, curv={curv}")
 
-    # Optionally subsample for speed (UMAP scales as O(N log N) but the matplotlib
-    # scatter is the real bottleneck for plotting > tens of thousands of points).
-    if args.max_points and len(lorentz) > args.max_points:
-        idx = rng.choice(len(lorentz), size=args.max_points, replace=False)
-        lorentz, labels = lorentz[idx], labels[idx]
-        generators = [generators[i] for i in idx]
-        semantics  = [semantics[i]  for i in idx]
-        print(f"Subsampled to {args.max_points} points")
+# ────────────────────────── plotting ─────────────────────────────────────────
 
-    # ─── Lorentz → Poincaré ───────────────────────────────────────────────────
-    ball_imgs    = lorentz_to_poincare(lorentz, curv=curv)
-    ball_anchors = lorentz_to_poincare(anchors, curv=curv)
+def _class_colors(classes):
+    cmap = plt.colormaps.get_cmap("tab10" if len(classes) <= 10 else "tab20")
+    return {c: cmap(i % cmap.N) for i, c in enumerate(classes)}
 
-    # ─── HoroPCA ──────────────────────────────────────────────────────────────
-    print(f"Running HoroPCA → {args.n_pca}D ...")
-    X_all = np.concatenate([ball_imgs, ball_anchors], axis=0)  # fit jointly so
-                                                                # anchors share basis
-    Z_all = run_horopca(X_all, n_components=args.n_pca, seed=args.seed)
-    Z_imgs    = Z_all[:len(ball_imgs)]
-    Z_anchors = Z_all[len(ball_imgs):]
 
-    # ─── UMAP → 3D ────────────────────────────────────────────────────────────
-    print(f"Running UMAP → 3D (n_neighbors={args.n_neighbors}, min_dist={args.min_dist}) ...")
+def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path):
+    """2-D HoroPCA scatter inside the unit disk."""
+    _, ax = plt.subplots(figsize=(11, 11))
+    ax.add_patch(Circle((0, 0), 1.0, fill=False, color="black", linewidth=1.2))
+
+    colors = _class_colors(classes)
+    for c in classes:
+        m = np.array([g == c for g in gt])
+        if m.any():
+            ax.scatter(imgs_2d[m, 0], imgs_2d[m, 1], c=[colors[c]], s=6,
+                       alpha=0.4, label=f"{c} ({m.sum()})")
+    for i, c in enumerate(classes):
+        ax.scatter(ancs_2d[i, 0], ancs_2d[i, 1], c=[colors[c]], s=700,
+                   marker="*", edgecolors="black", linewidths=1.8, zorder=10,
+                   label=f"{c} anchor")
+        ax.annotate(c, (ancs_2d[i, 0], ancs_2d[i, 1]),
+                    xytext=(8, 8), textcoords="offset points",
+                    fontsize=11, fontweight="bold")
+
+    ax.set_xlim(-1.1, 1.1); ax.set_ylim(-1.1, 1.1)
+    ax.set_aspect("equal")
+    ax.set_xticks([]); ax.set_yticks([])
+    ax.set_title("Poincaré disk projection (Lorentz → Poincaré ball → 2-D HoroPCA)")
+    ax.legend(loc="lower right", fontsize=8, framealpha=0.85)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=140, bbox_inches="tight")
+    plt.close()
+    print(f"  saved → {out_path}")
+
+
+def compute_umap_3d(x_imgs: np.ndarray) -> np.ndarray:
+    """3-D UMAP fitted on images only. HySAC-paper style (compact blobs)."""
     import umap
-    reducer = umap.UMAP(n_components=3, n_neighbors=args.n_neighbors,
-                        min_dist=args.min_dist, random_state=args.seed,
-                        metric="euclidean")
-    Y_all = reducer.fit_transform(np.concatenate([Z_imgs, Z_anchors], axis=0))
-    Y_imgs    = Y_all[:len(Z_imgs)]
-    Y_anchors = Y_all[len(Z_imgs):]
-
-    # ─── Two plots from the SAME UMAP layout ─────────────────────────────────
-    out_prefix = Path(args.output_prefix)
-    out_prefix.parent.mkdir(parents=True, exist_ok=True)
-
-    # By class (real vs FLUX) — HySAC palette
-    if len(class_names) == 2:
-        palette = {"real": "#E53935", "FLUX": "#7E57C2"}
-        class_colors = [palette.get(n, plt.get_cmap("tab10")(i))
-                        for i, n in enumerate(class_names)]
-    else:
-        class_colors = [plt.get_cmap("tab10")(i) for i in range(len(class_names))]
-    _plot_3d(Y_imgs, Y_anchors,
-             groups=labels, group_names=class_names, colors=class_colors,
-             class_names=class_names, anchor_colors=class_colors,
-             out=out_prefix.with_name(out_prefix.name + "_by_class.png"))
-
-    # By semantic (10 classes)
-    uniq_sem = sorted(set(semantics))
-    sem_to_idx = {s: i for i, s in enumerate(uniq_sem)}
-    sem_groups = np.array([sem_to_idx[s] for s in semantics])
-    sem_cmap = plt.get_cmap("tab10" if len(uniq_sem) <= 10 else "tab20")
-    sem_colors = [sem_cmap(i) for i in range(len(uniq_sem))]
-    _plot_3d(Y_imgs, Y_anchors,
-             groups=sem_groups, group_names=uniq_sem, colors=sem_colors,
-             class_names=class_names, anchor_colors=["#444"] * len(class_names),
-             out=out_prefix.with_name(out_prefix.name + "_by_semantic.png"))
+    reducer = umap.UMAP(
+        n_neighbors=80, min_dist=0.7, spread=2.0,
+        n_components=3, metric="euclidean", random_state=42,
+    )
+    return reducer.fit_transform(x_imgs)
 
 
-def _plot_3d(Y_imgs, Y_anchors, *, groups, group_names, colors,
-             class_names, anchor_colors, out: Path) -> None:
-    """Render a single 3D scatter and save it to `out`."""
-    fig = plt.figure(figsize=(11, 9))
+def _plot_umap_3d(imgs_d, ancs_d, point_labels, point_classes,
+                  anchor_names, anchor_color_by_class, title, out_path):
+    point_colors = _class_colors(point_classes)
+    anchor_colors = (_class_colors(anchor_names) if anchor_color_by_class
+                     else {n: (0.35, 0.35, 0.35, 1.0) for n in anchor_names})
+
+    fig = plt.figure(figsize=(12, 10))
     ax = fig.add_subplot(111, projection="3d")
-
-    for k, name in enumerate(group_names):
-        mask = (groups == k)
-        ax.scatter(Y_imgs[mask, 0], Y_imgs[mask, 1], Y_imgs[mask, 2],
-                   s=6, alpha=0.55, color=colors[k],
-                   label=f"{name} ({mask.sum()})", linewidth=0)
-
-    for k, name in enumerate(class_names):
-        ax.scatter(Y_anchors[k, 0], Y_anchors[k, 1], Y_anchors[k, 2],
-                   marker="*", s=320, edgecolor="black", linewidth=1.5,
-                   color=anchor_colors[k], depthshade=False,
-                   label=f"anchor: {name}")
-
+    for c in point_classes:
+        m = np.array([g == c for g in point_labels])
+        if m.any():
+            ax.scatter(imgs_d[m, 0], imgs_d[m, 1], imgs_d[m, 2],
+                       c=[point_colors[c]], s=6, alpha=0.5,
+                       label=f"{c} ({m.sum()})")
+    for i, name in enumerate(anchor_names):
+        ax.scatter(ancs_d[i, 0], ancs_d[i, 1], ancs_d[i, 2],
+                   c=[anchor_colors[name]], s=600, marker="*",
+                   edgecolors="black", linewidths=1.8,
+                   label=f"anchor: {name}", depthshade=False)
+        ax.text(ancs_d[i, 0], ancs_d[i, 1], ancs_d[i, 2], f"  {name}",
+                fontsize=11, fontweight="bold")
     ax.set_xlabel("UMAP Dimension 1")
     ax.set_ylabel("UMAP Dimension 2")
     ax.set_zlabel("UMAP Dimension 3")
-    ax.set_facecolor("white")
-    ax.xaxis.pane.set_edgecolor("lightgrey")
-    ax.yaxis.pane.set_edgecolor("lightgrey")
-    ax.zaxis.pane.set_edgecolor("lightgrey")
-    ax.legend(loc="upper left", fontsize=9, frameon=True)
+    ax.set_title(title)
+    ax.legend(loc="best", fontsize=8, framealpha=0.85)
     plt.tight_layout()
+    plt.savefig(out_path, dpi=140, bbox_inches="tight")
+    plt.close()
+    print(f"  saved → {out_path}")
 
-    fig.savefig(out, dpi=160)
-    plt.close(fig)
-    print(f"Saved figure → {out}")
+
+def plot_umap_by_class(imgs_d, ancs_d, gt, classes, out_path):
+    title = f"UMAP of hyperbolic embeddings — coloured by generator ({len(imgs_d)} images)"
+    _plot_umap_3d(imgs_d, ancs_d, gt, classes, classes,
+                  anchor_color_by_class=True, title=title, out_path=out_path)
+
+
+def plot_umap_by_semantic(imgs_d, ancs_d, sem, classes_sem, anchor_names, out_path):
+    title = f"UMAP of hyperbolic embeddings — coloured by semantic class ({len(imgs_d)} images)"
+    _plot_umap_3d(imgs_d, ancs_d, sem, classes_sem, anchor_names,
+                  anchor_color_by_class=False, title=title, out_path=out_path)
+
+
+# ────────────────────────── main ─────────────────────────────────────────────
+
+def main():
+    args = parse_args()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+    clip_name = ckpt["clip_name"]
+    class_names = ckpt["class_names"]
+    anchor_texts = ckpt["anchor_texts"]
+    curv = ckpt.get("curv", 1.0)
+    min_radius = ckpt.get("min_radius", 0.1)
+
+    print(f"Checkpoint: {args.checkpoint}")
+    print(f"  classes: {class_names}")
+    print(f"  curv={curv}  min_radius={min_radius}")
+
+    model = AttributionCLIP(
+        clip_name=clip_name,
+        lora_r=ckpt.get("lora_r", 8),
+        lora_alpha=ckpt.get("lora_alpha", 16),
+        hyperbolic_dim=ckpt.get("hyperbolic_dim", 128),
+        curv=curv,
+    ).to(device)
+    model.clip.load_state_dict(ckpt["lora_state"])
+    model.projection.load_state_dict(ckpt["projection"])
+    model.eval()
+
+    tokenizer = CLIPTokenizer.from_pretrained(clip_name)
+    dataset = IABCLIPDataset(
+        root=args.dataset_path,
+        captions_dir=args.captions_dir,
+        generators=args.generators,
+        semantics=args.semantics,
+        processor_name=clip_name,
+        max_per_class=args.max_per_class,
+        split=args.split,
+        val_frac=args.val_frac,
+        seed=args.seed,
+        include_uncaptioned=True,
+    )
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
+                        num_workers=args.num_workers, pin_memory=True)
+
+    # ── Anchor embeddings ────────────────────────────────────────────────────
+    tok = tokenizer(anchor_texts, return_tensors="pt", padding="max_length",
+                    truncation=True, max_length=77)
+    with torch.no_grad():
+        x_ancs_t, _ = model.encode_text(tok["input_ids"].to(device),
+                                        tok["attention_mask"].to(device))
+    x_ancs = x_ancs_t.cpu().numpy()
+
+    # ── Image embeddings ─────────────────────────────────────────────────────
+    x_imgs, gt, sem = extract_embeddings(model, loader, device)
+    print(f"Embedded {len(x_imgs)} images, {len(x_ancs)} anchors "
+          f"(hyperbolic_dim={x_imgs.shape[1]})")
+
+    # ── Poincaré disk (2-D HoroPCA) ──────────────────────────────────────────
+    p_imgs = lorentz_to_poincare(x_imgs, curv=curv)
+    p_ancs = lorentz_to_poincare(x_ancs, curv=curv)
+    all_pts = np.concatenate([p_imgs, p_ancs], axis=0)
+    print(f"Running HoroPCA → 2-D on {len(all_pts)} points "
+          f"(this can take a few minutes)…")
+    coords_2d = run_horopca_2d(all_pts)
+    imgs_2d = coords_2d[:len(p_imgs)]
+    ancs_2d = coords_2d[len(p_imgs):]
+    plot_poincare_disk(imgs_2d, ancs_2d, gt, class_names,
+                       out_dir / "poincare_disk.png")
+
+    # ── 3-D UMAP (single fit, two colourings) ────────────────────────────────
+    print("Computing 3-D UMAP (fit on images, anchors at class centroids)…")
+    imgs_d = compute_umap_3d(x_imgs)
+    ancs_d = class_centroids(imgs_d, gt, class_names)
+    plot_umap_by_class(imgs_d, ancs_d, gt, class_names,
+                       out_dir / "umap_by_class.png")
+    plot_umap_by_semantic(imgs_d, ancs_d, sem, args.semantics, class_names,
+                          out_dir / "umap_by_semantic.png")
+
+    # ── ψ summary printed for reference ──────────────────────────────────────
+    psi = half_aperture(x_ancs_t.float(), curv=curv,
+                        min_radius=min_radius).cpu().numpy()
+    print(f"\nψ (half-aperture) per cone: "
+          f"{dict(zip(class_names, [f'{p:.3f}' for p in psi]))}")
+    print(f"All plots saved in {out_dir}/")
 
 
 if __name__ == "__main__":

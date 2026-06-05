@@ -62,7 +62,7 @@ cd $REPO
 CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --dataset_path    $DATA \
     --captions_dir    $CAPS \
-    --generators      real FLUX SD3_5 SDXL 4o grok3 infinity dalle3 \
+    --generators      real FLUX SD3_5 SDXL 4o grok3 infinity dalle3 PIXART mid-6.0 \
     --semantics       COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
     --clip_name       openai/clip-vit-large-patch14 \
     --lora_r          16 \
