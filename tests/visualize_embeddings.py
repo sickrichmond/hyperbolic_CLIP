@@ -108,12 +108,17 @@ def _class_colors(classes):
     return {c: cmap(i % 10) for i, c in enumerate(classes)}
 
 
-def compute_umap_3d(x_imgs, x_ancs, x_caps=None):
-    """Fit 3-D UMAP on images only, project anchors and captions afterwards.
+def compute_umap_3d(x_imgs, x_caps=None):
+    """Fit 3-D UMAP on images only.
 
-    Anchors live at a very different norm scale than images and would distort
-    the layout if included in the fit. Captions, if provided, are also
-    projected so they share the same coordinate system.
+    Anchors are intentionally NOT projected via UMAP: they live at very
+    different norm scale and `transform()` collapses them all to a single
+    "extrapolation zone". For visualisation purposes anchors are placed at
+    the centroid of their class in UMAP space (see `class_centroids`), which
+    is what we semantically want: "this anchor represents this cluster".
+
+    Captions (if provided) are projected normally — they live in the same
+    distribution as images.
     """
     try:
         import umap
@@ -122,21 +127,29 @@ def compute_umap_3d(x_imgs, x_ancs, x_caps=None):
             n_components=3, metric="euclidean", random_state=42,
         )
         imgs_d = reducer.fit_transform(x_imgs)
-        ancs_d = reducer.transform(x_ancs)
         caps_d = reducer.transform(x_caps) if x_caps is not None else None
     except ImportError:
         print("umap-learn not installed; falling back to sklearn TSNE.")
         from sklearn.manifold import TSNE
         all_pts = np.concatenate(
-            [x_imgs, x_ancs] + ([x_caps] if x_caps is not None else []), axis=0
+            [x_imgs] + ([x_caps] if x_caps is not None else []), axis=0
         )
         all_d = TSNE(n_components=3, perplexity=30,
                      random_state=42).fit_transform(all_pts)
-        n_img, K = len(x_imgs), len(x_ancs)
+        n_img = len(x_imgs)
         imgs_d = all_d[:n_img]
-        ancs_d = all_d[n_img:n_img + K]
-        caps_d = all_d[n_img + K:] if x_caps is not None else None
-    return imgs_d, ancs_d, caps_d
+        caps_d = all_d[n_img:] if x_caps is not None else None
+    return imgs_d, caps_d
+
+
+def class_centroids(imgs_d, gt, classes):
+    """Per-class centroid in UMAP space. Used as the visual location for anchors."""
+    cents = np.zeros((len(classes), imgs_d.shape[1]))
+    for i, c in enumerate(classes):
+        m = np.array([g == c for g in gt])
+        if m.any():
+            cents[i] = imgs_d[m].mean(axis=0)
+    return cents
 
 
 def _plot_3d_scatter(imgs_d, ancs_d, caps_d, point_labels, point_classes,
@@ -377,10 +390,12 @@ def main():
 
     # ── Plots ─────────────────────────────────────────────────────────────────
     # UMAP is fitted ONCE on the images; both plots share coordinates so they
-    # are point-by-point comparable.
-    print("Computing 3-D UMAP (fit on images, project anchors/captions)…")
-    imgs_d, ancs_d, caps_d = compute_umap_3d(x_imgs, x_ancs,
-                                             x_caps=x_caps if args.show_captions else None)
+    # are point-by-point comparable. Anchors are placed at the per-class
+    # centroid in UMAP space (semantically: "this anchor represents this cluster").
+    print("Computing 3-D UMAP (fit on images, anchors at class centroids)…")
+    imgs_d, caps_d = compute_umap_3d(x_imgs,
+                                     x_caps=x_caps if args.show_captions else None)
+    ancs_d = class_centroids(imgs_d, gt, class_names)
 
     plot_umap_by_class(imgs_d, ancs_d, caps_d, gt, class_names,
                        out_dir / "umap_by_class.png")
