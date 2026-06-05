@@ -281,6 +281,7 @@ def main():
         for s in ALL_SEMANTIC_CLASSES:
             valid_combinations[f"{m}_{s}".lower()] = (m, s)
 
+    failures: list[tuple[str, str]] = []
     for base_name, parts in sorted(groups.items()):
         parts.sort(key=lambda x: x["dataFile"]["filename"])
         model_name, semantic_name = valid_combinations[base_name.lower()]
@@ -307,11 +308,18 @@ def main():
 
         if main_zip is None:
             print(f"  ERROR: no .zip found for {base_name}, skipping.")
+            failures.append((base_name, "no .zip part"))
             continue
 
         print(f"  Extracting → {dataset_path / model_name}…")
-        n = extract_and_route(main_zip, model_name, semantic_name, dataset_path)
-        print(f"  {n} images extracted.")
+        try:
+            n = extract_and_route(main_zip, model_name, semantic_name, dataset_path)
+            print(f"  {n} images extracted.")
+        except (RuntimeError, zipfile.BadZipFile) as e:
+            # Most common cause: a missing data volume (.z01) on Dataverse.
+            print(f"  EXTRACTION FAILED for {base_name}: {e}")
+            failures.append((base_name, str(e)))
+            continue
 
         if args.delete_zip:
             for p in downloaded:
@@ -319,6 +327,11 @@ def main():
             print(f"  Zip(s) deleted.")
 
     print("\nDone.")
+    if failures:
+        print(f"\n{len(failures)} archive(s) could not be extracted "
+              f"(likely missing volumes on Dataverse):")
+        for base, why in failures:
+            print(f"  - {base}: {why}")
 
 
 if __name__ == "__main__":
