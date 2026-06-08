@@ -76,11 +76,16 @@ def parse_args():
     p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--max_per_class", type=int,   default=500,
                    help="Cap images per (generator, semantic) loaded from disk.")
-    p.add_argument("--horopca_max_points", type=int, default=4000,
-                   help="Random subsample size used to FIT HoroPCA. Even with "
-                        "frechet_variance the gradient steps in fp64 are slow; "
-                        "this keeps the fit under a few minutes and the 2-D "
-                        "disk visually clean. Anchors are always kept.")
+    p.add_argument("--horopca_max_points", type=int, default=1500,
+                   help="Random subsample size used to FIT HoroPCA. The default "
+                        "uses pairwise distances (memory O(N² · D) in fp64 ≈ "
+                        "2 GB at N=1500, D=128), which is more stable for a "
+                        "direct 128→2 fit than the Fréchet-variance variant. "
+                        "Anchors are always kept.")
+    p.add_argument("--horopca_steps", type=int, default=500,
+                   help="Gradient steps for the HoroPCA fit (paper used 2000).")
+    p.add_argument("--horopca_lr", type=float, default=5e-2,
+                   help="Learning rate for HoroPCA Adam (paper default).")
     p.add_argument("--batch_size",    type=int,   default=128)
     p.add_argument("--num_workers",   type=int,   default=4)
     p.add_argument("--output_dir",    required=True)
@@ -139,19 +144,23 @@ def _load_horopca():
     return HoroPCA
 
 
-def run_horopca_2d(fit_pts: np.ndarray, project_pts: np.ndarray) -> np.ndarray:
+def run_horopca_2d(fit_pts: np.ndarray, project_pts: np.ndarray,
+                   lr: float = 5e-2, max_steps: int = 500) -> np.ndarray:
     """Fit HoroPCA on `fit_pts`, project ALL of `project_pts`. Returns (N, 2).
 
-    `frechet_variance=True` switches the variance objective from O(N²) pairwise
-    distances to O(N) distances-from-mean, avoiding the OOM that plain pairwise
-    triggers above a few thousand points.
+    Uses the default pairwise-variance objective (more stable for direct
+    high-dim → 2-D than the Fréchet variant, which collapses to a single
+    point when initialised with zero mean weights). Memory is O(N² · D) in
+    fp64 — at the default fit subsample N=1500, D=128 this is ~2 GB. The
+    paper's reference hyperparameters are lr=5e-2 with ~2000 steps; 500 is
+    a good compromise that converges in a few minutes on one A100.
     """
     HoroPCA = _load_horopca()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     X_fit = torch.as_tensor(fit_pts,     dtype=torch.float64, device=device)
     X_all = torch.as_tensor(project_pts, dtype=torch.float64, device=device)
     pca = HoroPCA(dim=fit_pts.shape[1], n_components=2,
-                  frechet_variance=True).double().to(device)
+                  lr=lr, max_steps=max_steps).double().to(device)
     pca.fit(X_fit, iterative=False, optim=True)
     with torch.no_grad():
         return pca.map_to_ball(X_all).cpu().numpy()
@@ -332,9 +341,12 @@ def main():
     fit_idx = rng.choice(len(p_imgs), size=n_keep, replace=False)
     fit_pts = np.concatenate([p_imgs[fit_idx], p_ancs], axis=0)
     project_pts = np.concatenate([p_imgs, p_ancs], axis=0)
-    print(f"Running HoroPCA → 2-D: fit on {len(fit_pts)} points, "
-          f"projecting {len(project_pts)} (this can take a few minutes)…")
-    coords_2d = run_horopca_2d(fit_pts, project_pts)
+    print(f"Running HoroPCA → 2-D: fit on {len(fit_pts)} points "
+          f"({args.horopca_steps} steps, lr={args.horopca_lr}), "
+          f"projecting {len(project_pts)}…")
+    coords_2d = run_horopca_2d(fit_pts, project_pts,
+                               lr=args.horopca_lr,
+                               max_steps=args.horopca_steps)
     imgs_2d = coords_2d[:len(p_imgs)]
     ancs_2d = coords_2d[len(p_imgs):]
     plot_poincare_disk(imgs_2d, ancs_2d, gt, class_names,
