@@ -26,13 +26,43 @@ echo "OLLAMA_DIR:    $OLLAMA_DIR"
 echo "OLLAMA_MODELS: $OLLAMA_MODELS"
 echo "MODEL:         $MODEL"
 
-# ── Install Ollama binary (no root needed; it's a self-contained tarball) ─────
+# ── Install Ollama binary (no root needed; it's a self-contained bundle) ──────
+# Recent Ollama releases ship a zstd-compressed tarball (ollama-linux-amd64.tar.zst),
+# NOT the old .tgz. We fetch it from GitHub releases. Override the version with
+# OLLAMA_VERSION=v0.30.6 if you want to pin it.
+OLLAMA_VERSION="${OLLAMA_VERSION:-latest}"
+if [ "$OLLAMA_VERSION" = "latest" ]; then
+    URL="https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tar.zst"
+else
+    URL="https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst"
+fi
+
 if [ ! -x "$OLLAMA_DIR/bin/ollama" ]; then
-    echo "Downloading Ollama (linux-amd64)…"
-    curl -L https://ollama.com/download/ollama-linux-amd64.tgz \
-        -o "$OLLAMA_DIR/ollama.tgz"
-    tar -C "$OLLAMA_DIR" -xzf "$OLLAMA_DIR/ollama.tgz"
-    rm -f "$OLLAMA_DIR/ollama.tgz"
+    ARCHIVE="$OLLAMA_DIR/ollama-linux-amd64.tar.zst"
+    echo "Downloading Ollama ($OLLAMA_VERSION) from $URL …"
+    # -f: fail on HTTP errors (so a 404 body is NOT saved as the archive).
+    curl -fL --retry 3 --retry-delay 3 "$URL" -o "$ARCHIVE"
+
+    # Decompress zstd robustly: RHEL8's tar (1.30) has no --zstd, so prefer the
+    # standalone zstd binary; fall back to a zstd-aware tar if present.
+    echo "Extracting …"
+    if command -v zstd >/dev/null 2>&1; then
+        zstd -dc "$ARCHIVE" | tar -x -C "$OLLAMA_DIR"
+    elif command -v unzstd >/dev/null 2>&1; then
+        unzstd -c "$ARCHIVE" | tar -x -C "$OLLAMA_DIR"
+    elif tar --help 2>/dev/null | grep -q -- '--zstd'; then
+        tar --zstd -xf "$ARCHIVE" -C "$OLLAMA_DIR"
+    else
+        echo "ERROR: need 'zstd' to extract $ARCHIVE but none found." >&2
+        echo "Try:  module load zstd   (or: module spider zstd)   then re-run." >&2
+        exit 1
+    fi
+    rm -f "$ARCHIVE"
+
+    if [ ! -x "$OLLAMA_DIR/bin/ollama" ]; then
+        echo "ERROR: extraction did not produce $OLLAMA_DIR/bin/ollama." >&2
+        exit 1
+    fi
     echo "Installed Ollama → $OLLAMA_DIR/bin/ollama"
 else
     echo "Ollama already installed at $OLLAMA_DIR/bin/ollama"
