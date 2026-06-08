@@ -13,6 +13,7 @@ __pycache__/
 *.safetensors
 *.bin
 *.ckpt
+/step1_checkpoints/
 
 # Data
 data/openfake_*/
