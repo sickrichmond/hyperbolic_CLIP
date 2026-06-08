@@ -88,6 +88,18 @@ def parse_args():
                    help="Learning rate for HoroPCA Adam (paper default).")
     p.add_argument("--batch_size",    type=int,   default=128)
     p.add_argument("--num_workers",   type=int,   default=4)
+    p.add_argument("--no_center", action="store_true",
+                   help="Disable Fréchet-mean centering before HoroPCA. "
+                        "Centering is ON by default and is what stops the disk "
+                        "from collapsing to a single off-centre blob (HoroPCA "
+                        "assumes the data has Fréchet mean at the origin — see "
+                        "the paper's Appendix C.1). Use this flag only to "
+                        "reproduce the un-centered (broken) behaviour.")
+    p.add_argument("--disk_zoom", type=float, default=0.0,
+                   help="Axis half-width for the Poincaré disk plot. 0 (default) "
+                        "auto-frames to the data extent so the cloud fills the "
+                        "figure (Fig-4 style). Set e.g. 1.08 to always show the "
+                        "full unit disk with its boundary circle.")
     p.add_argument("--output_dir",    required=True)
     return p.parse_args()
 
@@ -166,6 +178,61 @@ def run_horopca_2d(fit_pts: np.ndarray, project_pts: np.ndarray,
         return pca.map_to_ball(X_all).cpu().numpy()
 
 
+# ────────────────────────── Poincaré centering ───────────────────────────────
+# HoroPCA assumes the data has its Fréchet mean at the origin (see the class
+# docstring in HoroPCA's learning/pca.py and the paper's Appendix C.1,
+# "Centering"). Our CLIP image embeddings instead sit in a narrow cone far from
+# the origin (mean pairwise cosine ≈ 0.9), so a projection onto a 2-D geodesic
+# submanifold *through the origin* is dominated by that global offset and the
+# whole cloud lands in a tiny off-centre blob — the "everything collapsed on one
+# point" artefact. Mapping the Fréchet mean to the origin with a hyperbolic
+# isometry (a circle inversion) fixes this and lets the conformal factor near the
+# origin expand the fine structure so it fills the disk.
+
+def _poincare_module():
+    """Import HoroPCA's Poincaré helpers (ensures the repo is on sys.path)."""
+    _load_horopca()  # idempotent; only needed for its sys.path side effect
+    import geom.poincare as poincare  # type: ignore  (external repo)
+    return poincare
+
+
+def poincare_frechet_mean(points: np.ndarray, iters: int = 200,
+                          lr: float = 0.3) -> np.ndarray:
+    """Fréchet (Karcher) mean of Poincaré-ball points via Riemannian gradient
+    descent. Returns a (1, D) array."""
+    poincare = _poincare_module()
+    x = torch.as_tensor(points, dtype=torch.float64)
+    mu = poincare.project(x.mean(0, keepdim=True))
+    for _ in range(iters):
+        v = poincare.logmap(mu.expand_as(x), x).mean(0, keepdim=True)
+        nxt = poincare.project(poincare.expmap(mu, lr * v))
+        if not torch.isfinite(nxt).all():
+            break
+        mu = nxt
+    return mu.numpy()
+
+
+def center_poincare(points: np.ndarray, mu: np.ndarray) -> np.ndarray:
+    """Apply the hyperbolic isometry (circle inversion) that maps `mu` to the
+    origin. This is the HoroPCA/Appendix-C.1 centering step."""
+    poincare = _poincare_module()
+    x = torch.as_tensor(points, dtype=torch.float64)
+    m = torch.as_tensor(mu, dtype=torch.float64)
+    return poincare.project(poincare.reflect_at_zero(x, m)).numpy()
+
+
+def _report_norms(tag: str, p: np.ndarray) -> None:
+    """Print Poincaré-norm stats + how collinear the cloud is (the diagnostic
+    that tells you whether centering is needed)."""
+    n = np.linalg.norm(p, axis=1)
+    mu = p.mean(0)
+    mun = np.linalg.norm(mu)
+    cos = float(((p @ mu) / (n * mun + 1e-12)).mean())
+    hint = "  ← collinear cone, needs centering" if cos > 0.5 else ""
+    print(f"  [{tag}] ||p||: med={np.median(n):.3f} max={n.max():.3f} | "
+          f"||mean||={mun:.3f} mean-cos={cos:.3f}{hint}")
+
+
 # ────────────────────────── embedding extraction ─────────────────────────────
 
 @torch.no_grad()
@@ -187,10 +254,18 @@ def _class_colors(classes):
     return {c: cmap(i % cmap.N) for i, c in enumerate(classes)}
 
 
-def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path):
-    """2-D HoroPCA scatter inside the unit disk."""
+def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0):
+    """2-D HoroPCA scatter inside the unit disk.
+
+    `zoom`: axis half-width. 0 ⇒ auto-frame to the data extent so the cloud fills
+    the figure (the embeddings rarely reach the unit boundary, so the default
+    full-disk view would show a tiny central blob even when correctly centred).
+    """
     _, ax = plt.subplots(figsize=(11, 11))
     ax.add_patch(Circle((0, 0), 1.0, fill=False, color="black", linewidth=1.2))
+
+    max_r = float(np.linalg.norm(np.concatenate([imgs_2d, ancs_2d]), axis=1).max())
+    lim = zoom if zoom > 0 else min(1.08, max(0.1, 1.15 * max_r))
 
     colors = _class_colors(classes)
     for c in classes:
@@ -206,10 +281,12 @@ def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path):
                     xytext=(8, 8), textcoords="offset points",
                     fontsize=11, fontweight="bold")
 
-    ax.set_xlim(-1.1, 1.1); ax.set_ylim(-1.1, 1.1)
+    ax.set_xlim(-lim, lim); ax.set_ylim(-lim, lim)
     ax.set_aspect("equal")
     ax.set_xticks([]); ax.set_yticks([])
-    ax.set_title("Poincaré disk projection (Lorentz → Poincaré ball → 2-D HoroPCA)")
+    zoom_note = "" if lim >= 0.98 else f"  —  zoomed to max radius {max_r:.2f} of unit disk"
+    ax.set_title("Poincaré disk projection (Lorentz → Poincaré ball → 2-D HoroPCA)"
+                 + zoom_note)
     ax.legend(loc="lower right", fontsize=8, framealpha=0.85)
     plt.tight_layout()
     plt.savefig(out_path, dpi=140, bbox_inches="tight")
@@ -334,6 +411,19 @@ def main():
     p_imgs = lorentz_to_poincare(x_imgs, curv=curv)
     p_ancs = lorentz_to_poincare(x_ancs, curv=curv)
 
+    # Centre at the Fréchet mean so HoroPCA's through-the-origin projection isn't
+    # dominated by the global offset of the cone (otherwise the disk collapses to
+    # one blob). The SAME isometry is applied to the anchors so they stay in the
+    # image cloud's frame. Disable with --no_center to see the broken behaviour.
+    _report_norms("before centering", p_imgs)
+    if not args.no_center:
+        mu = poincare_frechet_mean(p_imgs)
+        p_imgs = center_poincare(p_imgs, mu)
+        p_ancs = center_poincare(p_ancs, mu)
+        _report_norms("after centering ", p_imgs)
+    else:
+        print("  centering DISABLED (--no_center): expect a collapsed/off-centre disk")
+
     # Fit HoroPCA on a random subsample (anchors always included), then project
     # every image so the plot still shows the full val set.
     rng = np.random.default_rng(args.seed)
@@ -349,8 +439,9 @@ def main():
                                max_steps=args.horopca_steps)
     imgs_2d = coords_2d[:len(p_imgs)]
     ancs_2d = coords_2d[len(p_imgs):]
+    _report_norms("2-D projection ", imgs_2d)
     plot_poincare_disk(imgs_2d, ancs_2d, gt, class_names,
-                       out_dir / "poincare_disk.png")
+                       out_dir / "poincare_disk.png", zoom=args.disk_zoom)
 
     # ── 3-D UMAP (single fit, two colourings) ────────────────────────────────
     print("Computing 3-D UMAP (fit on images, anchors at class centroids)…")
