@@ -97,6 +97,11 @@ THREE_COLUMN = {"ImageNet-1k"}
 ALL_SEMANTICS = list(SEMANTIC_DIR.keys())
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".JPEG"}
 
+# Abort a class early if this many images fail before ANY succeeds — almost
+# always means the Ollama model isn't loading (e.g. a CUDA error), so there is
+# no point grinding through thousands of doomed requests.
+FAILFAST_FAILURES = 25
+
 # Cleanup patterns for model output.
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _OPEN_THINK_RE = re.compile(r"<think>.*", re.DOTALL | re.IGNORECASE)
@@ -317,6 +322,13 @@ def process_semantic(args, semantic: str) -> tuple[int, int]:
             except Exception as e:               # noqa: BLE001
                 n_failed += 1
                 tqdm.write(f"  ! {p.name}: {e}")
+                if n_written == 0 and n_failed >= FAILFAST_FAILURES:
+                    for f2 in futures:
+                        f2.cancel()
+                    raise RuntimeError(
+                        f"[{semantic}] {n_failed} failures with 0 successes — "
+                        f"aborting. The Ollama model is almost certainly not "
+                        f"loading; check the server log. Last error: {e}")
                 continue
             rel = _rel_imgpath(root, p)
             if three_col:

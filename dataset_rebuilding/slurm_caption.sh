@@ -17,8 +17,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gpus-per-node=1            # one A100 80GB easily holds a 9B model
-#SBATCH --time=06:00:00
+#SBATCH --gpus-per-node=1
+#SBATCH --time=24:00:00
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 #SBATCH --mail-type=END,FAIL
@@ -32,11 +32,14 @@ module load cuda/12.6
 source "$WORK/hyp_fine_tuning/bin/activate"
 
 # ── Ollama env ────────────────────────────────────────────────────────────────
-export PATH="$WORK/ollama/bin:$PATH"
-export LD_LIBRARY_PATH="$WORK/ollama/lib:${LD_LIBRARY_PATH:-}"
+# Pinned to v0.24.0: the v0.30.x line crashes on Leonardo's driver (535/CUDA 12.2)
+# with "CUDA error: device kernel image is invalid". See README / setup script.
+OLLAMA_DIR="$WORK/ollama-0.24.0"
+export PATH="$OLLAMA_DIR/bin:$PATH"
+export LD_LIBRARY_PATH="$OLLAMA_DIR/lib:${LD_LIBRARY_PATH:-}"
 export OLLAMA_MODELS="$WORK/ollama_models"
 export OLLAMA_HOST="127.0.0.1:11434"
-export OLLAMA_NUM_PARALLEL=4          # let Ollama batch concurrent requests
+export OLLAMA_NUM_PARALLEL=8          # let Ollama batch concurrent requests
 export OLLAMA_KEEP_ALIVE=-1           # keep the model resident for the whole job
 export OLLAMA_MAX_LOADED_MODELS=1
 
@@ -46,7 +49,7 @@ DATA="$WORK/iab_dataset"
 ORIG_CAPS="$WORK/hyp_fine_tuning/iab_captions"
 OUT="$WORK/iab_captions_detailed"
 MODEL="qwen3.5:9b"
-WORKERS=4
+WORKERS=8
 
 cd "$REPO"
 
@@ -61,7 +64,7 @@ trap 'echo "Stopping Ollama…"; kill $OLLAMA_PID 2>/dev/null || true' EXIT
 # warm-up hiccup never fails the job.
 sleep 10
 curl -sf "http://$OLLAMA_HOST/api/generate" \
-    -d "{\"model\":\"$MODEL\",\"prompt\":\"hi\",\"stream\":false,\"keep_alive\":-1}" \
+    -d "{\"model\":\"$MODEL\",\"prompt\":\"hi\",\"stream\":false,\"think\":false,\"keep_alive\":-1}" \
     >/dev/null 2>&1 || true
 nvidia-smi || true
 

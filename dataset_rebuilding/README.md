@@ -53,6 +53,20 @@ Captions are keyed by image-filename **stem**, matching `IABCLIPDataset`. To use
 them later, point the loader at the new dir:
 `IABCLIPDataset(captions_dir="$WORK/iab_captions_detailed", ...)`.
 
+## Ollama version is pinned (do not bump blindly)
+
+Leonardo's GPU driver is `535.274.02` (CUDA 12.2). **Ollama v0.30.x** ships CUDA
+kernels that this driver cannot load → every model crashes on load with
+`CUDA error: device kernel image is invalid`. We therefore pin **v0.24.0**, the
+last release that runs on this driver *and* supports `qwen3.5`. It installs to
+`$WORK/ollama-0.24.0` (the `slurm_caption.sh` and `setup_ollama_cineca.sh` point
+there). To try a newer version, test `ollama run qwen3.5:9b` on an interactive
+GPU node first and watch the serve log for that CUDA error.
+
+`qwen3.5` is a **reasoning model**: by default it emits a long `Thinking…` chain
+(~60 s for a trivial prompt). The captioner sends `"think": false` in every
+request, which suppresses it (~0.4 s for the same prompt). Keep that.
+
 ## Tips
 
 - **Check quality first**: smoke-test one image per class before the full run:

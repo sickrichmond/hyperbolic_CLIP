@@ -11,9 +11,16 @@ set -euo pipefail
 
 MODEL="${1:-qwen3.5:9b}"
 
+# IMPORTANT: Ollama v0.30.x dropped CUDA-kernel compatibility for Leonardo's
+# driver (535.274.02 / CUDA 12.2) → models crash on load with
+# "CUDA error: device kernel image is invalid". v0.24.0 is the last release that
+# BOTH runs on this driver AND supports qwen3.5. Do not bump without re-testing
+# on a GPU node (see dataset_rebuilding/README.md).
+OLLAMA_VERSION="${OLLAMA_VERSION:-v0.24.0}"
+
 # Persist large data under $WORK (home quota is small). $WORK is shared across
 # login and compute nodes, so models pulled here are visible to the SLURM job.
-OLLAMA_DIR="$WORK/ollama"                 # the extracted Ollama distribution
+OLLAMA_DIR="$WORK/ollama-${OLLAMA_VERSION#v}"   # e.g. $WORK/ollama-0.24.0
 export OLLAMA_MODELS="$WORK/ollama_models"  # where pulled model blobs live
 OLLAMA_HOST="127.0.0.1:11434"
 export OLLAMA_HOST
@@ -28,9 +35,7 @@ echo "MODEL:         $MODEL"
 
 # ── Install Ollama binary (no root needed; it's a self-contained bundle) ──────
 # Recent Ollama releases ship a zstd-compressed tarball (ollama-linux-amd64.tar.zst),
-# NOT the old .tgz. We fetch it from GitHub releases. Override the version with
-# OLLAMA_VERSION=v0.30.6 if you want to pin it.
-OLLAMA_VERSION="${OLLAMA_VERSION:-latest}"
+# NOT the old .tgz. We fetch it from GitHub releases.
 if [ "$OLLAMA_VERSION" = "latest" ]; then
     URL="https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tar.zst"
 else
@@ -74,8 +79,8 @@ echo "Ollama version: $(ollama --version 2>/dev/null || echo '??')"
 
 # ── Persist env vars for future shells ────────────────────────────────────────
 add_line() { grep -qxF "$1" ~/.bashrc || echo "$1" >> ~/.bashrc; }
-add_line "export PATH=\$WORK/ollama/bin:\$PATH"
-add_line "export LD_LIBRARY_PATH=\$WORK/ollama/lib:\${LD_LIBRARY_PATH:-}"
+add_line "export PATH=$OLLAMA_DIR/bin:\$PATH"
+add_line "export LD_LIBRARY_PATH=$OLLAMA_DIR/lib:\${LD_LIBRARY_PATH:-}"
 add_line "export OLLAMA_MODELS=\$WORK/ollama_models"
 
 # ── Start a temporary server and pull the model ───────────────────────────────
