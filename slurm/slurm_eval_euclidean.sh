@@ -31,8 +31,14 @@ export TRANSFORMERS_OFFLINE=1
 
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
+# Dimension from the CLI (default 4): sbatch slurm/slurm_eval_euclidean.sh 8
+# Override the full path with CKPT=... to eval e.g. the legacy d=128 file
+# (attribution_all_euclidean.pt, no _d suffix).
+DIM=${1:-4}
+CKPT=${CKPT:-$WORK/checkpoints/attribution_all_euclidean_d${DIM}.pt}
+
 python -m tests.eval_attribution_euclidean \
-    --checkpoint   $WORK/checkpoints/attribution_all_euclidean.pt \
+    --checkpoint   $CKPT \
     --dataset_path $WORK/iab_dataset \
     --captions_dir $WORK/hyp_fine_tuning/iab_captions \
     --generators   real 4o gemini grok3 FLUX \

@@ -44,6 +44,11 @@ REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP
 DATA=$WORK/iab_dataset
 CAPS=$WORK/hyp_fine_tuning/iab_captions
 OUT=$WORK/checkpoints
+DIM=${1:-4}                 # embedding dimension; pass on the CLI, e.g.
+                            #   sbatch slurm/slurm_euclidean_baseline.sh 8
+                            # (default 4). Baked into the checkpoint name so runs at
+                            # different d don't clobber each other or the d=128
+                            # attribution_all_euclidean.pt.
 
 mkdir -p $OUT
 cd $REPO
@@ -65,13 +70,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution_euclidean.py \
     --clip_name       openai/clip-vit-large-patch14 \
     --lora_r          16 \
     --lora_alpha      32 \
-    --embed_dim       128 \
+    --embed_dim       $DIM \
     --batch_size      256 \
     --num_epochs      8 \
     --lr              5e-5 \
     --weight_decay    0.01 \
     --val_frac        0.2 \
     --num_workers     8 \
-    --output          $OUT/attribution_all_euclidean.pt
+    --output          $OUT/attribution_all_euclidean_d${DIM}.pt
 
-echo "Done: $OUT/attribution_all_euclidean.pt"
+echo "Done: $OUT/attribution_all_euclidean_d${DIM}.pt"

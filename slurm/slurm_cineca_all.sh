@@ -44,6 +44,11 @@ REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP
 DATA=$WORK/iab_dataset
 CAPS=$WORK/hyp_fine_tuning/iab_captions
 OUT=$WORK/checkpoints
+DIM=${1:-4}                 # embedding dimension; pass on the CLI, e.g.
+                            #   sbatch slurm/slurm_cineca_all.sh 8
+                            # (default 4). Baked into the checkpoint name so runs at
+                            # different d don't clobber each other or the d=128
+                            # attribution_all_no_dalle.pt.
 
 mkdir -p $OUT
 cd $REPO
@@ -53,10 +58,6 @@ cd $REPO
 # the cone of its class anchor and out of the other 21 cones. 80/20 split per
 # (generator, semantic).
 #
-# target_norm kept at 5.0 (NOT raised): in the K=10 run images sit just inside
-# their own cone (ξ̄≈0.18 < ψ≈0.20). Raising target_norm shrinks ψ and would push
-# images out of their cones, collapsing inside%. 128-D leaves plenty of angular
-# room for 22 well-separated cone axes, so 5.0 is fine.
 #
 # The best checkpoint (by balanced val accuracy) is saved every time val
 # improves, so even if the job hits the walltime you keep the best-so-far model.
@@ -73,7 +74,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --clip_name       openai/clip-vit-large-patch14 \
     --lora_r          16 \
     --lora_alpha      32 \
-    --hyperbolic_dim  128 \
+    --hyperbolic_dim  $DIM \
     --curv            1.0 \
     --min_radius      0.5 \
     --margin          0.3 \
@@ -88,6 +89,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --weight_decay    0.01 \
     --val_frac        0.2 \
     --num_workers     8 \
-    --output          $OUT/attribution_all_no_dalle.pt
+    --output          $OUT/attribution_all_no_dalle_d${DIM}.pt
 
-echo "Done: $OUT/attribution_all_no_dalle.pt"
+echo "Done: $OUT/attribution_all_no_dalle_d${DIM}.pt"

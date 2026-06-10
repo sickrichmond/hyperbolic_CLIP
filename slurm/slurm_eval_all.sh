@@ -30,7 +30,11 @@ export TRANSFORMERS_OFFLINE=1
 
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
-CKPT=${CKPT:-$WORK/checkpoints/attribution_all_no_dalle.pt}
+# Dimension from the CLI (default 4): sbatch slurm/slurm_eval_all.sh 8
+# Override the full path with CKPT=... to eval e.g. the legacy d=128 file
+# (attribution_all_no_dalle.pt, no _d suffix).
+DIM=${1:-4}
+CKPT=${CKPT:-$WORK/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
 
 python -m tests.eval_attribution \
     --checkpoint   $CKPT \
