@@ -31,14 +31,16 @@ pip install --upgrade diffusers sentencepiece protobuf --quiet
 python -c "import diffusers; print('diffusers', diffusers.__version__)"
 
 # ── Pre-download weights into HF_HOME ─────────────────────────────────────────
-echo "Pre-downloading $MODEL into $HF_HOME (one-time, ~24 GB for FLUX.1-dev)…"
+# Use snapshot_download (fetch files only) — NOT FluxPipeline.from_pretrained,
+# which also loads ~34 GB of weights into RAM and gets OOM-killed on the
+# memory-limited login node. The GPU compute node does the actual load.
+echo "Pre-downloading $MODEL into $HF_HOME (one-time, ~34 GB)…"
 python - "$MODEL" <<'PY'
 import sys
-from diffusers import FluxPipeline
+from huggingface_hub import snapshot_download
 model = sys.argv[1]
-# Download only (no GPU needed on the login node); weights land in HF_HOME.
-FluxPipeline.from_pretrained(model)
-print(f"Cached {model}.")
+path = snapshot_download(repo_id=model)
+print(f"Cached {model} → {path}")
 PY
 
 echo ""
