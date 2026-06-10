@@ -174,6 +174,12 @@ def _stable_seed(base: int, key: str) -> int:
 
 
 def build_pipeline(kind: str, model: str, dtype: str, cpu_offload: bool):
+    # Silence the per-image CLIP "truncated to 77 tokens" warning: it is expected
+    # and harmless — SD3/SD3.5/FLUX carry the full prompt via their T5 encoder; it
+    # only floods the logs (and looks like an error). SDXL is CLIP-only so it does
+    # truncate at 77 tokens, but that matches IAB's SDXL.
+    from transformers.utils import logging as hf_logging
+    hf_logging.set_verbosity_error()
     from diffusers import (FluxPipeline, StableDiffusion3Pipeline,
                            StableDiffusionXLPipeline)
     cls = {"flux": FluxPipeline, "sd3": StableDiffusion3Pipeline,
