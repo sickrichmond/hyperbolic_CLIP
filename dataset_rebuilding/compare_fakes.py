@@ -74,6 +74,9 @@ def parse_args():
     p.add_argument("--generator", default="FLUX")
     p.add_argument("--semantics", nargs="+", default=ALL_SEMANTICS,
                    choices=ALL_SEMANTICS)
+    p.add_argument("--new_naming", choices=["iab", "stem"], default="iab",
+                   help="How the new fakes are named: iab ({prefix}_p{N}_i{K}.png, "
+                        "round 2) or stem (<stem>.png, round 1).")
     p.add_argument("--num_samples", type=int, default=8)
     p.add_argument("--thumb", type=int, default=320, help="Thumbnail px per cell.")
     p.add_argument("--seed", type=int, default=0)
@@ -123,6 +126,14 @@ def _real_path(real_dir: Path, stem: str) -> Path | None:
     return None
 
 
+def _new_fake_path(new_dir: Path, prefix: str, stem: str, n: int,
+                   naming: str) -> Path | None:
+    if naming == "iab":
+        return _orig_fake_path(new_dir, prefix, n)   # {prefix}_p{N}_i{K}.png
+    cand = new_dir / f"{stem}.png"                    # <stem>.png
+    return cand if cand.exists() else None
+
+
 def _load_thumb(path: Path | None, size: int):
     if path is None or not path.exists():
         return None
@@ -142,22 +153,16 @@ def build_sheet(args, semantic: str) -> bool:
     orig_dir = _orig_dir(root, gen, semantic)
     new_dir = _new_dir(recap, gen, semantic)
 
-    new_stems = ({p.stem for p in new_dir.iterdir() if p.suffix in IMAGE_EXTS}
-                 if new_dir.exists() else set())
-
-    # Candidate stems: have a real image + a mappable original fake; prefer those
-    # with a new fake (the actual comparison).
+    # Candidate stems: have a real image + a mappable original fake + (unless
+    # --allow_missing_new) a new fake.
     candidates = []
-    pool = sorted(new_stems) if (new_stems and not args.allow_missing_new) \
-        else sorted(stem2row)
-    for stem in pool:
-        if stem not in stem2row:
-            continue
+    for stem, n in sorted(stem2row.items()):
         if _real_path(real_dir, stem) is None:
             continue
-        if _orig_fake_path(orig_dir, prefix, stem2row[stem]) is None:
+        if _orig_fake_path(orig_dir, prefix, n) is None:
             continue
-        if not args.allow_missing_new and stem not in new_stems:
+        has_new = _new_fake_path(new_dir, prefix, stem, n, args.new_naming) is not None
+        if not has_new and not args.allow_missing_new:
             continue
         candidates.append(stem)
 
@@ -181,7 +186,7 @@ def build_sheet(args, semantic: str) -> bool:
         paths = [
             _real_path(real_dir, stem),
             _orig_fake_path(orig_dir, prefix, n_row),
-            (new_dir / f"{stem}.png") if (new_dir / f"{stem}.png").exists() else None,
+            _new_fake_path(new_dir, prefix, stem, n_row, args.new_naming),
         ]
         for j, pth in enumerate(paths):
             ax = axes[i, j]

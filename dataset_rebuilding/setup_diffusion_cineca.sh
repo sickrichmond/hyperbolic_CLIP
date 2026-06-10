@@ -20,7 +20,7 @@ set -euo pipefail
 # Generator label → HF repo id (keep in sync with generate_fakes.py GENERATORS).
 declare -A REPO=(
     [SD3]="stabilityai/stable-diffusion-3-medium-diffusers"
-    [SD3_5]="stabilityai/stable-diffusion-3.5-large"
+    [SD3_5]="stabilityai/stable-diffusion-3.5-medium"   # IAB used medium, not large
     [SDXL]="stabilityai/stable-diffusion-xl-base-1.0"
     [FLUX]="black-forest-labs/FLUX.1-schnell"
 )
