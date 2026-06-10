@@ -5,18 +5,16 @@
 # into HF_HOME (compute nodes are offline).
 #
 # Usage:  bash dataset_rebuilding/setup_flux_cineca.sh
-#         bash dataset_rebuilding/setup_flux_cineca.sh black-forest-labs/FLUX.1-schnell
+#         bash dataset_rebuilding/setup_flux_cineca.sh black-forest-labs/FLUX.1-dev
 #
-# NOTE on FLUX.1-dev (the default, matches IAB):
-#   It is a GATED model. Before running this you must, ONCE:
-#     1) accept the license at https://huggingface.co/black-forest-labs/FLUX.1-dev
-#     2) create a HF token and log in:   huggingface-cli login
-#        (or:  export HF_TOKEN=hf_xxx)
-#   FLUX.1-schnell is Apache-2.0 / ungated and needs no token.
+# Default is FLUX.1-schnell (what IAB used): Apache-2.0, UNGATED — no token needed.
+# To use FLUX.1-dev instead, it is GATED: first accept the license at
+#   https://huggingface.co/black-forest-labs/FLUX.1-dev
+# then `huggingface-cli login` (or export HF_TOKEN=hf_xxx) before running this.
 # ============================================================================
 set -euo pipefail
 
-MODEL="${1:-black-forest-labs/FLUX.1-dev}"
+MODEL="${1:-black-forest-labs/FLUX.1-schnell}"
 
 module load python/3.11.7
 module load cuda/12.6

@@ -24,7 +24,7 @@ Example:
         --captions_dir $WORK/iab_captions_detailed_clean \\
         --dataset_path $WORK/iab_dataset \\
         --out_root     $WORK/iab_recap_dataset \\
-        --model        black-forest-labs/FLUX.1-dev \\
+        --model        black-forest-labs/FLUX.1-schnell \\
         --max_per_class 100        # pilot subset; drop to do all 2000/class
 """
 import argparse
@@ -74,19 +74,20 @@ def parse_args():
                    help="IAB root (contains real/), to enumerate real stems.")
     p.add_argument("--out_root", required=True,
                    help="Output root; fakes go to <out_root>/FLUX/<semantic>/.")
-    p.add_argument("--model", default="black-forest-labs/FLUX.1-dev",
-                   help="HF id. Use black-forest-labs/FLUX.1-schnell for the fast, "
-                        "ungated variant (then set --steps 4 --guidance 0).")
+    p.add_argument("--model", default="black-forest-labs/FLUX.1-schnell",
+                   help="HF id. Default FLUX.1-schnell (ungated, fast — the model "
+                        "IAB used). For FLUX.1-dev set --steps 28 --guidance 3.5 "
+                        "--max_seq_len 512.")
     p.add_argument("--semantics", nargs="+", default=ALL_SEMANTICS,
                    choices=ALL_SEMANTICS)
-    p.add_argument("--steps", type=int, default=28,
-                   help="Inference steps (FLUX.1-dev ~28; schnell ~4).")
-    p.add_argument("--guidance", type=float, default=3.5,
-                   help="Guidance scale (dev ~3.5; schnell 0.0).")
+    p.add_argument("--steps", type=int, default=4,
+                   help="Inference steps (schnell ~4; FLUX.1-dev ~28).")
+    p.add_argument("--guidance", type=float, default=0.0,
+                   help="Guidance scale (schnell 0.0; FLUX.1-dev ~3.5).")
     p.add_argument("--height", type=int, default=1024)
     p.add_argument("--width", type=int, default=1024)
-    p.add_argument("--max_seq_len", type=int, default=512,
-                   help="T5 max sequence length (schnell caps at 256).")
+    p.add_argument("--max_seq_len", type=int, default=256,
+                   help="T5 max sequence length (schnell caps at 256; dev up to 512).")
     p.add_argument("--max_per_class", type=int, default=None,
                    help="Cap fakes per class (pilot).")
     p.add_argument("--limit", type=int, default=None,

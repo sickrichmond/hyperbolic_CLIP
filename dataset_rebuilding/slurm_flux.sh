@@ -39,7 +39,7 @@ REPO="$WORK/hyp_fine_tuning/hyperbolic_CLIP"
 CAPS="$WORK/iab_captions_detailed_clean"
 DATA="$WORK/iab_dataset"
 OUT="$WORK/iab_recap_dataset"
-MODEL="black-forest-labs/FLUX.1-dev"
+MODEL="black-forest-labs/FLUX.1-schnell"   # what IAB used; ungated, fast (4 steps)
 
 cd "$REPO"
 nvidia-smi || true
@@ -49,10 +49,11 @@ python dataset_rebuilding/generate_flux_fakes.py \
     --dataset_path   "$DATA" \
     --out_root       "$OUT" \
     --model          "$MODEL" \
-    --steps          28 \
-    --guidance       3.5 \
+    --steps          4 \
+    --guidance       0 \
     --height         1024 \
     --width          1024 \
+    --max_seq_len    256 \
     --max_per_class  100
 
 echo "FLUX fakes under: $OUT/FLUX/"
