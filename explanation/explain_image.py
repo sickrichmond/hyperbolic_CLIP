@@ -63,6 +63,8 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device):
         lora_alpha=ckpt["lora_alpha"],
         hyperbolic_dim=ckpt["hyperbolic_dim"],
         curv=ckpt["curv"],
+        # Eager attention so vision_model can return attention maps for AGCAM/Guided.
+        attn_implementation="eager",
     ).to(device)
 
     model.clip.load_state_dict(ckpt["lora_state"])
