@@ -1,20 +1,21 @@
 #!/bin/bash
 # ============================================================================
-# CINECA Leonardo — AGCAM / Guided explainability for AttributionCLIP.
+# CINECA Leonardo — per-class explanation gallery for AttributionCLIP.
 #
-# Single-image inference + backprop through the ViT-L/14 attention stack:
-# lightweight, so 1 GPU / short walltime is plenty.
+# Picks one representative image PER CLASS (a real FLUX sample for FLUX, a real
+# SD3 sample for SD3, …), explains each with its own class heatmap, and builds a
+# side-by-side comparison grid. Single-image inference + backprop through the
+# ViT-L/14 attention stack: lightweight, so 1 GPU / short walltime is plenty.
 #
 # Submit (DIM picks the checkpoint, mirrors slurm_cineca_all.sh):
 #   sbatch slurm/slurm_explain.sh 16
 #
-# Override any path on the CLI, e.g.:
-#   IMAGE=$WORK/iab_dataset/FLUX/COCO/xxx.jpg OUT=$WORK/outputs/foo \
-#       sbatch slurm/slurm_explain.sh 16
+# Override on the CLI, e.g. a different semantic / sample / method:
+#   SEMANTIC=bedroom IMAGE_INDEX=3 METHOD=guided sbatch slurm/slurm_explain.sh 16
 #
-# NOTE: run as a module (python -m explanation.explain_image), NOT as a file
-# path — the package imports (models., losses., explanation., geometry.) need
-# the repo root on sys.path, which only the -m form provides.
+# NOTE: run as a module (python -m explanation.explain_gallery), NOT as a file
+# path — the package imports (models., losses., explanation., data., geometry.)
+# need the repo root on sys.path, which only the -m form provides.
 # ============================================================================
 
 #SBATCH --account=EUHPC_D26_009B
@@ -43,25 +44,24 @@ export HF_DATASETS_OFFLINE=1
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
 # ── Parameters ────────────────────────────────────────────────────────────────
-DIM=${1:-16}               # embedding dim; selects the checkpoint name below.
+DIM=${1:-16}                  # embedding dim; selects the checkpoint name below.
 CKPT=${CKPT:-$WORK/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
-
-# Image to explain — MUST already exist on CINECA. Point at a dataset sample or
-# rsync one over from local. Override with IMAGE=... on the sbatch line.
-IMAGE=${IMAGE:-$WORK/iab_dataset/FLUX/COCO/COCO-new_p0_i0.png}
-
-OUT=${OUT:-$WORK/outputs/explanation/d${DIM}}
-METHOD=${METHOD:-agcam}    # agcam | guided
+DATA=${DATA:-$WORK/iab_dataset}
+SEMANTIC=${SEMANTIC:-COCO}    # one semantic, shown for every class (fair compare)
+IMAGE_INDEX=${IMAGE_INDEX:-0} # which sample per class (sorted order)
+OUT=${OUT:-$WORK/outputs/gallery/d${DIM}}
+METHOD=${METHOD:-agcam}       # agcam | guided
 
 mkdir -p $OUT
 
 # ── Run ───────────────────────────────────────────────────────────────────────
-python -m explanation.explain_image \
-    --image       $IMAGE \
-    --checkpoint  $CKPT \
-    --method      $METHOD \
-    --score_mode  margin \
-    --output_dir  $OUT \
-    --all_classes
+python -m explanation.explain_gallery \
+    --checkpoint    $CKPT \
+    --dataset_path  $DATA \
+    --semantic      $SEMANTIC \
+    --image_index   $IMAGE_INDEX \
+    --method        $METHOD \
+    --score_mode    margin \
+    --output_dir    $OUT
 
-echo "Explanation outputs → $OUT"
+echo "Gallery outputs → $OUT"
