@@ -32,6 +32,7 @@ hf_cache/
 Thumbs.db
 
 claude_setup/
+.claude/
 
 # Cloned third-party repos (e.g. HoroPCA)
 external/
