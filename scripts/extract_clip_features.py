@@ -2,7 +2,7 @@ import argparse
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from data.iab_clip_dataset import IABCLIPDataset
