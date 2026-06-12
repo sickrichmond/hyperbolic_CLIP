@@ -37,7 +37,7 @@ mkdir -p $WORK/checkpoints
 
 python train_linear_probe.py \
     --features_dir $WORK/clip_features \
-    --epochs       100 \
+    --epochs       8 \
     --lr           1e-3 \
     --weight_decay 1e-4 \
     --batch_size   4096 \
