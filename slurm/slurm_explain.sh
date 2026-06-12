@@ -50,7 +50,7 @@ SEMANTIC=${2:-${SEMANTIC:-COCO}}  # arg 2 (or env): one semantic, shown for ever
 CKPT=${CKPT:-$WORK/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
 DATA=${DATA:-$WORK/iab_dataset}
 IMAGE_INDEX=${IMAGE_INDEX:-0} # which sample per class (sorted order)
-OUT=${OUT:-$WORK/outputs/gallery/d${DIM}}
+OUT=${OUT:-$WORK/outputs/gallery/d${DIM}_${SEMANTIC}}
 METHOD=${METHOD:-agcam}       # agcam | guided
 
 mkdir -p $OUT
