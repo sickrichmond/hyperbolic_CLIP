@@ -7,11 +7,12 @@
 # side-by-side comparison grid. Single-image inference + backprop through the
 # ViT-L/14 attention stack: lightweight, so 1 GPU / short walltime is plenty.
 #
-# Submit (DIM picks the checkpoint, mirrors slurm_cineca_all.sh):
-#   sbatch slurm/slurm_explain.sh 16
+# Submit (positional args: DIM picks the checkpoint, SEMANTIC the content):
+#   sbatch slurm/slurm_explain.sh 16            # d16, COCO (default semantic)
+#   sbatch slurm/slurm_explain.sh 16 FFHQ       # d16, faces
 #
-# Override on the CLI, e.g. a different semantic / sample / method:
-#   SEMANTIC=bedroom IMAGE_INDEX=3 METHOD=guided sbatch slurm/slurm_explain.sh 16
+# Override the rest on the CLI, e.g. a different sample / method:
+#   IMAGE_INDEX=3 METHOD=guided sbatch slurm/slurm_explain.sh 16 bedroom
 #
 # NOTE: run as a module (python -m explanation.explain_gallery), NOT as a file
 # path — the package imports (models., losses., explanation., data., geometry.)
@@ -44,10 +45,10 @@ export HF_DATASETS_OFFLINE=1
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
 # ── Parameters ────────────────────────────────────────────────────────────────
-DIM=${1:-16}                  # embedding dim; selects the checkpoint name below.
+DIM=${1:-16}                  # arg 1: embedding dim; selects the checkpoint below.
+SEMANTIC=${2:-${SEMANTIC:-COCO}}  # arg 2 (or env): one semantic, shown for every class
 CKPT=${CKPT:-$WORK/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
 DATA=${DATA:-$WORK/iab_dataset}
-SEMANTIC=${SEMANTIC:-COCO}    # one semantic, shown for every class (fair compare)
 IMAGE_INDEX=${IMAGE_INDEX:-0} # which sample per class (sorted order)
 OUT=${OUT:-$WORK/outputs/gallery/d${DIM}}
 METHOD=${METHOD:-agcam}       # agcam | guided
