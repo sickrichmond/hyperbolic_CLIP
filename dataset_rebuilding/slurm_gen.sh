@@ -62,12 +62,23 @@ nvidia-smi || true
 SEM_ARG=()
 [ ${#SEMS[@]} -gt 0 ] && SEM_ARG=(--semantics "${SEMS[@]}")
 
+# Naming mode (default iab). Set NAMING=stem for classes where the IAB source CSV
+# stems don't match our captioned real images (e.g. celebahq: IAB uses CelebA-HQ
+# 6-digit gender-split ids, our reals are 5-digit) — stem mode iterates the real
+# images directly so captions always match. stem mode needs DATASET_PATH (the
+# root containing real/<...>); fake_src is unused there.
+NAMING="${NAMING:-iab}"
+NAME_ARG=(--naming "$NAMING")
+if [ "$NAMING" = "stem" ]; then
+    NAME_ARG+=(--dataset_path "${DATASET_PATH:?stem naming needs DATASET_PATH=<root with real/...>}")
+fi
+
 python dataset_rebuilding/generate_fakes.py \
     --generator            "$GEN" \
-    --naming               iab \
     --captions_dir         "$CAPS" \
     --fake_src_captions_dir "$SRC_CAPS" \
     --out_root             "$OUT" \
+    "${NAME_ARG[@]}" \
     "${SEM_ARG[@]}"
 
 echo "Fakes under: $OUT/$GEN/"

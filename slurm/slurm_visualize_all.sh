@@ -31,9 +31,15 @@ export HOROPCA_DIR=${HOROPCA_DIR:-$WORK/hyp_fine_tuning/horopca}
 
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
-# Override via env vars when needed, e.g. CKPT=... OUT=... sbatch scripts/slurm_visualize.sh
-CKPT=${CKPT:-$WORK/checkpoints/attribution_all_no_dalle.pt}
-OUT=${OUT:-$WORK/viz/all_no_dalle}
+# Embedding dimension; pass on the CLI, e.g.
+#   sbatch slurm/slurm_visualize_all.sh 8
+# (default 4). Must match the d used at training time so the right checkpoint is
+# picked up — see slurm/slurm_cineca_all.sh, which writes attribution_all_no_dalle_d${DIM}.pt.
+DIM=${1:-4}
+
+# Override via env vars when needed, e.g. CKPT=... OUT=... sbatch slurm/slurm_visualize_all.sh
+CKPT=${CKPT:-$WORK/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
+OUT=${OUT:-$WORK/viz/all_no_dalle_d${DIM}}
 GENERATORS=${GENERATORS:-"real 4o gemini grok3 FLUX SD1_5 SD2_1 SD3 SD3_5 SDXL PIXART PLAYGROUND_2_5 KANDINSKY CogView3_PLUS hidream hunyuan ideogram infinity janus-pro kling mid-5.2 mid-6.0"}
 
 python -m tests.visualize_horopca \
