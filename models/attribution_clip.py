@@ -28,12 +28,19 @@ class AttributionCLIP(nn.Module):
         hyperbolic_dim: int = 128,
         curv: float = 1.0,
         init_scale: float = 0.1,
+        attn_implementation: str | None = None,
     ):
         super().__init__()
         self.curv = curv
         self.hyperbolic_dim = hyperbolic_dim
 
-        self.clip = CLIPModel.from_pretrained(clip_name, use_safetensors=True)
+        # attn_implementation="eager" is required to read attention maps
+        # (output_attentions=True), which the explainability pipeline needs.
+        # Training leaves it None so transformers picks the fast default (sdpa).
+        clip_kwargs = {"use_safetensors": True}
+        if attn_implementation is not None:
+            clip_kwargs["attn_implementation"] = attn_implementation
+        self.clip = CLIPModel.from_pretrained(clip_name, **clip_kwargs)
         for p in self.clip.parameters():
             p.requires_grad = False
 
