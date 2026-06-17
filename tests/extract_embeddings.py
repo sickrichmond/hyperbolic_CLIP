@@ -14,10 +14,10 @@ The downstream HoroPCA + UMAP visualisation works on these.
 
 Usage:
     python -m tests.extract_embeddings \\
-        --checkpoint   $WORK/checkpoints/attribution_FLUX_vitl14_hier.pt \\
-        --dataset_path $WORK/iab_dataset \\
+        --checkpoint   $WORK/hyp_fine_tuning/checkpoints/attribution_FLUX_vitl14_hier.pt \\
+        --dataset_path $WORK/hyp_fine_tuning/iab_dataset \\
         --captions_dir $WORK/hyp_fine_tuning/iab_captions \\
-        --output       $WORK/embeddings/val_hier.npz
+        --output       $WORK/hyp_fine_tuning/embeddings/val_hier.npz
 """
 import argparse
 import warnings

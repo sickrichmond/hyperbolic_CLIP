@@ -17,11 +17,11 @@ Pairing
 
 Example (on CINECA):
     python dataset_rebuilding/compare_fakes.py \\
-        --dataset_path      $WORK/iab_dataset \\
-        --recap_root        $WORK/iab_recap_dataset \\
+        --dataset_path      $WORK/hyp_fine_tuning/iab_dataset \\
+        --recap_root        $WORK/hyp_fine_tuning/iab_recap_dataset \\
         --orig_captions_dir $WORK/hyp_fine_tuning/iab_captions \\
         --generator FLUX --num_samples 8 \\
-        --out_dir $WORK/recap_compare
+        --out_dir $WORK/hyp_fine_tuning/recap_compare
 """
 import argparse
 import csv

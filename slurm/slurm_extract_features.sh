@@ -2,7 +2,7 @@
 # ============================================================================
 # CINECA Leonardo — Extract FROZEN CLIP image features (Fase A of the probe).
 # Runs off-the-shelf CLIP ViT-L/14 (no LoRA) once over train+val and caches
-# (features 768-d, label) to $WORK/clip_features/clip_features_{train,val}.pt.
+# (features 768-d, label) to $WORK/hyp_fine_tuning/clip_features/clip_features_{train,val}.pt.
 # Extract once → then train_linear_probe.py many times on the cache (cheap).
 #
 # Same 22 classes / semantics / val_frac / seed as slurm_cineca_all.sh, so the
@@ -29,7 +29,7 @@ module load python/3.11.7
 module load cuda/12.6
 source $WORK/hyp_fine_tuning/bin/activate
 
-export HF_HOME=$WORK/hf_cache
+export HF_HOME=$WORK/hyp_fine_tuning/hf_cache
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
@@ -37,7 +37,7 @@ export HF_DATASETS_OFFLINE=1
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
 python -m scripts.extract_clip_features \
-    --dataset_path $WORK/iab_dataset \
+    --dataset_path $WORK/hyp_fine_tuning/iab_dataset \
     --captions_dir $WORK/hyp_fine_tuning/iab_captions \
     --clip_name    openai/clip-vit-large-patch14 \
     --generators   real 4o gemini grok3 FLUX \
@@ -50,6 +50,6 @@ python -m scripts.extract_clip_features \
     --seed         42 \
     --batch_size   256 \
     --num_workers  8 \
-    --out_dir      $WORK/clip_features
+    --out_dir      $WORK/hyp_fine_tuning/clip_features
 
-echo "Done. Cache in $WORK/clip_features/"
+echo "Done. Cache in $WORK/hyp_fine_tuning/clip_features/"

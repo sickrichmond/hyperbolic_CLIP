@@ -3,7 +3,7 @@
 # Setup script for CINECA Leonardo — run this ONCE on the login node.
 # Uses python/3.11.7 + venv (no conda available on this allocation).
 #
-# Usage:  bash $WORK/hyperbolic_CLIP/scripts/setup_cineca.sh
+# Usage:  bash $WORK/hyp_fine_tuning/hyperbolic_CLIP/scripts/setup_cineca.sh
 # ============================================================================
 
 set -e
@@ -60,11 +60,11 @@ else
 fi
 
 # ── Persistent env vars ───────────────────────────────────────────────────────
-grep -qxF 'export HF_HOME=$WORK/hf_cache' ~/.bashrc || \
-    echo 'export HF_HOME=$WORK/hf_cache' >> ~/.bashrc
+grep -qxF 'export HF_HOME=$WORK/hyp_fine_tuning/hf_cache' ~/.bashrc || \
+    echo 'export HF_HOME=$WORK/hyp_fine_tuning/hf_cache' >> ~/.bashrc
 grep -qxF 'export TOKENIZERS_PARALLELISM=false' ~/.bashrc || \
     echo 'export TOKENIZERS_PARALLELISM=false' >> ~/.bashrc
-export HF_HOME=$WORK/hf_cache
+export HF_HOME=$WORK/hyp_fine_tuning/hf_cache
 export TOKENIZERS_PARALLELISM=false
 echo "HF_HOME set to $HF_HOME"
 
@@ -101,4 +101,4 @@ else:
 echo ""
 echo "=== Setup complete ==="
 echo "Venv: $VENV"
-echo "Submit job with: sbatch \$WORK/hyperbolic_CLIP/scripts/slurm_cineca.sh"
+echo "Submit job with: sbatch \$WORK/hyp_fine_tuning/hyperbolic_CLIP/scripts/slurm_cineca.sh"

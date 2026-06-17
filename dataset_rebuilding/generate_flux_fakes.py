@@ -21,9 +21,9 @@ Resumable: existing PNGs are skipped. Safe to relaunch after a SLURM timeout.
 
 Example:
     python dataset_rebuilding/generate_flux_fakes.py \\
-        --captions_dir $WORK/iab_captions_detailed_clean \\
-        --dataset_path $WORK/iab_dataset \\
-        --out_root     $WORK/iab_recap_dataset \\
+        --captions_dir $WORK/hyp_fine_tuning/iab_captions_detailed_clean \\
+        --dataset_path $WORK/hyp_fine_tuning/iab_dataset \\
+        --out_root     $WORK/hyp_fine_tuning/iab_recap_dataset \\
         --model        black-forest-labs/FLUX.1-schnell \\
         --max_per_class 100        # pilot subset; drop to do all 2000/class
 """

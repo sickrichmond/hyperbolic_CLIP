@@ -12,7 +12,7 @@
 # Prereqs (run once on the LOGIN node):
 #   bash dataset_rebuilding/setup_diffusion_cineca.sh     # diffusers + weights
 #   (SD3 / SD3.5 are GATED — accept their licenses on HF first; see that script)
-#   and the cleaned captions in $WORK/iab_captions_detailed_clean.
+#   and the cleaned captions in $WORK/hyp_fine_tuning/iab_captions_detailed_clean.
 #
 # FULL set with IAB naming ({prefix}_p{N}_i{K}.png), mirroring the original IAB
 # fake set 1:1 (~2000/class × 10 ≈ 20k imgs/generator). This is heavy for the
@@ -43,14 +43,14 @@ module load python/3.11.7
 module load cuda/12.6
 source "$WORK/hyp_fine_tuning/bin/activate"
 
-export HF_HOME="$WORK/hf_cache"
+export HF_HOME="$WORK/hyp_fine_tuning/hf_cache"
 export TRANSFORMERS_OFFLINE=1        # compute nodes have no internet
 export HF_HUB_OFFLINE=1
 
 REPO="$WORK/hyp_fine_tuning/hyperbolic_CLIP"
-CAPS="$WORK/iab_captions_detailed_clean"     # our dense captions (keyed by stem)
+CAPS="$WORK/hyp_fine_tuning/iab_captions_detailed_clean"     # our dense captions (keyed by stem)
 SRC_CAPS="$WORK/hyp_fine_tuning/iab_captions" # original IAB CSVs (row N → stem)
-OUT="$WORK/iab_recap_dataset_v2"             # ROUND 2: new dir, keeps round-1 intact
+OUT="$WORK/hyp_fine_tuning/iab_recap_dataset_v2"             # ROUND 2: new dir, keeps round-1 intact
 
 cd "$REPO"
 echo "Generator: $GEN  →  $OUT/$GEN/"
@@ -73,12 +73,18 @@ if [ "$NAMING" = "stem" ]; then
     NAME_ARG+=(--dataset_path "${DATASET_PATH:?stem naming needs DATASET_PATH=<root with real/...>}")
 fi
 
+# Optional global style: STYLE="in the style of Van Gogh, oil painting" sbatch ...
+# Appended to every caption → the whole output set is restyled (no re-captioning).
+STYLE_ARG=()
+[ -n "${STYLE:-}" ] && STYLE_ARG=(--style "$STYLE")
+
 python dataset_rebuilding/generate_fakes.py \
     --generator            "$GEN" \
     --captions_dir         "$CAPS" \
     --fake_src_captions_dir "$SRC_CAPS" \
     --out_root             "$OUT" \
     "${NAME_ARG[@]}" \
+    "${STYLE_ARG[@]}" \
     "${SEM_ARG[@]}"
 
 echo "Fakes under: $OUT/$GEN/"

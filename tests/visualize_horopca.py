@@ -24,14 +24,14 @@ distances. If HoroPCA isn't available the script raises a hard error.
 
 Usage:
     python -m tests.visualize_horopca \\
-        --checkpoint   $WORK/checkpoints/attribution_k4_vitl14.pt \\
-        --dataset_path $WORK/iab_dataset \\
+        --checkpoint   $WORK/hyp_fine_tuning/checkpoints/attribution_k4_vitl14.pt \\
+        --dataset_path $WORK/hyp_fine_tuning/iab_dataset \\
         --captions_dir $WORK/hyp_fine_tuning/iab_captions \\
         --generators   real FLUX SD3 gemini \\
         --semantics    COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \\
         --split        val \\
         --max_per_class 500 \\
-        --output_dir   $WORK/viz/k4_hier
+        --output_dir   $WORK/hyp_fine_tuning/viz/k4_hier
 
 HoroPCA repo:
     Set HOROPCA_DIR env var, or clone to <repo>/external/HoroPCA, or

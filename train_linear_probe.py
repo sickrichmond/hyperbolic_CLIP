@@ -21,8 +21,8 @@ couple of minutes (seconds on a GPU).
 
 Usage:
     python train_linear_probe.py \
-        --features_dir $WORK/clip_features \
-        --output       $WORK/checkpoints/linear_probe.pt
+        --features_dir $WORK/hyp_fine_tuning/clip_features \
+        --output       $WORK/hyp_fine_tuning/checkpoints/linear_probe.pt
 """
 import argparse
 from pathlib import Path

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================================
 # CINECA Leonardo — Train the LINEAR PROBE on cached frozen-CLIP features
-# (Fase B). No CLIP here: it loads $WORK/clip_features and trains a single
+# (Fase B). No CLIP here: it loads $WORK/hyp_fine_tuning/clip_features and trains a single
 # nn.Linear with class-balanced cross-entropy, then prints overall / balanced /
 # per-class accuracy + confusion — same metrics as the fine-tuned evals.
 #
@@ -33,14 +33,14 @@ export TOKENIZERS_PARALLELISM=false
 
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
-mkdir -p $WORK/checkpoints
+mkdir -p $WORK/hyp_fine_tuning/checkpoints
 
 python train_linear_probe.py \
-    --features_dir $WORK/clip_features \
+    --features_dir $WORK/hyp_fine_tuning/clip_features \
     --epochs       8 \
     --lr           1e-3 \
     --weight_decay 1e-4 \
     --batch_size   4096 \
-    --output       $WORK/checkpoints/linear_probe.pt
+    --output       $WORK/hyp_fine_tuning/checkpoints/linear_probe.pt
 
-echo "Done: $WORK/checkpoints/linear_probe.pt"
+echo "Done: $WORK/hyp_fine_tuning/checkpoints/linear_probe.pt"

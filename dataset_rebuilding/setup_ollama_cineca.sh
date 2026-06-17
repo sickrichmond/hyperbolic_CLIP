@@ -1,8 +1,8 @@
 #!/bin/bash
 # ============================================================================
 # One-time setup on the CINECA Leonardo LOGIN node (which HAS internet).
-# Installs a local Ollama into $WORK and pre-pulls the captioning model so the
-# offline compute nodes can serve it.
+# Installs a local Ollama into $WORK/hyp_fine_tuning and pre-pulls the captioning
+# model so the offline compute nodes can serve it.
 #
 # Usage:  bash dataset_rebuilding/setup_ollama_cineca.sh
 #         bash dataset_rebuilding/setup_ollama_cineca.sh qwen3.5:9b   # custom model
@@ -18,10 +18,11 @@ MODEL="${1:-qwen3.5:9b}"
 # on a GPU node (see dataset_rebuilding/README.md).
 OLLAMA_VERSION="${OLLAMA_VERSION:-v0.24.0}"
 
-# Persist large data under $WORK (home quota is small). $WORK is shared across
-# login and compute nodes, so models pulled here are visible to the SLURM job.
-OLLAMA_DIR="$WORK/ollama-${OLLAMA_VERSION#v}"   # e.g. $WORK/ollama-0.24.0
-export OLLAMA_MODELS="$WORK/ollama_models"  # where pulled model blobs live
+# Persist large data under $WORK/hyp_fine_tuning (home quota is small; bare $WORK
+# is shared with other users — keep everything in this personal subdir). $WORK is
+# visible to both login and compute nodes, so models pulled here reach the job.
+OLLAMA_DIR="$WORK/hyp_fine_tuning/ollama-${OLLAMA_VERSION#v}"   # e.g. $WORK/hyp_fine_tuning/ollama-0.24.0
+export OLLAMA_MODELS="$WORK/hyp_fine_tuning/ollama_models"  # where pulled model blobs live
 OLLAMA_HOST="127.0.0.1:11434"
 export OLLAMA_HOST
 
@@ -81,7 +82,7 @@ echo "Ollama version: $(ollama --version 2>/dev/null || echo '??')"
 add_line() { grep -qxF "$1" ~/.bashrc || echo "$1" >> ~/.bashrc; }
 add_line "export PATH=$OLLAMA_DIR/bin:\$PATH"
 add_line "export LD_LIBRARY_PATH=$OLLAMA_DIR/lib:\${LD_LIBRARY_PATH:-}"
-add_line "export OLLAMA_MODELS=\$WORK/ollama_models"
+add_line "export OLLAMA_MODELS=\$WORK/hyp_fine_tuning/ollama_models"
 
 # ── Start a temporary server and pull the model ───────────────────────────────
 echo "Starting a temporary Ollama server to pull the model…"

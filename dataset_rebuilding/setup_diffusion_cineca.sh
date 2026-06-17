@@ -33,7 +33,7 @@ fi
 module load python/3.11.7
 module load cuda/12.6
 source "$WORK/hyp_fine_tuning/bin/activate"
-export HF_HOME="$WORK/hf_cache"
+export HF_HOME="$WORK/hyp_fine_tuning/hf_cache"
 
 echo "=== Diffusion generators setup ==="
 echo "HF_HOME: $HF_HOME"

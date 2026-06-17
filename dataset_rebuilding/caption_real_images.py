@@ -36,8 +36,8 @@ This script talks to Ollama over HTTP and needs no GPU itself — the SLURM job
 Example
 -------
     python dataset_rebuilding/caption_real_images.py \\
-        --dataset_path $WORK/iab_dataset \\
-        --output_dir   $WORK/iab_captions_detailed \\
+        --dataset_path $WORK/hyp_fine_tuning/iab_dataset \\
+        --output_dir   $WORK/hyp_fine_tuning/iab_captions_detailed \\
         --orig_captions_dir $WORK/hyp_fine_tuning/iab_captions \\
         --model qwen3.5:9b \\
         --num_workers 4

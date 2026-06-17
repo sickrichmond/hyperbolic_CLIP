@@ -18,10 +18,10 @@ Does two jobs:
 Read-only by default. Example:
 
     python dataset_rebuilding/check_captions.py \\
-        --captions_dir $WORK/iab_captions_detailed \\
-        --dataset_path $WORK/iab_dataset \\
+        --captions_dir $WORK/hyp_fine_tuning/iab_captions_detailed \\
+        --dataset_path $WORK/hyp_fine_tuning/iab_dataset \\
         --samples 3 \\
-        --write_clean $WORK/iab_captions_detailed_clean
+        --write_clean $WORK/hyp_fine_tuning/iab_captions_detailed_clean
 """
 import argparse
 import csv

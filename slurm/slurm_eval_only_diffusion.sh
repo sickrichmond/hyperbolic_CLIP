@@ -16,15 +16,15 @@ module load python/3.11.7
 module load cuda/12.6
 source $WORK/hyp_fine_tuning/bin/activate
 
-export HF_HOME=$WORK/hf_cache
+export HF_HOME=$WORK/hyp_fine_tuning/hf_cache
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_OFFLINE=1
 
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
 python -m tests.eval_attribution \
-    --checkpoint   $WORK/checkpoints/attribution_diffusion.pt \
-    --dataset_path $WORK/iab_dataset \
+    --checkpoint   $WORK/hyp_fine_tuning/checkpoints/attribution_diffusion.pt \
+    --dataset_path $WORK/hyp_fine_tuning/iab_dataset \
     --captions_dir $WORK/hyp_fine_tuning/iab_captions \
     --generators   real SD3 SD3_5 SDXL FLUX \
     --semantics    COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \

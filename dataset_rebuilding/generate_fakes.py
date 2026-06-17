@@ -25,9 +25,9 @@ Resumable: existing PNGs are skipped.
 
 Example (full set, IAB naming — see slurm_gen.sh):
     python dataset_rebuilding/generate_fakes.py --generator SD3 \\
-        --captions_dir      $WORK/iab_captions_detailed_clean \\
+        --captions_dir      $WORK/hyp_fine_tuning/iab_captions_detailed_clean \\
         --fake_src_captions_dir $WORK/hyp_fine_tuning/iab_captions \\
-        --out_root          $WORK/iab_recap_dataset_v2
+        --out_root          $WORK/hyp_fine_tuning/iab_recap_dataset_v2
 """
 import argparse
 import csv
@@ -120,6 +120,10 @@ def parse_args():
     p.add_argument("--max_seq_len", type=int, default=None)
     p.add_argument("--height", type=int, default=None)
     p.add_argument("--width", type=int, default=None)
+    p.add_argument("--style", default=None,
+                   help="Style suffix appended to EVERY caption at generation time, e.g. "
+                        "\"in the style of Van Gogh, oil painting\" or \"cartoon style, flat "
+                        "colors\". Restyles the whole output set without re-captioning the reals.")
     p.add_argument("--max_per_class", type=int, default=None,
                    help="Cap prompts (rows/stems) per class — for a quick subset.")
     p.add_argument("--limit", type=int, default=None,
@@ -249,6 +253,8 @@ def main():
     width = args.width if args.width is not None else cfg["width"]
     print(f"Generator={args.generator} naming={args.naming} model={model} dtype={dtype} "
           f"steps={steps} guidance={guidance} max_seq_len={max_seq_len} {width}x{height}")
+    if args.style:
+        print(f"Style suffix appended to every caption: \"{args.style}\"")
 
     pipe = build_pipeline(kind, model, dtype, args.cpu_offload)
 
@@ -277,7 +283,8 @@ def main():
                           guidance_scale=guidance, generator=gen)
             if kind in ("flux", "sd3") and max_seq_len:
                 kwargs["max_sequence_length"] = max_seq_len
-            pipe(cap, **kwargs).images[0].save(out)
+            prompt = f"{cap}, {args.style}" if args.style else cap
+            pipe(prompt, **kwargs).images[0].save(out)
             n_done += 1
             if remaining is not None:
                 remaining -= 1

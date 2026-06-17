@@ -17,12 +17,12 @@ entailment hierarchy on the sphere); training is image-vs-anchor only.
 
 Usage:
     CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution_euclidean.py \\
-        --dataset_path  $WORK/iab_dataset \\
+        --dataset_path  $WORK/hyp_fine_tuning/iab_dataset \\
         --captions_dir  $WORK/hyp_fine_tuning/iab_captions \\
         --generators    real FLUX \\
         --semantics     COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \\
         --clip_name     openai/clip-vit-large-patch14 \\
-        --output        $WORK/checkpoints/attribution_euclidean_vitl14.pt
+        --output        $WORK/hyp_fine_tuning/checkpoints/attribution_euclidean_vitl14.pt
 """
 import argparse
 from pathlib import Path

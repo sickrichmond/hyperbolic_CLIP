@@ -34,10 +34,10 @@ source "$WORK/hyp_fine_tuning/bin/activate"
 # ── Ollama env ────────────────────────────────────────────────────────────────
 # Pinned to v0.24.0: the v0.30.x line crashes on Leonardo's driver (535/CUDA 12.2)
 # with "CUDA error: device kernel image is invalid". See README / setup script.
-OLLAMA_DIR="$WORK/ollama-0.24.0"
+OLLAMA_DIR="$WORK/hyp_fine_tuning/ollama-0.24.0"
 export PATH="$OLLAMA_DIR/bin:$PATH"
 export LD_LIBRARY_PATH="$OLLAMA_DIR/lib:${LD_LIBRARY_PATH:-}"
-export OLLAMA_MODELS="$WORK/ollama_models"
+export OLLAMA_MODELS="$WORK/hyp_fine_tuning/ollama_models"
 export OLLAMA_HOST="127.0.0.1:11434"
 export OLLAMA_NUM_PARALLEL=8          # let Ollama batch concurrent requests
 export OLLAMA_KEEP_ALIVE=-1           # keep the model resident for the whole job
@@ -45,9 +45,9 @@ export OLLAMA_MAX_LOADED_MODELS=1
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 REPO="$WORK/hyp_fine_tuning/hyperbolic_CLIP"
-DATA="$WORK/iab_dataset"
+DATA="$WORK/hyp_fine_tuning/iab_dataset"
 ORIG_CAPS="$WORK/hyp_fine_tuning/iab_captions"
-OUT="$WORK/iab_captions_detailed"
+OUT="$WORK/hyp_fine_tuning/iab_captions_detailed"
 MODEL="qwen3.5:9b"
 WORKERS=8
 

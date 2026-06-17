@@ -7,8 +7,8 @@ No captions are used at inference — matches the in-the-wild scenario.
 
 Usage:
     python -m tests.eval_attribution \\
-        --checkpoint  $WORK/checkpoints/attribution_FLUX_vitl14.pt \\
-        --dataset_path $WORK/iab_dataset \\
+        --checkpoint  $WORK/hyp_fine_tuning/checkpoints/attribution_FLUX_vitl14.pt \\
+        --dataset_path $WORK/hyp_fine_tuning/iab_dataset \\
         --captions_dir $WORK/hyp_fine_tuning/iab_captions \\
         --generators   real FLUX \\
         --semantics    COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \\

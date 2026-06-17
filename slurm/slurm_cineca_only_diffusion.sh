@@ -7,11 +7,11 @@
 #
 # Data setup (run once from your local machine):
 #   rsync -avz --progress /mnt/data3/rtrebiani/iab_dataset/ \
-#       <username>@login.leonardo.cineca.it:$WORK/iab_dataset/
+#       <username>@login.leonardo.cineca.it:$WORK/hyp_fine_tuning/iab_dataset/
 #   rsync -avz --progress /mnt/data3/rtrebiani/iab_captions/ \
-#       <username>@login.leonardo.cineca.it:$WORK/iab_captions/
+#       <username>@login.leonardo.cineca.it:$WORK/hyp_fine_tuning/iab_captions/
 #   rsync -avz --progress /mnt/data3/rtrebiani/hyperbolic_CLIP/ \
-#       <username>@login.leonardo.cineca.it:$WORK/hyperbolic_CLIP/
+#       <username>@login.leonardo.cineca.it:$WORK/hyp_fine_tuning/hyperbolic_CLIP/
 # ============================================================================
 
 #SBATCH --account=EUHPC_D26_009B         # e.g. IscrB_myproject — fill this in
@@ -32,15 +32,15 @@ module load python/3.11.7
 module load cuda/12.6
 source $WORK/hyp_fine_tuning/bin/activate
 
-export HF_HOME=$WORK/hf_cache      # avoid filling home quota
+export HF_HOME=$WORK/hyp_fine_tuning/hf_cache      # avoid filling home quota
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_OFFLINE=1      # compute nodes have no internet
 export HF_DATASETS_OFFLINE=1
 
 REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP
-DATA=$WORK/iab_dataset
+DATA=$WORK/hyp_fine_tuning/iab_dataset
 CAPS=$WORK/hyp_fine_tuning/iab_captions
-OUT=$WORK/checkpoints
+OUT=$WORK/hyp_fine_tuning/checkpoints
 
 mkdir -p $OUT
 cd $REPO

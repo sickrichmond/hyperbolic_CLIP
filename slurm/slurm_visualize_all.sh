@@ -24,7 +24,7 @@ module load python/3.11.7
 module load cuda/12.6
 source $WORK/hyp_fine_tuning/bin/activate
 
-export HF_HOME=$WORK/hf_cache
+export HF_HOME=$WORK/hyp_fine_tuning/hf_cache
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_OFFLINE=1
 export HOROPCA_DIR=${HOROPCA_DIR:-$WORK/hyp_fine_tuning/horopca}
@@ -38,13 +38,13 @@ cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 DIM=${1:-4}
 
 # Override via env vars when needed, e.g. CKPT=... OUT=... sbatch slurm/slurm_visualize_all.sh
-CKPT=${CKPT:-$WORK/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
-OUT=${OUT:-$WORK/viz/all_no_dalle_d${DIM}}
+CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
+OUT=${OUT:-$WORK/hyp_fine_tuning/viz/all_no_dalle_d${DIM}}
 GENERATORS=${GENERATORS:-"real 4o gemini grok3 FLUX SD1_5 SD2_1 SD3 SD3_5 SDXL PIXART PLAYGROUND_2_5 KANDINSKY CogView3_PLUS hidream hunyuan ideogram infinity janus-pro kling mid-5.2 mid-6.0"}
 
 python -m tests.visualize_horopca \
     --checkpoint    $CKPT \
-    --dataset_path  $WORK/iab_dataset \
+    --dataset_path  $WORK/hyp_fine_tuning/iab_dataset \
     --captions_dir  $WORK/hyp_fine_tuning/iab_captions \
     --generators    $GENERATORS \
     --semantics     COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
