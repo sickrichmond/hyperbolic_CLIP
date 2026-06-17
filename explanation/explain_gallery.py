@@ -13,11 +13,11 @@ generators rather than dissecting a single image.
 Usage
 -----
     python -m explanation.explain_gallery \\
-        --checkpoint    $WORK/checkpoints/attribution_all_no_dalle_d16.pt \\
-        --dataset_path  $WORK/iab_dataset \\
+        --checkpoint    $WORK/hyp_fine_tuning/checkpoints/attribution_all_no_dalle_d16.pt \\
+        --dataset_path  $WORK/hyp_fine_tuning/iab_dataset \\
         --semantic      COCO \\
         --method        agcam \\
-        --output_dir    $WORK/outputs/gallery/d16
+        --output_dir    $WORK/hyp_fine_tuning/outputs/gallery/d16
 
 Notes
 -----

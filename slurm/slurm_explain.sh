@@ -37,7 +37,7 @@ module load python/3.11.7
 module load cuda/12.6
 source $WORK/hyp_fine_tuning/bin/activate
 
-export HF_HOME=$WORK/hf_cache          # avoid filling home quota
+export HF_HOME=$WORK/hyp_fine_tuning/hf_cache          # avoid filling home quota
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_OFFLINE=1          # compute nodes have no internet
 export HF_DATASETS_OFFLINE=1
@@ -47,10 +47,10 @@ cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 # ── Parameters ────────────────────────────────────────────────────────────────
 DIM=${1:-16}                  # arg 1: embedding dim; selects the checkpoint below.
 SEMANTIC=${2:-${SEMANTIC:-COCO}}  # arg 2 (or env): one semantic, shown for every class
-CKPT=${CKPT:-$WORK/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
-DATA=${DATA:-$WORK/iab_dataset}
+CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
+DATA=${DATA:-$WORK/hyp_fine_tuning/iab_dataset}
 IMAGE_INDEX=${IMAGE_INDEX:-0} # which sample per class (sorted order)
-OUT=${OUT:-$WORK/outputs/gallery/d${DIM}_${SEMANTIC}}
+OUT=${OUT:-$WORK/hyp_fine_tuning/outputs/gallery/d${DIM}_${SEMANTIC}}
 METHOD=${METHOD:-agcam}       # agcam | guided
 
 mkdir -p $OUT

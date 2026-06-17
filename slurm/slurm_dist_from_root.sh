@@ -28,18 +28,18 @@ module load python/3.11.7
 module load cuda/12.6
 source $WORK/hyp_fine_tuning/bin/activate
 
-export HF_HOME=$WORK/hf_cache
+export HF_HOME=$WORK/hyp_fine_tuning/hf_cache
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_OFFLINE=1
 
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
 DIM=${1:-16}
-CKPT=${CKPT:-$WORK/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
-DATA=${DATA:-$WORK/iab_dataset}
+CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
+DATA=${DATA:-$WORK/hyp_fine_tuning/iab_dataset}
 SEMANTICS=${SEMANTICS:-COCO}
 MAX_PER_CLASS=${MAX_PER_CLASS:-300}
-OUT=${OUT:-$WORK/outputs/dist_from_root/d${DIM}}
+OUT=${OUT:-$WORK/hyp_fine_tuning/outputs/dist_from_root/d${DIM}}
 
 python -m tests.plot_distance_from_root \
     --checkpoint    $CKPT \

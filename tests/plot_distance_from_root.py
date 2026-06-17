@@ -23,11 +23,11 @@ Two figures are written:
 Usage
 -----
     python -m tests.plot_distance_from_root \\
-        --checkpoint    $WORK/checkpoints/attribution_all_no_dalle_d16.pt \\
-        --dataset_path  $WORK/iab_dataset \\
+        --checkpoint    $WORK/hyp_fine_tuning/checkpoints/attribution_all_no_dalle_d16.pt \\
+        --dataset_path  $WORK/hyp_fine_tuning/iab_dataset \\
         --semantics     COCO \\
         --max_per_class 300 \\
-        --output        $WORK/outputs/dist_from_root/d16
+        --output        $WORK/hyp_fine_tuning/outputs/dist_from_root/d16
 """
 from __future__ import annotations
 
