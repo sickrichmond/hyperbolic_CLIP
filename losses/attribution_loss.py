@@ -19,6 +19,18 @@ Loss terms (all use the same cone-violation primitive):
                    and outside the cones of all other captions in the batch
                    (which differ in content and/or class).
 
+Optional family level (a broad cone above the generator, e.g. "Stable Diffusion"
+containing SD1_5/SD2_1/SD3/SD3_5/SDXL):
+
+  L_img_in_family: image i must lie inside the cone of its family anchor, and
+                   outside the cones of all OTHER families (siblings of the same
+                   family are NOT negatives here).
+
+  L_gen_in_family: each generator anchor must lie inside the cone of its own
+                   family anchor and outside the other families' cones. This is
+                   the structural term that nests the narrow generator cones
+                   inside the broad family cone.
+
 For each term:
   L_pos = max(0, ξ_pos - ψ_pos)
   L_neg = max(0, ψ_neg + margin - ξ_neg)
@@ -28,7 +40,9 @@ Total:
   L = L_img_in_class
       + λ_cap_in_class * L_cap_in_class
       + λ_img_in_cap   * L_img_in_cap
-      + λ_norm         * L_norm   (anchor norm regulariser)
+      + λ_img_in_family * L_img_in_family
+      + λ_gen_in_family * L_gen_in_family
+      + λ_norm         * (L_norm + L_norm_family)   (anchor norm regularisers)
 """
 from __future__ import annotations
 
@@ -59,6 +73,9 @@ class EntailmentConeLoss(nn.Module):
         lambda_img_in_cap: float = 0.0,
         lambda_norm: float = 0.0,
         target_norm: float = 0.0,
+        lambda_img_in_family: float = 0.0,
+        lambda_gen_in_family: float = 0.0,
+        target_norm_family: float = 0.0,
     ):
         """
         lambda_cap_in_class > 0 and lambda_img_in_cap > 0 enable the hierarchical
@@ -67,6 +84,16 @@ class EntailmentConeLoss(nn.Module):
 
         lambda_norm, target_norm: anchor-norm regulariser.
           L_norm = mean_c max(0, target_norm - ‖t_c‖)²
+
+        lambda_img_in_family > 0 and lambda_gen_in_family > 0 enable the family
+        level. They require x_fam, gen_family and labels_family in forward().
+        With both at 0 (default) the family terms vanish and the loss is
+        identical to the generator-only formulation.
+
+        target_norm_family: target ‖t_family‖ for the family-anchor norm
+          regulariser (also weighted by lambda_norm). Set smaller than
+          target_norm so the family cones stay broader (larger ψ) than the
+          generator cones they contain.
         """
         super().__init__()
         self.curv = curv
@@ -77,6 +104,9 @@ class EntailmentConeLoss(nn.Module):
         self.lambda_img_in_cap = lambda_img_in_cap
         self.lambda_norm = lambda_norm
         self.target_norm = target_norm
+        self.lambda_img_in_family = lambda_img_in_family
+        self.lambda_gen_in_family = lambda_gen_in_family
+        self.target_norm_family = target_norm_family
 
     def _cone_term(
         self,
@@ -100,6 +130,9 @@ class EntailmentConeLoss(nn.Module):
         x_anc: torch.Tensor,                     # (K, D)
         labels: torch.Tensor,                    # (B,) int in [0, K)
         x_cap: torch.Tensor | None = None,       # (B, D) augmented captions, optional
+        x_fam: torch.Tensor | None = None,       # (F, D) family anchors, optional
+        gen_family: torch.Tensor | None = None,  # (K,) int in [0, F): family of each generator
+        labels_family: torch.Tensor | None = None,  # (B,) int in [0, F): family of each image
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         B, _ = x_img.shape
         K, _ = x_anc.shape
@@ -169,6 +202,69 @@ class EntailmentConeLoss(nn.Module):
                     "mean_cap_norm":   x_cap.norm(dim=-1).mean().detach(),
                 }
 
+        # ───── 5 & 6) Family-level terms (optional) ──────────────────────────
+        L_img_in_family = torch.tensor(0.0, device=device)
+        L_gen_in_family = torch.tensor(0.0, device=device)
+        L_norm_family   = torch.tensor(0.0, device=device)
+        stats_fam = {}
+
+        use_family = (
+            x_fam is not None
+            and gen_family is not None
+            and labels_family is not None
+            and (self.lambda_img_in_family > 0 or self.lambda_gen_in_family > 0)
+        )
+        if use_family:
+            Fn = x_fam.shape[0]
+            psi_fam = half_aperture(x_fam, curv=self.curv, min_radius=self.min_radius)  # (F,)
+            psi_fam_b = psi_fam.unsqueeze(0).expand(B, Fn)                               # (B, F)
+            fam_pos_idx = labels_family.unsqueeze(1)                                     # (B, 1)
+            psi_fam_pos = psi_fam_b.gather(1, fam_pos_idx).squeeze(1)                    # (B,)
+            neg_mask_fam = torch.ones(B, Fn, device=device, dtype=torch.bool)
+            neg_mask_fam.scatter_(1, fam_pos_idx, False)
+
+            # 5) L_img_in_family — image inside its family cone, outside OTHER
+            #    families (same-family siblings are not negatives here).
+            xi_if = _pairwise_xi(x_fam, x_img, curv=self.curv).T                         # (B, F)
+            xi_if_pos = xi_if.gather(1, fam_pos_idx).squeeze(1)                          # (B,)
+            L_imgfam_pos, L_imgfam_neg = self._cone_term(
+                xi_if_pos, psi_fam_pos, xi_if, psi_fam_b, neg_mask_fam
+            )
+            L_img_in_family = L_imgfam_pos + self.lambda_neg * L_imgfam_neg
+
+            # 6) L_gen_in_family — each generator anchor inside its own family
+            #    cone, outside the other families' cones. Points = generator
+            #    anchors (K), apices = family anchors (F). Nests gen cones in fam.
+            psi_fam_k = psi_fam.unsqueeze(0).expand(K, Fn)                               # (K, F)
+            gen_fam_idx = gen_family.unsqueeze(1)                                        # (K, 1)
+            psi_fam_kpos = psi_fam_k.gather(1, gen_fam_idx).squeeze(1)                   # (K,)
+            neg_mask_genfam = torch.ones(K, Fn, device=device, dtype=torch.bool)
+            neg_mask_genfam.scatter_(1, gen_fam_idx, False)
+            xi_gf = _pairwise_xi(x_fam, x_anc, curv=self.curv).T                         # (K, F)
+            xi_gf_pos = xi_gf.gather(1, gen_fam_idx).squeeze(1)                          # (K,)
+            L_genfam_pos, L_genfam_neg = self._cone_term(
+                xi_gf_pos, psi_fam_kpos, xi_gf, psi_fam_k, neg_mask_genfam
+            )
+            L_gen_in_family = L_genfam_pos + self.lambda_neg * L_genfam_neg
+
+            # Family anchor-norm regulariser (broader cones → smaller target norm)
+            fam_norms = x_fam.norm(dim=-1)
+            if self.lambda_norm > 0 and self.target_norm_family > 0:
+                L_norm_family = torch.clamp(
+                    self.target_norm_family - fam_norms, min=0.0
+                ).pow(2).mean()
+
+            with torch.no_grad():
+                inside_img_fam  = (xi_if_pos < psi_fam_pos).float().mean()
+                family_cone_acc = (xi_if.argmin(dim=1) == labels_family).float().mean()
+                stats_fam = {
+                    "inside_img_fam":  inside_img_fam.detach(),
+                    "family_cone_acc": family_cone_acc.detach(),
+                    "mean_psi_fam":    psi_fam.mean().detach(),
+                    "mean_xi_img_fam": xi_if_pos.mean().detach(),
+                    "mean_fam_norm":   fam_norms.mean().detach(),
+                }
+
         # ───── 4) Anchor-norm regulariser ────────────────────────────────────
         anc_norms = x_anc.norm(dim=-1)
         if self.lambda_norm > 0 and self.target_norm > 0:
@@ -178,22 +274,28 @@ class EntailmentConeLoss(nn.Module):
 
         loss = (
             L_img_in_class
-            + self.lambda_cap_in_class * L_cap_in_class
-            + self.lambda_img_in_cap   * L_img_in_cap
-            + self.lambda_norm         * L_norm
+            + self.lambda_cap_in_class  * L_cap_in_class
+            + self.lambda_img_in_cap    * L_img_in_cap
+            + self.lambda_img_in_family * L_img_in_family
+            + self.lambda_gen_in_family * L_gen_in_family
+            + self.lambda_norm          * (L_norm + L_norm_family)
         )
 
         stats = {
-            "loss_img_in_cls": L_img_in_class.detach(),
-            "loss_cap_in_cls": L_cap_in_class.detach(),
-            "loss_img_in_cap": L_img_in_cap.detach(),
-            "loss_norm":       L_norm.detach(),
-            "inside_img":      inside_img.detach(),
-            "cone_acc":        cone_acc.detach(),
-            "mean_psi_anc":    psi_anc.mean().detach(),
-            "mean_xi_img_anc": xi_ia_pos.mean().detach(),
-            "mean_anc_norm":   anc_norms.mean().detach(),
+            "loss_img_in_cls":    L_img_in_class.detach(),
+            "loss_cap_in_cls":    L_cap_in_class.detach(),
+            "loss_img_in_cap":    L_img_in_cap.detach(),
+            "loss_img_in_family": L_img_in_family.detach(),
+            "loss_gen_in_family": L_gen_in_family.detach(),
+            "loss_norm":          L_norm.detach(),
+            "loss_norm_family":   L_norm_family.detach(),
+            "inside_img":         inside_img.detach(),
+            "cone_acc":           cone_acc.detach(),
+            "mean_psi_anc":       psi_anc.mean().detach(),
+            "mean_xi_img_anc":    xi_ia_pos.mean().detach(),
+            "mean_anc_norm":      anc_norms.mean().detach(),
             **stats_extra,
+            **stats_fam,
         }
         return loss, stats
 

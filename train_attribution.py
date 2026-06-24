@@ -30,6 +30,7 @@ from tqdm import tqdm
 from transformers import CLIPTokenizer
 
 from data.iab_clip_dataset import IABCLIPDataset
+from data.families import build_family_structures, family_of
 from models.attribution_clip import AttributionCLIP
 from losses.attribution_loss import EntailmentConeLoss, predict_class
 
@@ -80,9 +81,24 @@ def parse_args():
                    help="Hierarchical: weight of image-in-own-caption cone term "
                         "(batch negatives).")
     p.add_argument("--lambda_norm",    type=float, default=0.0,
-                   help="Weight of the anchor-norm regulariser (0 disables it).")
+                   help="Weight of the anchor-norm regulariser (0 disables it). "
+                        "Also weights the family-anchor norm regulariser.")
     p.add_argument("--target_norm",    type=float, default=0.0,
                    help="Target ‖t_anchor‖. With curv=1, ψ ≈ π/8 at ‖t‖≈2.6, π/16 at ‖t‖≈5.")
+    p.add_argument("--lambda_img_in_family", type=float, default=0.0,
+                   help="Family level: weight of image-in-family-cone term "
+                        "(enables the family hierarchy together with --lambda_gen_in_family).")
+    p.add_argument("--lambda_gen_in_family", type=float, default=0.0,
+                   help="Family level: weight of generator-anchor-in-family-cone "
+                        "(structural nesting) term.")
+    p.add_argument("--target_norm_family", type=float, default=0.0,
+                   help="Target ‖t_family‖ for the family-anchor norm regulariser. "
+                        "Set smaller than --target_norm so family cones stay broader.")
+    p.add_argument("--holdout_generators", nargs="+", default=[],
+                   help="Generators excluded from TRAINING (no samples, no class "
+                        "anchor). Their family cone still exists via the remaining "
+                        "siblings — used for the leave-one-out novelty test, e.g. "
+                        "--holdout_generators SD3_5.")
     p.add_argument("--batch_size",     type=int,   default=256)
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
@@ -130,6 +146,9 @@ def run_validation(model_inner, val_loader, anchor_texts, tokenizer, class_names
 
     per_class_correct = {c: 0 for c in class_names}
     per_class_total   = {c: 0 for c in class_names}
+    # Family accuracy via the generator prediction: even when the exact
+    # generator is wrong, is its family (lineage) right?
+    family_correct = 0
 
     for batch in tqdm(val_loader, desc="val", leave=False):
         pixel = batch["pixel_values"].to(device)
@@ -140,6 +159,7 @@ def run_validation(model_inner, val_loader, anchor_texts, tokenizer, class_names
         for pred, gt in zip(pred_names, batch["generator"]):
             per_class_total[gt] += 1
             per_class_correct[gt] += int(pred == gt)
+            family_correct += int(family_of(pred) == family_of(gt))
 
     total = sum(per_class_total.values())
     correct = sum(per_class_correct.values())
@@ -152,6 +172,7 @@ def run_validation(model_inner, val_loader, anchor_texts, tokenizer, class_names
         "overall_acc":   correct / total if total else 0.0,
         "balanced_acc":  balanced,
         "per_class_acc": per_class_acc,
+        "family_acc":    family_correct / total if total else 0.0,
         "total":         total,
     }
 
@@ -160,18 +181,38 @@ def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    class_names, anchor_texts = build_anchors(args.generators)
+    # Held-out generators are removed from the training generators entirely:
+    # no samples, no class anchor. Their family cone still forms from the
+    # remaining siblings, which is what the leave-one-out novelty test needs.
+    holdout = set(args.holdout_generators)
+    train_generators = [g for g in args.generators if g not in holdout]
+    if holdout:
+        missing = holdout - set(args.generators)
+        if missing:
+            print(f"WARNING: held-out generators not in --generators: {sorted(missing)}")
+        print(f"Holding out from training: {sorted(holdout & set(args.generators))}")
+
+    class_names, anchor_texts = build_anchors(train_generators)
     name_to_idx = {n: i for i, n in enumerate(class_names)}
     print(f"Class anchors:")
     for i, (c, t) in enumerate(zip(class_names, anchor_texts)):
         print(f"  [{i}] {c:8s} → \"{t}\"")
+
+    # ── Family structures (one broad cone per generator lineage) ────────────────
+    family_names, family_anchor_texts, gen_to_family = build_family_structures(class_names)
+    use_family = (args.lambda_img_in_family > 0 or args.lambda_gen_in_family > 0)
+    if use_family:
+        print(f"Family anchors ({len(family_names)} families):")
+        for i, (f, t) in enumerate(zip(family_names, family_anchor_texts)):
+            members = [c for c, fi in zip(class_names, gen_to_family) if family_names[fi] == f]
+            print(f"  [{i}] {f:18s} → \"{t}\"   members={members}")
 
     # ── Datasets ──────────────────────────────────────────────────────────────
     print("\n=== Train split ===")
     train_ds = IABCLIPDataset(
         root=args.dataset_path,
         captions_dir=args.captions_dir,
-        generators=args.generators,
+        generators=train_generators,
         semantics=args.semantics,
         processor_name=args.clip_name,
         max_per_class=args.max_per_class,
@@ -183,7 +224,7 @@ def main():
     val_ds = IABCLIPDataset(
         root=args.dataset_path,
         captions_dir=args.captions_dir,
-        generators=args.generators,
+        generators=train_generators,
         semantics=args.semantics,
         processor_name=args.clip_name,
         max_per_class=args.max_per_class,
@@ -235,11 +276,18 @@ def main():
         lambda_cap_in_class=args.lambda_cap_in_class,
         lambda_img_in_cap=args.lambda_img_in_cap,
         lambda_norm=args.lambda_norm, target_norm=args.target_norm,
+        lambda_img_in_family=args.lambda_img_in_family,
+        lambda_gen_in_family=args.lambda_gen_in_family,
+        target_norm_family=args.target_norm_family,
     )
     use_caps = (args.lambda_cap_in_class > 0 or args.lambda_img_in_cap > 0)
     if use_caps:
         print(f"Hierarchical mode: λ_cap_in_class={args.lambda_cap_in_class} "
               f"λ_img_in_cap={args.lambda_img_in_cap}")
+    if use_family:
+        print(f"Family mode: λ_img_in_family={args.lambda_img_in_family} "
+              f"λ_gen_in_family={args.lambda_gen_in_family} "
+              f"target_norm_family={args.target_norm_family}")
 
     # Tokenized anchors stay constant; only the text-encoder weights change.
     tokenizer = CLIPTokenizer.from_pretrained(args.clip_name)
@@ -247,6 +295,14 @@ def main():
                            truncation=True, max_length=77)
     anchor_ids  = anchor_tok["input_ids"].to(device)
     anchor_mask = anchor_tok["attention_mask"].to(device)
+
+    # Family anchors: encoded each step alongside the class anchors when active.
+    gen_family = torch.tensor(gen_to_family, device=device, dtype=torch.long)
+    if use_family:
+        family_tok = tokenizer(family_anchor_texts, return_tensors="pt",
+                               padding="max_length", truncation=True, max_length=77)
+        family_ids  = family_tok["input_ids"].to(device)
+        family_mask = family_tok["attention_mask"].to(device)
 
     best_balanced = -1.0
     out_path = Path(args.output)
@@ -258,12 +314,17 @@ def main():
                  "mean_anc_norm"]
     cap_keys  = ["inside_cap", "inside_img_cap", "mean_psi_cap",
                  "mean_xi_cap_anc", "mean_xi_img_cap", "mean_cap_norm"]
+    fam_keys  = ["loss_img_in_family", "loss_gen_in_family", "loss_norm_family",
+                 "inside_img_fam", "family_cone_acc", "mean_psi_fam",
+                 "mean_xi_img_fam", "mean_fam_norm"]
 
     for epoch in range(1, args.num_epochs + 1):
         model.train()
         sums = {"loss": 0.0, **{k: 0.0 for k in base_keys}}
         if use_caps:
             sums.update({k: 0.0 for k in cap_keys})
+        if use_family:
+            sums.update({k: 0.0 for k in fam_keys})
         bar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.num_epochs}")
         for step, batch in enumerate(bar, 1):
             pixel    = batch["pixel_values"].to(device)
@@ -279,7 +340,14 @@ def main():
                     x_img = model(pixel)
                     x_cap = None
                 x_anc, _ = core.encode_text(anchor_ids, anchor_mask)
-            loss, stats = cone_loss(x_img, x_anc, labels, x_cap=x_cap)
+                if use_family:
+                    x_fam, _ = core.encode_text(family_ids, family_mask)
+                else:
+                    x_fam = None
+            labels_family = gen_family[labels] if use_family else None
+            loss, stats = cone_loss(x_img, x_anc, labels, x_cap=x_cap,
+                                    x_fam=x_fam, gen_family=gen_family,
+                                    labels_family=labels_family)
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -295,6 +363,9 @@ def main():
             if use_caps:
                 for k in cap_keys:
                     sums[k] += stats[k].item()
+            if use_family:
+                for k in fam_keys:
+                    sums[k] += stats[k].item()
 
             if step % 25 == 0 or step == steps_per_epoch:
                 post = {
@@ -307,6 +378,10 @@ def main():
                     post["cc"] = f"{sums['loss_cap_in_cls']/step:.3f}"
                     post["ip"] = f"{sums['loss_img_in_cap']/step:.3f}"
                     post["ψc"] = f"{sums['mean_psi_cap']/step:.3f}"
+                if use_family:
+                    post["if"]  = f"{sums['loss_img_in_family']/step:.3f}"
+                    post["gf"]  = f"{sums['loss_gen_in_family']/step:.3f}"
+                    post["fac"] = f"{sums['family_cone_acc']/step:.3f}"
                 bar.set_postfix(**post)
 
         avg = {k: v / steps_per_epoch for k, v in sums.items()}
@@ -315,6 +390,9 @@ def main():
         if use_caps:
             line1 += (f"  L_cap_cls={avg['loss_cap_in_cls']:.4f}"
                       f"  L_img_cap={avg['loss_img_in_cap']:.4f}")
+        if use_family:
+            line1 += (f"  L_img_fam={avg['loss_img_in_family']:.4f}"
+                      f"  L_gen_fam={avg['loss_gen_in_family']:.4f}")
         line1 += f"  L_norm={avg['loss_norm']:.4f}  lr={scheduler.get_last_lr()[0]:.2e}"
         print(line1)
         print(f"           cone_acc={100*avg['cone_acc']:.1f}%  "
@@ -322,6 +400,12 @@ def main():
               f"ψ_anc={avg['mean_psi_anc']:.3f}  "
               f"ξ_img→anc={avg['mean_xi_img_anc']:.3f}  "
               f"‖t̄_anc‖={avg['mean_anc_norm']:.2f}")
+        if use_family:
+            print(f"           family_cone_acc={100*avg['family_cone_acc']:.1f}%  "
+                  f"inside_img_fam={100*avg['inside_img_fam']:.1f}%  "
+                  f"ψ_fam={avg['mean_psi_fam']:.3f}  "
+                  f"ξ_img→fam={avg['mean_xi_img_fam']:.3f}  "
+                  f"‖t̄_fam‖={avg['mean_fam_norm']:.2f}")
         if use_caps:
             print(f"           inside_cap={100*avg['inside_cap']:.1f}%  "
                   f"inside_img_in_cap={100*avg['inside_img_cap']:.1f}%  "
@@ -334,7 +418,8 @@ def main():
         val = run_validation(core, val_loader, anchor_texts, tokenizer,
                              class_names, device, args.curv)
         print(f"  val: overall={100*val['overall_acc']:.1f}%  "
-              f"balanced={100*val['balanced_acc']:.1f}%  ({val['total']} samples)")
+              f"balanced={100*val['balanced_acc']:.1f}%  "
+              f"family={100*val['family_acc']:.1f}%  ({val['total']} samples)")
         for c, a in val["per_class_acc"].items():
             print(f"    {c:10s}: {100*a:5.1f}%")
 
@@ -355,7 +440,15 @@ def main():
                     "anchor_texts":    anchor_texts,
                     "generators":      args.generators,
                     "semantics":       args.semantics,
+                    "holdout_generators":   args.holdout_generators,
+                    "family_names":         family_names,
+                    "family_anchor_texts":  family_anchor_texts,
+                    "gen_to_family":        gen_to_family,
+                    "lambda_img_in_family": args.lambda_img_in_family,
+                    "lambda_gen_in_family": args.lambda_gen_in_family,
+                    "target_norm_family":   args.target_norm_family,
                     "val_balanced":    val["balanced_acc"],
+                    "val_family_acc":  val["family_acc"],
                     "epoch":           epoch,
                 },
                 out_path,
