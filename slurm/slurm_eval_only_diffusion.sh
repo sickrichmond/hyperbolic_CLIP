@@ -22,13 +22,24 @@ export TRANSFORMERS_OFFLINE=1
 
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
+# Overridable via env var (defaults = original IAB dataset + diffusion checkpoint).
+# To eval the OLD diffusion checkpoint on the NEW regenerated fakes:
+#   DATA=$WORK/hyp_fine_tuning/iab_recap_dataset_v2 sbatch slurm/slurm_eval_only_diffusion.sh
+# (the new root holds only the fakes; symlink the reals in first — see README/notes:
+#   ln -s ../iab_dataset/real $WORK/hyp_fine_tuning/iab_recap_dataset_v2/real)
+CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_diffusion.pt}
+DATA=${DATA:-$WORK/hyp_fine_tuning/iab_dataset}
+CAPS=${CAPS:-$WORK/hyp_fine_tuning/iab_captions}
+SPLIT=${SPLIT:-val}
+VAL_FRAC=${VAL_FRAC:-0.2}
+
 python -m tests.eval_attribution \
-    --checkpoint   $WORK/hyp_fine_tuning/checkpoints/attribution_diffusion.pt \
-    --dataset_path $WORK/hyp_fine_tuning/iab_dataset \
-    --captions_dir $WORK/hyp_fine_tuning/iab_captions \
+    --checkpoint   "$CKPT" \
+    --dataset_path "$DATA" \
+    --captions_dir "$CAPS" \
     --generators   real SD3 SD3_5 SDXL FLUX \
     --semantics    COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
-    --split        val \
-    --val_frac     0.2 \
+    --split        "$SPLIT" \
+    --val_frac     "$VAL_FRAC" \
     --batch_size   256 \
     --num_workers  4
