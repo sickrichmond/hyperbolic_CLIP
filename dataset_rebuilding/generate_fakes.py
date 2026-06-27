@@ -33,6 +33,7 @@ import argparse
 import csv
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import torch
@@ -177,13 +178,69 @@ def _stable_seed(base: int, key: str) -> int:
     return (base + h) & 0x7FFFFFFF
 
 
+def _trim_for_clip(tokenizer, cap: str, style: str) -> str:
+    """Return '{trimmed_cap}, {style}' guaranteed to fit within 77 CLIP tokens.
+
+    Trims the tail of the caption (least important part) to make room for the
+    style suffix, so the style is always present in the CLIP pooled embedding.
+    If the full prompt already fits, it is returned unchanged.
+    """
+    full = f"{cap}, {style}"
+    if len(tokenizer(full, truncation=False)["input_ids"]) <= 77:
+        return full
+    style_ids = tokenizer(f", {style}", truncation=False)["input_ids"]
+    style_token_count = len(style_ids) - 2  # subtract BOS + EOS
+    cap_budget = 75 - style_token_count     # 77 total − 2 for BOS/EOS
+    cap_ids = tokenizer(cap, truncation=False)["input_ids"][1:-1]  # strip BOS/EOS
+    trimmed_cap = tokenizer.decode(cap_ids[:cap_budget], skip_special_tokens=True)
+    return f"{trimmed_cap}, {style}"
+
+
+def _build_prompt_kwargs(cap: str, style: str | None, kind: str, pipe) -> dict:
+    """Return the prompt keyword arguments for the pipeline __call__.
+
+    Each model routes different prompts to its text encoders:
+
+      FLUX  : prompt    → CLIP   (pooled global signal, 77-token limit)
+              prompt_2  → T5     (sequence conditioning, no practical limit)
+      SD3/5 : prompt    → CLIP-L (pooled, 77-token limit)
+              prompt_2  → CLIP-G (pooled, 77-token limit)
+              prompt_3  → T5     (sequence conditioning, no practical limit)
+      SDXL  : prompt    → CLIP-L + CLIP-G (only encoders, 77-token limit each)
+
+    Strategy:
+    - T5 always receives the full caption + style (T5 has no truncation issue).
+    - Every CLIP encoder receives a caption trimmed to leave room for the style,
+      so the style is always present in the pooled embedding.
+    """
+    full = f"{cap}, {style}" if style else cap
+    if not style:
+        # No style: all encoders get the same full caption.
+        if kind == "flux":
+            return {"prompt": full, "prompt_2": full}
+        if kind == "sd3":
+            return {"prompt": full, "prompt_2": full, "prompt_3": full}
+        return {"prompt": full}  # sdxl
+
+    clip_prompt = _trim_for_clip(pipe.tokenizer, cap, style)
+    if kind == "flux":
+        # prompt → CLIP (trimmed so style fits), prompt_2 → T5 (full)
+        return {"prompt": clip_prompt, "prompt_2": full}
+    if kind == "sd3":
+        # prompt/prompt_2 → CLIP-L/G (trimmed), prompt_3 → T5 (full)
+        return {"prompt": clip_prompt, "prompt_2": clip_prompt, "prompt_3": full}
+    # sdxl: CLIP only — trimmed prompt goes to both CLIP-L and CLIP-G
+    return {"prompt": clip_prompt}
+
+
 def build_pipeline(kind: str, model: str, dtype: str, cpu_offload: bool):
-    # Silence the per-image CLIP "truncated to 77 tokens" warning: it is expected
-    # and harmless — SD3/SD3.5/FLUX carry the full prompt via their T5 encoder; it
-    # only floods the logs (and looks like an error). SDXL is CLIP-only so it does
-    # truncate at 77 tokens, but that matches IAB's SDXL.
+    # Suppress the per-image CLIP "truncated to 77 tokens" warning.
+    # SD3/SD3.5/FLUX: handled via T5 (full prompt); CLIP is secondary pooled signal.
+    # SDXL: _build_prompt trims the caption so the style always fits within 77 tokens.
+    # Two suppression layers: hf_logging (model loading) + warnings filter (tokenizer).
     from transformers.utils import logging as hf_logging
     hf_logging.set_verbosity_error()
+    warnings.filterwarnings("ignore", message=".*truncated because CLIP.*")
     from diffusers import (FluxPipeline, StableDiffusion3Pipeline,
                            StableDiffusionXLPipeline)
     cls = {"flux": FluxPipeline, "sd3": StableDiffusion3Pipeline,
@@ -283,8 +340,8 @@ def main():
                           guidance_scale=guidance, generator=gen)
             if kind in ("flux", "sd3") and max_seq_len:
                 kwargs["max_sequence_length"] = max_seq_len
-            prompt = f"{cap}, {args.style}" if args.style else cap
-            pipe(prompt, **kwargs).images[0].save(out)
+            prompt_kwargs = _build_prompt_kwargs(cap, args.style, kind, pipe)
+            pipe(**prompt_kwargs, **kwargs).images[0].save(out)
             n_done += 1
             if remaining is not None:
                 remaining -= 1
