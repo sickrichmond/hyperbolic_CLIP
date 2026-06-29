@@ -21,13 +21,12 @@ set -euo pipefail
 # ---- EDIT THESE ------------------------------------------------------------
 PROJECT_ROOT=/leonardo_work/EUHPC_D26_009B/hyp_fine_tuning/hyperbolic_CLIP
 DATA=/leonardo_work/EUHPC_D26_009B/hyp_fine_tuning/iab_dataset
-CONDA_ENV=deepfake-hyp
+VENV=/leonardo_work/EUHPC_D26_009B/hyp_fine_tuning/bin/activate
 # Path to the checkpoint produced by training (ckpt_best.pth or ckpt_epoch_N.pth):
 CKPT=comparison/training/logs/default_split/resnet50/<RUN_FOLDER>/ckpt_best.pth
 # ---------------------------------------------------------------------------
 
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate "$CONDA_ENV"
+source "$VENV"
 
 cd "$PROJECT_ROOT"
 export PYTHONPATH="$PROJECT_ROOT:${PYTHONPATH:-}"

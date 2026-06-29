@@ -1,29 +1,32 @@
-# Minimal dependencies to TRAIN/TEST the ResNet-50 attributor of
-# ImageAttributionBench. Heavy/irrelevant deps from environment.yaml
-# (flash-attn, torchaudio+rocm, openai-CLIP, wand, pyaudio, multicoretsne,
-# tensorflow-datasets, diffusers, ...) are NOT needed for resnet50.
+# Dependencies for the ResNet-50 attributor of ImageAttributionBench,
+# RELATIVE to the existing CINECA venv ($WORK/hyp_fine_tuning).
 #
-# Install torch/torchvision from the CUDA 12.1 index (Leonardo A100):
-#   pip install torch==2.3.0 torchvision==0.18.0 --index-url https://download.pytorch.org/whl/cu121
-#   pip install -r comparison/requirements_resnet50.txt
+# That venv already provides: torch 2.5.1+cu121, torchvision 0.20.1+cu121,
+# numpy, scikit-learn, scipy, pillow, pandas, matplotlib, pyyaml, transformers.
 #
-# (If you reuse an existing env that already has a working CUDA torch,
-#  just `pip install` the lines below the torch/torchvision pins.)
-
-torch==2.3.0
-torchvision==0.18.0
-
-numpy
-pillow
-scikit-learn
-scipy
-pyyaml
-pandas
-tqdm
-opencv-python
-albumentations==1.3.1
-timm
-yacs
+# The attributors/ and dataset/ __init__.py now import every method defensively
+# (try/except), so missing deps of UNUSED methods are skipped with a warning and
+# do NOT block resnet50. The ONLY thing the resnet50 core path still needs is
+# tensorboard (used by the trainer's SummaryWriter):
+#
+#   source $WORK/hyp_fine_tuning/bin/activate
+#   pip install tensorboard
+#
 tensorboard
-matplotlib
-seaborn
+
+# ---------------------------------------------------------------------------
+# OPTIONAL: install these only if you later want to run the OTHER methods too.
+# Each line maps to the method(s) that need it:
+#   opencv-python   -> patchcraft, dna, ssp        (cv2)
+#   yacs            -> hifi_net                     (seg_hrnet config)
+#   torch-dct       -> dct, pose                    (torch_dct)
+#   albumentations  -> repmix                       (augmentations)
+#   seaborn         -> pose                         (plots)
+#   git+https://github.com/openai/CLIP.git -> clip_lr
+# ---------------------------------------------------------------------------
+# opencv-python
+# yacs
+# torch-dct
+# albumentations
+# seaborn
+# git+https://github.com/openai/CLIP.git

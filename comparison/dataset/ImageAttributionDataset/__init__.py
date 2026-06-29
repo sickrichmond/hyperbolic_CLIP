@@ -10,17 +10,32 @@ sys.path.append(dataset_root_dir)
 sys.path.append(project_root_dir)
 
 
+import importlib
+import warnings
+
 from comparison.training.metrics.registry import DATASET
-from .dataset_resnet50 import Resnet50Dataset
-from .dataset_clip_lr import ClipLrDataset
-from .dataset_repmix import RepmixDataset
-from .dataset_hifi_net import HiFiNetDataset
-from .dataset_defl import DEFLDataset
-from .dataset_ssp import SSPDataset
-from .dataset_patchcraft import PatchCraftDataset
-from .dataset_dct import DCTDataset
-from .dataset_dna import DNADataset
-from .dataset_ucf import UCFDataset
-from .dataset_patch import PatchDataset
-from .dataset_gfd import GFDDataset 
-from .dataset_pose import POSEDataset 
+
+# Each dataset module self-registers into DATASET on import. Some methods pull
+# optional third-party deps (cv2, torch_dct, albumentations, openai-CLIP, ...).
+# Import defensively so a missing dep for an UNUSED method does not prevent
+# running the others (e.g. resnet50). A skipped method just won't be in DATASET.
+_DATASET_MODULES = [
+    "dataset_resnet50",
+    "dataset_clip_lr",
+    "dataset_repmix",
+    "dataset_hifi_net",
+    "dataset_defl",
+    "dataset_ssp",
+    "dataset_patchcraft",
+    "dataset_dct",
+    "dataset_dna",
+    "dataset_ucf",
+    "dataset_patch",
+    "dataset_gfd",
+    "dataset_pose",
+]
+for _m in _DATASET_MODULES:
+    try:
+        importlib.import_module(f"{__name__}.{_m}")
+    except Exception as _e:
+        warnings.warn(f"[dataset] skipped {_m}: {type(_e).__name__}: {_e}")

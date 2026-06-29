@@ -6,17 +6,33 @@ project_root_dir = os.path.dirname(parent_dir)
 sys.path.append(parent_dir)
 sys.path.append(project_root_dir)
 
+import importlib
+import warnings
+
 from comparison.training.metrics.registry import ATTRIBUTOR
-from .attributor_resnet50 import Resnet50Attributor
-from .attributor_clip_lr import ClipLrAttributor
-from .attributor_repmix import RepmixAttributor
-from .attributor_hifi_net import HiFiNetAttributor
-from .attributor_defl import DEFLAttributor
-from .attributor_ssp import SSPAttributor
-from .attributor_patchcraft import PatchCraftAttributor
-from .attributor_dct import DCTAttributor
-from .attributor_dna import DNAAttributor
-from .attributor_ucf import UCFAttributor
-from .attributor_patch import PatchAttributor
-from .attributor_gfd import GFDAttributor
-from .attributor_pose import POSEAttributor
+
+# Each attributor self-registers into ATTRIBUTOR on import. Some methods pull
+# optional third-party deps (cv2, yacs, torch_dct, seaborn, openai-CLIP, ...).
+# Import defensively so a missing dep for an UNUSED method does not prevent
+# running the others (e.g. resnet50). A skipped method just won't be in
+# ATTRIBUTOR, raising a clear KeyError only if you actually select it.
+_ATTRIBUTOR_MODULES = [
+    "attributor_resnet50",
+    "attributor_clip_lr",
+    "attributor_repmix",
+    "attributor_hifi_net",
+    "attributor_defl",
+    "attributor_ssp",
+    "attributor_patchcraft",
+    "attributor_dct",
+    "attributor_dna",
+    "attributor_ucf",
+    "attributor_patch",
+    "attributor_gfd",
+    "attributor_pose",
+]
+for _m in _ATTRIBUTOR_MODULES:
+    try:
+        importlib.import_module(f"{__name__}.{_m}")
+    except Exception as _e:
+        warnings.warn(f"[attributors] skipped {_m}: {type(_e).__name__}: {_e}")

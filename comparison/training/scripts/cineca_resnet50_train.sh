@@ -25,14 +25,13 @@ set -euo pipefail
 PROJECT_ROOT=/leonardo_work/EUHPC_D26_009B/hyp_fine_tuning/hyperbolic_CLIP
 # Dataset root (the folder with the 23 model-class subdirs + real).
 DATA=/leonardo_work/EUHPC_D26_009B/hyp_fine_tuning/iab_dataset
-# Conda env that has the deps (see comparison/requirements_resnet50.txt).
-CONDA_ENV=deepfake-hyp
+# Python venv that has the deps (see comparison/requirements_resnet50.txt).
+VENV=/leonardo_work/EUHPC_D26_009B/hyp_fine_tuning/bin/activate
 # ---------------------------------------------------------------------------
 
 # Activate environment ------------------------------------------------------
 # module load cuda/12.1                      # usually NOT needed: pip torch+cu121 bundles its CUDA libs
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate "$CONDA_ENV"
+source "$VENV"
 
 # Imports are absolute (comparison.*) so the import root must be on sys.path.
 cd "$PROJECT_ROOT"
