@@ -21,18 +21,9 @@ from comparison.training.metrics.registry import DATASET
 # running the others (e.g. resnet50). A skipped method just won't be in DATASET.
 _DATASET_MODULES = [
     "dataset_resnet50",
-    "dataset_clip_lr",
-    "dataset_repmix",
+    "dataset_dct",
     "dataset_hifi_net",
     "dataset_defl",
-    "dataset_ssp",
-    "dataset_patchcraft",
-    "dataset_dct",
-    "dataset_dna",
-    "dataset_ucf",
-    "dataset_patch",
-    "dataset_gfd",
-    "dataset_pose",
 ]
 for _m in _DATASET_MODULES:
     try:

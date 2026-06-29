@@ -1,15 +1,16 @@
 #!/bin/bash
 # ============================================================================
-# CINECA Leonardo — Evaluate a trained ResNet-50 attributor checkpoint.
+# CINECA Leonardo — Evaluate a trained DEFL attributor checkpoint.
 # Tests degraded levels [level_start, level_end). Use 0..7 for all 7 levels.
 #
-# Submit:  sbatch comparison/training/scripts/cineca_resnet50_test.sh
-# Pre-fetch torchvision weights once on a login node (see cineca_resnet50_train.sh).
+# Submit:  sbatch comparison/training/scripts/cineca_defl_test.sh
+# Pre-fetch torchvision ResNet-50 + openai-CLIP RN50x16 once on a login node
+# (see cineca_defl_train.sh).
 # ============================================================================
 
 #SBATCH --account=EUHPC_D26_009B
 #SBATCH --partition=boost_usr_prod
-#SBATCH --job-name=iab_rn50_test
+#SBATCH --job-name=iab_defl_test
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
@@ -39,17 +40,17 @@ cd $REPO
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 
 # ---- EDIT: checkpoint produced by training (ckpt_best.pth or ckpt_epoch_N.pth):
-CKPT=comparison/training/logs/default_split/resnet50/<RUN_FOLDER>/ckpt_best.pth
+CKPT=comparison/training/logs/default_split/defl/<RUN_FOLDER>/ckpt_best.pth
 
-CONFIG=comparison/training/config/model/resnet50.yaml
+CONFIG=comparison/training/config/model/defl.yaml
 
 # ── STANDARD SPLIT, all 7 degraded levels ───────────────────────────────────
 python -m comparison.training.test \
   --config "$CONFIG" \
   --resume_checkpoint "$CKPT" \
   --root_dir "$DATA" \
-  --batch_size 32 \
-  --num_workers "${SLURM_CPUS_PER_TASK:-8}" \
+  --batch_size 8 \
+  --num_workers 2 \
   --level_start 0 --level_end 7 \
   --log_dir comparison/training/logs_test
 

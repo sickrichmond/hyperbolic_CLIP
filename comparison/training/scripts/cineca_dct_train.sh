@@ -1,23 +1,17 @@
 #!/bin/bash
 # ============================================================================
-# CINECA Leonardo — Train the ResNet-50 attributor (ImageAttributionBench).
-# train.py runs the degraded-test loop (levels 0..6) automatically at the end,
-# so this single job already produces a first evaluation. Use
-# cineca_resnet50_test.sh to re-evaluate a saved checkpoint.
+# CINECA Leonardo — Train the DCT-CNN attributor (ImageAttributionBench).
+# DCT-CNN = SimpleCNN over the DCT spectrum (Frank et al. 2020); trained from
+# scratch (no pretrained weights). Needs scipy in the venv.
+# train.py runs the degraded-test loop (levels 0..6) automatically at the end.
+# Use cineca_dct_test.sh to re-evaluate a saved checkpoint.
 #
-# Submit:  sbatch comparison/training/scripts/cineca_resnet50_train.sh
-#
-# Pretrained weights (compute nodes have NO internet): the backbone is
-# torchvision resnet50(pretrained=True). Pre-fetch ONCE on a login node into the
-# shared TORCH_HOME below before submitting:
-#   module load python/3.11.7 && source $WORK/hyp_fine_tuning/bin/activate
-#   TORCH_HOME=$WORK/hyp_fine_tuning/torch_cache \
-#     python -c "import torchvision.models as m; m.resnet50(pretrained=True)"
+# Submit:  sbatch comparison/training/scripts/cineca_dct_train.sh
 # ============================================================================
 
 #SBATCH --account=EUHPC_D26_009B
 #SBATCH --partition=boost_usr_prod
-#SBATCH --job-name=iab_rn50_train
+#SBATCH --job-name=iab_dct_train
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
@@ -36,21 +30,20 @@ module load cuda/12.6
 source $WORK/hyp_fine_tuning/bin/activate
 
 export HF_HOME=$WORK/hyp_fine_tuning/hf_cache
-export TORCH_HOME=$WORK/hyp_fine_tuning/torch_cache   # torchvision pretrained cache
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 
 REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP
-DATA=$WORK/hyp_fine_tuning/iab_dataset                # 23 model-class subdirs + real
+DATA=$WORK/hyp_fine_tuning/iab_dataset
 cd $REPO
-export PYTHONPATH="$REPO:${PYTHONPATH:-}"             # imports are absolute (comparison.*)
+export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 
 echo "Node: $(hostname) | GPU: ${CUDA_VISIBLE_DEVICES:-?}"
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 python -c "import torch; print('torch', torch.__version__, '| cuda', torch.cuda.is_available())"
 
-CONFIG=comparison/training/config/model/resnet50.yaml
+CONFIG=comparison/training/config/model/dct.yaml
 LOGDIR=comparison/training/logs
 
 # ── STANDARD SPLIT ──────────────────────────────────────────────────────────
@@ -72,4 +65,4 @@ python -m comparison.training.train \
 #     --num_workers "${SLURM_CPUS_PER_TASK:-8}" --log_dir "$LOGDIR"
 # done
 
-echo "Done. Checkpoints + test_results_degraded_*.txt under $LOGDIR/<split>/resnet50/<run>/"
+echo "Done. Checkpoints + test_results_degraded_*.txt under $LOGDIR/<split>/dct/<run>/"

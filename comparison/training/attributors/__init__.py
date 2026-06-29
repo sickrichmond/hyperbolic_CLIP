@@ -18,18 +18,9 @@ from comparison.training.metrics.registry import ATTRIBUTOR
 # ATTRIBUTOR, raising a clear KeyError only if you actually select it.
 _ATTRIBUTOR_MODULES = [
     "attributor_resnet50",
-    "attributor_clip_lr",
-    "attributor_repmix",
+    "attributor_dct",
     "attributor_hifi_net",
     "attributor_defl",
-    "attributor_ssp",
-    "attributor_patchcraft",
-    "attributor_dct",
-    "attributor_dna",
-    "attributor_ucf",
-    "attributor_patch",
-    "attributor_gfd",
-    "attributor_pose",
 ]
 for _m in _ATTRIBUTOR_MODULES:
     try:
