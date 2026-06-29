@@ -225,6 +225,18 @@ class NLCDetection(nn.Module):
         # 第四层级: 23
         self.branch_cls_level_4 = BranchCLS(271, 23)
 
+        # Hierarchy parent maps for probability propagation (HiFi-Net). For each
+        # child class at a finer level, the index of its parent class at the next
+        # coarser level, derived from the IAB 23-class tree in
+        # dataset_hifi_net.label_mapping. Registered as buffers so they follow the
+        # model to its device.
+        #   level 2 (4 cls, col1) -> parent level 1 (col0); col1==3 is unused -> 0
+        self.register_buffer('parent_idx_2', torch.tensor([0, 0, 1, 0]))
+        #   level 3 (6 cls, col2) -> parent level 2 (col1)
+        self.register_buffer('parent_idx_3', torch.tensor([0, 1, 1, 1, 1, 2]))
+        #   level 4 (23 cls, col3=label) -> parent level 3 (col2)
+        self.register_buffer('parent_idx_4', torch.tensor(
+            [0, 3, 2, 2, 2, 2, 1, 1, 1, 1, 1, 0, 0, 0, 3, 3, 0, 4, 4, 0, 0, 0, 5]))
 
     def forward(self, feat, img,use_prob=False, use_feat=False):
         # 从特征提取网络获得多尺度特征
@@ -236,45 +248,33 @@ class NLCDetection(nn.Module):
 
         pconv_1 = F.interpolate(pconv_feat, size=s1.size()[2:], mode='bilinear', align_corners=True)
 
-        ## 第一层级 (real vs synthetic) - 使用最小尺寸特征图 (s4)
+        ## Level 1 (coarsest: 0 generated / 1 real) — smallest feature map (s4)
         cls_1, pro_1, feat_1 = self.branch_cls_level_1(s4)
         cls_prob_1 = self.softmax_m(pro_1)
 
-        # cls_prob_10 和 cls_prob_11 是第一层级的分类概率，用于生成 mask
-        cls_prob_10 = torch.unsqueeze(cls_prob_1[:,0],1)
-        cls_prob_11 = torch.unsqueeze(cls_prob_1[:,1],1)
-        cls_prob_mask_2 = torch.cat([cls_prob_10, cls_prob_11, cls_prob_11], axis=1)  # 三类掩码
-
-        ## 第二层级 (diffusion, GAN, 其他) - 使用较小特征图 (s3)，并结合第一层级的输出
+        ## Level 2 — s3 fused with the upsampled s4, conditioned on level 1.
         s4F = F.interpolate(s4, size=s3.size()[2:], mode='bilinear', align_corners=True)
         s3_input = torch.cat([s4F, s3], axis=1)
         cls_2, pro_2, feat_2 = self.branch_cls_level_2(s3_input)
         cls_prob_2 = self.softmax_m(pro_2)
+        # Probability propagation (HiFi-Net): boost each child logit by its parent's
+        # softmax probability — cls = cls + cls * parent_prob[parent_of_child].
+        cls_2 = cls_2 + cls_2 * cls_prob_1[:, self.parent_idx_2]
 
-        # cls_prob_20, cls_prob_21, cls_prob_22 是第二层级的分类概率，用于生成 mask
-        cls_prob_20 = torch.unsqueeze(cls_prob_2[:,0],1)
-        cls_prob_21 = torch.unsqueeze(cls_prob_2[:,1],1)
-        cls_prob_22 = torch.unsqueeze(cls_prob_2[:,2],1)
-        cls_prob_mask_3 = torch.cat([cls_prob_20, cls_prob_21, cls_prob_21, cls_prob_22, cls_prob_22], axis=1)  # 五类掩码
-
-        ## 第三层级 (diffusion: text-guided, non-text-guided, GAN: styleGAN, 其他GAN等) - 使用中等特征图 (s2)
+        ## Level 3 — s2 fused with the upsampled s3_input, conditioned on level 2.
         s3F = F.interpolate(s3_input, size=s2.size()[2:], mode='bilinear', align_corners=True)
         s2_input = torch.cat([s3F, s2], axis=1)
         cls_3, pro_3, feat_3 = self.branch_cls_level_3(s2_input)
         cls_prob_3 = self.softmax_m(pro_3)
+        cls_3 = cls_3 + cls_3 * cls_prob_2[:, self.parent_idx_3]
 
-        # cls_prob_30, cls_prob_31, cls_prob_32, cls_prob_33, cls_prob_34 是第三层级的分类概率，用于生成 mask
-        cls_prob_30 = torch.unsqueeze(cls_prob_3[:,0],1)
-        cls_prob_31 = torch.unsqueeze(cls_prob_3[:,1],1)
-        cls_prob_32 = torch.unsqueeze(cls_prob_3[:,2],1)
-        cls_prob_33 = torch.unsqueeze(cls_prob_3[:,3],1)
-        cls_prob_34 = torch.unsqueeze(cls_prob_3[:,4],1)
-        cls_prob_mask_4 = torch.cat([cls_prob_30, cls_prob_31, cls_prob_31, cls_prob_32, cls_prob_32, cls_prob_33, cls_prob_34], axis=1)  # 第四层级的掩码
-
-        ## 第四层级 (SD1, SD2, stgan1, proGAN等) - 使用最大特征图 (s1)，并结合第三层级的输出
+        ## Level 4 (finest: 23 classes) — s1 fused with upsampled s2_input + pconv,
+        ## conditioned on level 3.
         s2F = F.interpolate(s2_input, size=s1.size()[2:], mode='bilinear', align_corners=True)
         s1_input = torch.cat([s2F, s1, pconv_1], axis=1)
         cls_4, pro_4, feat_4 = self.branch_cls_level_4(s1_input)
+        cls_4 = cls_4 + cls_4 * cls_prob_3[:, self.parent_idx_4]
+
         _ = None
         # 返回每个层级的分类结果和掩码
         if use_prob:

@@ -31,8 +31,13 @@ class DCTDataset(ImageAttributionDataset):
         else:
             img = dct(img, type=2, norm='ortho', axis=0)
             img = dct(img, type=2, norm='ortho', axis=1)
+        # Log-scale the DCT magnitude spectrum, matching the original GANDCTAnalysis
+        # pipeline (src/math.py log_scale): abs -> + epsilon -> log. DCT coefficients
+        # span many orders of magnitude; the log compresses that dynamic range before
+        # the CNN sees them, which is what the original architecture expects.
         img = np.abs(img)
-        # ...
+        img += 1e-12  # no zero in log
+        img = np.log(img)
         return img
     
 
