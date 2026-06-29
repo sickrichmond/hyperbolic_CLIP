@@ -1,7 +1,7 @@
 import torchvision.transforms as T  
 from .dataset import ImageAttributionDataset
 from comparison.dataset.ImageAttributionDataset import DATASET
-from utils.repmix.augment_imagenetc import get_transforms
+from comparison.training.utils.repmix.augment_imagenetc import get_transforms
 import numpy as np
 import torch
 

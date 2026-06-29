@@ -6,7 +6,7 @@ from PIL import Image, ImageFile
 import random
 import numpy as np
 import torch
-from utils.dataset_util import ConfigToAttr
+from comparison.training.utils.dataset_util import ConfigToAttr
 
 
 @DATASET.register_module(module_name='dna')

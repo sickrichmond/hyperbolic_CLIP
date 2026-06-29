@@ -13,7 +13,7 @@ class ConfigToAttr:
 class SSPDataset(ImageAttributionDataset):  
     def __init__(self, root_dir, num_images_per_semantic_per_class=2000, transform=None,degraded=0, **kwargs):  
         super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded)  
-        from utils.ssp.tdataloader import processing
+        from comparison.training.utils.ssp.tdataloader import processing
         self.processing = processing
         if self.transform is None:  
             self.transform = T.Compose([  
