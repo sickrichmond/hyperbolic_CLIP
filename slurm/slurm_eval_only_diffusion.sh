@@ -22,22 +22,40 @@ export TRANSFORMERS_OFFLINE=1
 
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
-# Overridable via env var (defaults = original IAB dataset + diffusion checkpoint).
-# To eval the OLD diffusion checkpoint on the NEW regenerated fakes:
-#   DATA=$WORK/hyp_fine_tuning/iab_recap_dataset_v2 sbatch slurm/slurm_eval_only_diffusion.sh
-# (the new root holds only the fakes; symlink the reals in first — see README/notes:
-#   ln -s ../iab_dataset/real $WORK/hyp_fine_tuning/iab_recap_dataset_v2/real)
+# ── Configuration ────────────────────────────────────────────────────────────
+# Positional arguments (pass them explicitly at launch so you can never silently
+# eval the wrong images / split):
+#   $1 = dataset root   (default: original IAB dataset)
+#   $2 = split          (default: val)   — all | val | train
+# This is the "only diffusion" eval, so the generator set is FIXED to the 4
+# diffusion models (no real). CKPT / CAPS / VAL_FRAC stay env-overridable.
+#
+#   # OLD diffusion checkpoint on the NEW regenerated fakes (recommended:
+#   # split=all → every new fake evaluated once, no celebahq val-imbalance):
+#   sbatch slurm/slurm_eval_only_diffusion.sh $WORK/hyp_fine_tuning/iab_recap_dataset_v2 all
+#
+#   # original behaviour (old IAB dataset, val split):
+#   sbatch slurm/slurm_eval_only_diffusion.sh
+DATA="${1:-$WORK/hyp_fine_tuning/iab_dataset}"
+SPLIT="${2:-val}"
 CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_diffusion.pt}
-DATA=${DATA:-$WORK/hyp_fine_tuning/iab_dataset}
 CAPS=${CAPS:-$WORK/hyp_fine_tuning/iab_captions}
-SPLIT=${SPLIT:-val}
 VAL_FRAC=${VAL_FRAC:-0.2}
+GENERATORS="SD3 SD3_5 SDXL FLUX"
+
+echo "=== eval_only_diffusion config ==="
+echo "  DATASET:    $DATA"
+echo "  CHECKPOINT: $CKPT"
+echo "  CAPTIONS:   $CAPS"
+echo "  GENERATORS: $GENERATORS"
+echo "  SPLIT:      $SPLIT (val_frac=$VAL_FRAC)"
+echo "=================================="
 
 python -m tests.eval_attribution \
     --checkpoint   "$CKPT" \
     --dataset_path "$DATA" \
     --captions_dir "$CAPS" \
-    --generators   real SD3 SD3_5 SDXL FLUX \
+    --generators   $GENERATORS \
     --semantics    COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
     --split        "$SPLIT" \
     --val_frac     "$VAL_FRAC" \
