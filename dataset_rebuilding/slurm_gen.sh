@@ -48,9 +48,11 @@ export TRANSFORMERS_OFFLINE=1        # compute nodes have no internet
 export HF_HUB_OFFLINE=1
 
 REPO="$WORK/hyp_fine_tuning/hyperbolic_CLIP"
-CAPS="$WORK/hyp_fine_tuning/iab_captions_detailed_clean"     # our dense captions (keyed by stem)
+CAPS="${CAPS:-$WORK/hyp_fine_tuning/iab_captions_detailed_clean}"  # dense captions (keyed by stem)
 SRC_CAPS="$WORK/hyp_fine_tuning/iab_captions" # original IAB CSVs (row N → stem)
-OUT="$WORK/hyp_fine_tuning/iab_recap_dataset_v2"             # ROUND 2: new dir, keeps round-1 intact
+# OUT is override-able so a styled run goes to its own dir, e.g.
+#   OUT=$WORK/hyp_fine_tuning/iab_recap_cartoon_v2 STYLE="cartoon style, ..." sbatch ...
+OUT="${OUT:-$WORK/hyp_fine_tuning/iab_recap_dataset_v2}"     # ROUND 2 default; keeps round-1 intact
 
 cd "$REPO"
 echo "Generator: $GEN  →  $OUT/$GEN/"
