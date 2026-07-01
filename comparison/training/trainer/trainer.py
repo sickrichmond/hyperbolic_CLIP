@@ -114,15 +114,10 @@ class Trainer(object):
         val_metric = None  
         val_metrics = None  
 
-        if isinstance(self.model, ClipLrAttributor):  
-            self.logger.info("Collecting full train set for linear probe training...")  
-            self.model.train_linear_probe(train_loader)  
-            self.logger.info("Linear probe training done.")  
-
-        elif isinstance(self.model, POSEAttributor):
-            self.model.train_epoch_POSE(epoch, train_loader, optimizer=self.optimizer,scheduler=self.scheduler, logger=self.logger)
-
-        else:  
+        # The 4 comparison methods (resnet50, dct, hifi_net, defl) all use the
+        # standard batch-training loop below. The clip_lr linear-probe and pose
+        # custom-loop special cases were removed together with those methods.
+        if True:
             num_batches = len(train_loader)  
             pbar = tqdm(enumerate(train_loader), total=num_batches)  
             global_step = epoch * num_batches  
