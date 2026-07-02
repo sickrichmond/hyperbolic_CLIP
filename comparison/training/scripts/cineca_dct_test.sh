@@ -36,8 +36,17 @@ DATA=$WORK/hyp_fine_tuning/iab_dataset
 cd $REPO
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 
-# ---- EDIT: checkpoint produced by training (ckpt_best.pth or ckpt_epoch_N.pth):
-CKPT=comparison/training/logs/default_split/dct/<RUN_FOLDER>/ckpt_best.pth
+# Checkpoint: pass an explicit path as the first arg (sbatch <script> <ckpt>),
+# else auto-pick the most recent run's ckpt_best.pth for this method.
+CKPT="${1:-}"
+if [ -z "$CKPT" ]; then
+  CKPT=$(ls -t comparison/training/logs/default_split/dct/*/ckpt_best.pth 2>/dev/null | head -1 || true)
+fi
+if [ -z "$CKPT" ] || [ ! -f "$CKPT" ]; then
+  echo "ERROR: no checkpoint found. Pass one: sbatch $0 <path/to/ckpt_best.pth>" >&2
+  exit 1
+fi
+echo "Using checkpoint: $CKPT"
 
 CONFIG=comparison/training/config/model/dct.yaml
 
