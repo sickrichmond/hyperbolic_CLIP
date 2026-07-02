@@ -1,9 +1,10 @@
-import os  
-from PIL import Image  
-from torch.utils.data import Dataset  
+import os
+import time
+from PIL import Image
+from torch.utils.data import Dataset
 import re
-from io import BytesIO  
-from PIL import ImageFilter  
+from io import BytesIO
+from PIL import ImageFilter
 from torchvision import transforms
 
 semantic_label_map = {  
@@ -174,11 +175,28 @@ class ImageAttributionDataset(Dataset):
             image = self.blur(image, sigma=5)  
         return image  
 
-    def __getitem__(self, idx):  
-        img_path, label, semantic_label, semantic_subclass = self.samples[idx]  
-        image = Image.open(img_path).convert("RGB")  
+    def _open_image(self, img_path, retries=8, backoff=0.5):
+        # Leonardo's Lustre $WORK filesystem sporadically returns transient
+        # PermissionError/OSError on individual files under heavy parallel I/O
+        # (a file readable for many epochs can suddenly fail once). Retry the
+        # SAME file with escalating backoff — no skipping/substitution, so the
+        # dataset stays intact. If it is still unreadable after all retries the
+        # error propagates and the job fails, signalling a real permission issue
+        # to fix on disk rather than silently dropping data.
+        last_err = None
+        for attempt in range(retries):
+            try:
+                return Image.open(img_path).convert("RGB")
+            except (PermissionError, OSError) as e:
+                last_err = e
+                time.sleep(backoff * (attempt + 1))
+        raise last_err
 
-        GROK_LABEL = 13  
+    def __getitem__(self, idx):
+        img_path, label, semantic_label, semantic_subclass = self.samples[idx]
+        image = self._open_image(img_path)
+
+        GROK_LABEL = 13
         if label == GROK_LABEL:  
             width, height = image.size  
             crop_box = (0, 0, width - 100, height - 50)  
