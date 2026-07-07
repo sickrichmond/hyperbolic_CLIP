@@ -21,12 +21,13 @@
 
 #SBATCH --account=EUHPC_D26_009B
 #SBATCH --partition=boost_usr_prod
+#SBATCH --qos=boost_qos_lprod            # long QOS: walltime up to 4 days (>24h)
 #SBATCH --job-name=iab_defl_train
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=1
-#SBATCH --time=24:00:00
+#SBATCH --time=3-18:00:00                # ~8h/epoch x 10 epochs = ~79h (under 4-day cap)
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 #SBATCH --mail-type=END,FAIL
