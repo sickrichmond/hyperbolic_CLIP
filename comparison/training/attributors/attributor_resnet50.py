@@ -74,10 +74,11 @@ class Resnet50Attributor(AbstractAttributor):
         pred = pred_dict['logits']
         # compute metrics for batch data
         if test:
-            auc, acc, ap, conf_matrix, semantic_acc= calculate_metrics_for_test(label.detach(), pred.detach(),semantic_label)
+            auc, acc, ap, conf_matrix, semantic_acc, extra_metrics = calculate_metrics_for_test(label.detach(), pred.detach(),semantic_label)
             metric_batch_dict = {'acc': float(acc), 'auc': float(auc), 'ap': float(ap),
                                  "conf_matrix": conf_matrix,
-                                 'semantic_acc':semantic_acc # acc of each semantic
+                                 'semantic_acc':semantic_acc, # acc of each semantic
+                                 **extra_metrics,
                                  }
             return metric_batch_dict
         else:

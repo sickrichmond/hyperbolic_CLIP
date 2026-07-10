@@ -104,19 +104,41 @@ def calculate_metrics_for_test(label, output, semantic_label, need_softmax=True)
     mean_auc = np.mean(aucs) if aucs else float('nan')  
     mean_ap = np.mean(aps) if aps else float('nan')  
 
-    # 计算混淆矩阵（以预测标签为准）  
-    conf_matrix = metrics.confusion_matrix(y_true, y_pred_label)  
+    # 计算混淆矩阵（以预测标签为准）
+    conf_matrix = metrics.confusion_matrix(y_true, y_pred_label)
 
-    # 根据semantic_label分组计算分类准确率  
-    unique_semantics = np.unique(semantic_labels_np)  
-    semantic_acc = {}  
-    for sem in unique_semantics:  
-        idx = (semantic_labels_np == sem)  
-        if np.sum(idx) == 0:  
-            continue  
-        group_acc = np.mean(y_pred_label[idx] == y_true[idx])  
-        semantic_acc[int(sem)] = float(group_acc)  
-    return mean_auc, accuracy, mean_ap, conf_matrix, semantic_acc 
+    # precision / recall / F1. macro = unweighted mean over classes (each class
+    # counts equally); weighted = weighted by per-class support; plus per-class
+    # arrays (indexed 0..num_classes-1) and their support.
+    precision_macro, recall_macro, f1_macro, _ = metrics.precision_recall_fscore_support(
+        y_true, y_pred_label, average='macro', zero_division=0)
+    precision_weighted, recall_weighted, f1_weighted, _ = metrics.precision_recall_fscore_support(
+        y_true, y_pred_label, average='weighted', zero_division=0)
+    precision_pc, recall_pc, f1_pc, support_pc = metrics.precision_recall_fscore_support(
+        y_true, y_pred_label, labels=list(range(num_classes)), average=None, zero_division=0)
+    extra_metrics = {
+        'precision_macro': float(precision_macro),
+        'recall_macro': float(recall_macro),
+        'f1_macro': float(f1_macro),
+        'precision_weighted': float(precision_weighted),
+        'recall_weighted': float(recall_weighted),
+        'f1_weighted': float(f1_weighted),
+        'precision_per_class': [float(x) for x in precision_pc],
+        'recall_per_class': [float(x) for x in recall_pc],
+        'f1_per_class': [float(x) for x in f1_pc],
+        'support_per_class': [int(x) for x in support_pc],
+    }
+
+    # 根据semantic_label分组计算分类准确率
+    unique_semantics = np.unique(semantic_labels_np)
+    semantic_acc = {}
+    for sem in unique_semantics:
+        idx = (semantic_labels_np == sem)
+        if np.sum(idx) == 0:
+            continue
+        group_acc = np.mean(y_pred_label[idx] == y_true[idx])
+        semantic_acc[int(sem)] = float(group_acc)
+    return mean_auc, accuracy, mean_ap, conf_matrix, semantic_acc, extra_metrics
 # ------------ compute average metrics of batches---------------------
 class Metrics_batch():
     def __init__(self):

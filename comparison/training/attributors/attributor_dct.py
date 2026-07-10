@@ -77,10 +77,11 @@ class DCTAttributor(AbstractAttributor):
             pred = pred.detach().cpu()
 
         if test:
-            auc, acc, ap, conf_matrix, semantic_acc = calculate_metrics_for_test(label, pred, semantic_label)
+            auc, acc, ap, conf_matrix, semantic_acc, extra_metrics = calculate_metrics_for_test(label, pred, semantic_label)
             return {'acc': float(acc), 'auc': float(auc), 'ap': float(ap),
                     "conf_matrix": conf_matrix,
-                    'semantic_acc': semantic_acc}
+                    'semantic_acc': semantic_acc,
+                    **extra_metrics}
         else:
             auc, acc, ap = calculate_metrics_for_train(label, pred)
             return {'acc': float(acc), 'auc': float(auc), 'ap': float(ap)}

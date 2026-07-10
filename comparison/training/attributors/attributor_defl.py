@@ -80,16 +80,17 @@ class DEFLAttributor(AbstractAttributor):
         pred = pred_dict['logits'].to(label.device)   
 
         if test:  
-            auc, acc, ap, conf_matrix, semantic_acc = calculate_metrics_for_test(  
-                label.detach(), pred.detach(), semantic_label  
-            )  
-            return {  
-                'acc': float(acc),  
-                'auc': float(auc),  
-                'ap': float(ap),  
-                'conf_matrix': conf_matrix,  
-                'semantic_acc': semantic_acc  
-            }  
+            auc, acc, ap, conf_matrix, semantic_acc, extra_metrics = calculate_metrics_for_test(
+                label.detach(), pred.detach(), semantic_label
+            )
+            return {
+                'acc': float(acc),
+                'auc': float(auc),
+                'ap': float(ap),
+                'conf_matrix': conf_matrix,
+                'semantic_acc': semantic_acc,
+                **extra_metrics,
+            }
         else:  
             auc, acc, ap = calculate_metrics_for_train(label.detach(), pred.detach())  
             return {'acc': float(acc), 'auc': float(auc), 'ap': float(ap)}  
