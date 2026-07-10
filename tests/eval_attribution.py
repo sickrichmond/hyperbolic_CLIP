@@ -26,6 +26,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="PIL")
 
 from models.attribution_clip import AttributionCLIP
 from data.iab_clip_dataset import IABCLIPDataset
+from data.degradations import LEVEL_LABELS
 from geometry.lorentz import half_aperture, oxy_angle
 
 
@@ -46,6 +47,9 @@ def parse_args():
     p.add_argument("--max_per_class", type=int, default=None)
     p.add_argument("--batch_size",    type=int, default=128)
     p.add_argument("--num_workers",   type=int, default=4)
+    p.add_argument("--degraded",      type=int, default=0, choices=range(7),
+                   help="test-time degradation level 0-6 (0=clean, 1/2=DS, "
+                        "3/4=JPEG, 5/6=Blur), matching the comparison baselines.")
     return p.parse_args()
 
 
@@ -92,6 +96,7 @@ def main():
         val_frac=args.val_frac,
         seed=args.seed,
         include_uncaptioned=True,   # eval is image-only — caption not needed
+        degraded=args.degraded,
     )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.num_workers, pin_memory=True)
@@ -127,7 +132,9 @@ def main():
     # ── Metrics ───────────────────────────────────────────────────────────────
     total = len(all_gt)
     correct = sum(p == g for p, g in zip(all_pred, all_gt))
-    print(f"\n=== Image-only cone classification ({args.split} split) ===")
+    deg_label = LEVEL_LABELS.get(args.degraded, str(args.degraded))
+    print(f"\n=== Image-only cone classification "
+          f"({args.split} split, degraded={args.degraded} [{deg_label}]) ===")
     print(f"Total samples:    {total}")
     print(f"Overall accuracy: {100*correct/total:.1f}%  ({correct}/{total})")
 

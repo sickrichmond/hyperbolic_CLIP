@@ -38,6 +38,8 @@ from torch.utils.data import Dataset
 from PIL import Image
 from transformers import CLIPImageProcessor, CLIPTokenizer
 
+from data.degradations import apply_degradation
+
 # ── Real-image lookup: semantic key → (CSV file, caption column) ──────────────
 _REAL_CSV: dict[str, tuple[str, int]] = {
     "COCO":        ("COCO.csv",                 1),
@@ -166,6 +168,7 @@ class IABCLIPDataset(Dataset):
         val_frac: float = 0.2,
         seed: int = 42,
         include_uncaptioned: bool = False,
+        degraded: int = 0,
     ):
         """
         split: "train" | "val" | "all"
@@ -186,6 +189,7 @@ class IABCLIPDataset(Dataset):
         self.val_frac = val_frac
         self.seed = seed
         self.include_uncaptioned = include_uncaptioned
+        self.degraded = degraded
         caps_p = Path(captions_dir)
         root_p = Path(root)
 
@@ -294,6 +298,11 @@ class IABCLIPDataset(Dataset):
             w, h = img.size
             if w > 100 and h > 50:
                 img = img.crop((0, 0, w - 100, h - 50))
+
+        # Robustness degradation (test-time only): identical to the comparison
+        # baselines, applied AFTER the grok crop and BEFORE CLIP preprocessing.
+        if self.degraded:
+            img = apply_degradation(img, self.degraded)
 
         pixel = self.processor(images=img, return_tensors="pt")["pixel_values"][0]
 
