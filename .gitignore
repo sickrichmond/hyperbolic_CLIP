@@ -41,3 +41,6 @@ external/
 *.npz
 *.png
 *.pdf
+
+# experimental results
+*.csv

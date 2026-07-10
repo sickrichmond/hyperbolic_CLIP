@@ -25,7 +25,7 @@ LEVELS = list(range(7))
 LEVEL_LABEL = {0: "clean", 1: "DS0.5", 2: "DS0.25", 3: "JPEG65",
                4: "JPEG30", 5: "Blur3", 6: "Blur5"}
 
-_SCALAR_RE = re.compile(r'^\s*([a-z_]+):\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*$')
+_SCALAR_RE = re.compile(r'^\s*([a-z0-9_]+):\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*$')
 
 
 def parse_file(path):
