@@ -6,9 +6,13 @@ this script picks one representative image *per class* — a real FLUX sample fo
 the FLUX class, a real SD3 sample for the SD3 class, etc. — explains each with
 its own class heatmap, and assembles a side-by-side comparison grid.
 
-This answers the question: "How does the model look at a genuine sample of each
-generator?", which is what you want for comparing attribution behaviour across
-generators rather than dissecting a single image.
+By default it runs all three explanation methods (AGCAM, Guided and Chefer) and
+lays them out next to the original image, one row per class:
+
+    class │ Original │ AGCAM │ GUIDED │ CHEFER
+
+so you can compare, on the same genuine sample of each generator, what the
+methods highlight and how they differ from the raw image.
 
 Usage
 -----
@@ -16,22 +20,23 @@ Usage
         --checkpoint    $WORK/checkpoints/attribution_all_no_dalle_d16.pt \\
         --dataset_path  $WORK/iab_dataset \\
         --semantic      COCO \\
-        --method        agcam \\
-        --output_dir    $WORK/outputs/gallery/d16
+        --output_dir    $WORK/outputs/gallery/d16          # AGCAM + Chefer
+
+    # Restrict to a single method if you only want one:
+    python -m explanation.explain_gallery ... --methods chefer
 
 Notes
 -----
 * One semantic is fixed (default COCO) so every class is shown on the same kind
   of content — a fair comparison. Override with --semantic.
 * --image_index selects which sample per class (default 0 = first file).
-* The model's predicted class is annotated per tile; a green title means the
-  prediction matches the tile's true class, red means it does not.
+* The model's predicted class is annotated per row; a green label means the
+  prediction matches the row's true class, red means it does not.
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 
 import torch
@@ -47,8 +52,7 @@ from data.iab_dataset import SEMANTIC_TO_SUPER, _images_in
 from explanation.explain_image import load_checkpoint, heatmap_to_pil, overlay_heatmap
 from explanation.agcam_guided import (
     encode_anchors,
-    compute_agcam_heatmap,
-    compute_guided_heatmap,
+    HEATMAP_METHODS,
 )
 
 
@@ -99,9 +103,11 @@ def parse_args() -> argparse.Namespace:
                    help="Which sample (by sorted order) to pick per class.")
     p.add_argument("--output_dir",  type=Path, default=Path("outputs/gallery"),
                    help="Directory where outputs are written.")
-    p.add_argument("--method",
-                   choices=["agcam", "guided"], default="agcam",
-                   help="Explanation method.")
+    p.add_argument("--methods", nargs="+",
+                   choices=list(HEATMAP_METHODS), default=["agcam", "guided", "chefer"],
+                   help="Explanation method(s) to run and show side by side. "
+                        "Default runs AGCAM, Guided (last-layer variant) and "
+                        "Chefer (relevance rollout, Chefer et al. 2021).")
     p.add_argument("--score_mode",
                    choices=["angle", "margin"], default="margin",
                    help="Score used for backpropagation.")
@@ -114,9 +120,9 @@ def parse_args() -> argparse.Namespace:
                    help="(AGCAM only).")
     p.add_argument("--no_sigmoid",  action="store_true",
                    help="(AGCAM only) Disable sigmoid on attention maps.")
+    p.add_argument("--start_layer", type=int, default=0,
+                   help="(Chefer only) First transformer layer of the rollout.")
     p.add_argument("--overlay_alpha", type=float, default=0.50)
-    p.add_argument("--ncols",       type=int, default=6,
-                   help="Columns in the comparison grid.")
     p.add_argument("--device",
                    choices=["auto", "cpu", "cuda"], default="auto")
     return p.parse_args()
@@ -136,36 +142,69 @@ def resolve_device(arg: str) -> torch.device:
 # Grid assembly
 # ---------------------------------------------------------------------------
 
-def save_grid(tiles: list[dict], output_path: Path, ncols: int, title: str) -> None:
+def save_comparison_grid(
+    rows: list[dict],
+    col_labels: list[str],
+    output_path: Path,
+    title: str,
+) -> None:
     """
-    tiles: list of {"class": str, "pred": str, "image": PIL.Image}.
-    Draws a labelled grid; green title = prediction matches the tile class.
+    Draw a class × (original + methods) comparison grid.
+
+    rows:       one dict per class, each with
+                    {"class": str, "pred": str, "cells": {label: PIL.Image}}.
+    col_labels: ordered column headers, e.g. ["Original", "AGCAM", "CHEFER"];
+                every row's "cells" must provide an image for each label.
+
+    The left column header carries the class → prediction annotation for its
+    row (green when the prediction matches the class, red otherwise); the top
+    row carries the method column headers.
     """
-    n = len(tiles)
-    ncols = min(ncols, n)
-    nrows = math.ceil(n / ncols)
+    nrows = len(rows)
+    ncols = len(col_labels)
 
-    fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 2.6, nrows * 2.9))
-    axes = axes.flatten() if n > 1 else [axes]
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(ncols * 2.6, nrows * 2.9),
+        squeeze=False,
+    )
 
-    for ax, tile in zip(axes, tiles):
-        ax.imshow(tile["image"])
-        correct = tile["pred"] == tile["class"]
+    for r, row in enumerate(rows):
+        correct = row["pred"] == row["class"]
         color = "green" if correct else "red"
-        ax.set_title(
-            f"{tile['class']}\n→ {tile['pred']}",
-            fontsize=8, color=color,
-        )
-        ax.axis("off")
-
-    for ax in axes[n:]:
-        ax.axis("off")
+        for c, label in enumerate(col_labels):
+            ax = axes[r][c]
+            ax.imshow(row["cells"][label])
+            ax.axis("off")
+            if c == 0:
+                # Class label on the leftmost (Original) column, per row.
+                head = f"{label}\n" if r == 0 else ""
+                ax.set_title(
+                    f"{head}{row['class']} → {row['pred']}",
+                    fontsize=8, color=color,
+                )
+            elif r == 0:
+                # Method column header on the top row only.
+                ax.set_title(label, fontsize=10)
 
     fig.suptitle(title, fontsize=12)
     fig.tight_layout(rect=[0, 0, 1, 0.97])
     fig.savefig(output_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"Grid → {output_path}")
+
+
+def _method_kwargs(method: str, args: argparse.Namespace) -> dict:
+    """Keyword args each heatmap method understands, from the parsed CLI args."""
+    if method == "agcam":
+        return dict(
+            head_fusion=args.head_fusion,
+            layer_fusion=args.layer_fusion,
+            apply_sigmoid=not args.no_sigmoid,
+        )
+    if method == "guided":
+        return dict(head_fusion=args.head_fusion)
+    return dict(start_layer=args.start_layer)  # chefer
 
 
 # ---------------------------------------------------------------------------
@@ -193,16 +232,18 @@ def main() -> None:
     tokenizer = CLIPTokenizer.from_pretrained(clip_name)
     x_anchors = encode_anchors(model, anchor_texts, tokenizer, device)
 
-    fn = compute_agcam_heatmap if args.method == "agcam" else compute_guided_heatmap
-    extra = dict(head_fusion=args.head_fusion)
-    if args.method == "agcam":
-        extra["layer_fusion"] = args.layer_fusion
-        extra["apply_sigmoid"] = not args.no_sigmoid
+    methods = args.methods
+    method_extra = {m: _method_kwargs(m, args) for m in methods}
+    print(f"Methods: {', '.join(m.upper() for m in methods)}")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    heatmap_tiles: list[dict] = []
-    overlay_tiles: list[dict] = []
+    # Column layout of the comparison grids: original first, then one per method.
+    overlay_cols = ["Original"] + [m.upper() for m in methods]
+    heatmap_cols = ["Original"] + [m.upper() for m in methods]
+
+    overlay_rows: list[dict] = []
+    heatmap_rows: list[dict] = []
     records: list[dict] = []
 
     for cls in classes:
@@ -213,81 +254,88 @@ def main() -> None:
         pil_image = Image.open(img_path).convert("RGB")
         pixel_values = processor(images=pil_image, return_tensors="pt")["pixel_values"].to(device)
 
-        # Predicted class (sanity annotation).
+        # Predicted class (annotation).
         with torch.no_grad():
             x_hyp, _ = model.encode_image(pixel_values)
         pred_idx = int(predict_class(x_hyp, x_anchors, curv=curv).item())
         pred_class = class_names[pred_idx]
 
-        # Heatmap for this tile's TRUE class.
+        # One heatmap per method, all for this row's TRUE class.
         target_idx = class_names.index(cls)
-        heatmap = fn(
-            model=model,
-            pixel_values=pixel_values,
-            x_anchors=x_anchors,
-            target_class=target_idx,
-            score_mode=args.score_mode,
-            curv=curv,
-            **extra,
-        )
-
-        heat_pil = heatmap_to_pil(heatmap, pil_image.size)
-        over_pil = overlay_heatmap(pil_image, heatmap, alpha=args.overlay_alpha)
-
         safe = cls.replace("/", "_").replace(" ", "_")
-        heat_path = args.output_dir / f"{safe}_{args.method}_heatmap.png"
-        over_path = args.output_dir / f"{safe}_{args.method}_overlay.png"
-        heat_pil.save(heat_path)
-        over_pil.save(over_path)
+
+        overlay_cells = {"Original": pil_image}
+        heatmap_cells = {"Original": pil_image}
+        method_outputs: dict[str, dict] = {}
+
+        for m in methods:
+            heatmap = HEATMAP_METHODS[m](
+                model=model,
+                pixel_values=pixel_values,
+                x_anchors=x_anchors,
+                target_class=target_idx,
+                score_mode=args.score_mode,
+                curv=curv,
+                **method_extra[m],
+            )
+            heat_pil = heatmap_to_pil(heatmap, pil_image.size)
+            over_pil = overlay_heatmap(pil_image, heatmap, alpha=args.overlay_alpha)
+
+            heat_path = args.output_dir / f"{safe}_{m}_heatmap.png"
+            over_path = args.output_dir / f"{safe}_{m}_overlay.png"
+            heat_pil.save(heat_path)
+            over_pil.save(over_path)
+
+            overlay_cells[m.upper()] = over_pil
+            heatmap_cells[m.upper()] = heat_pil
+            method_outputs[m] = {"heatmap": str(heat_path), "overlay": str(over_path)}
 
         mark = "✓" if pred_class == cls else "✗"
         print(f"  [{cls:>14}]  pred={pred_class:<14} {mark}  ({img_path.name})")
 
-        heatmap_tiles.append({"class": cls, "pred": pred_class, "image": heat_pil})
-        overlay_tiles.append({"class": cls, "pred": pred_class, "image": over_pil})
+        overlay_rows.append({"class": cls, "pred": pred_class, "cells": overlay_cells})
+        heatmap_rows.append({"class": cls, "pred": pred_class, "cells": heatmap_cells})
         records.append({
             "class": cls,
             "predicted": pred_class,
             "correct": pred_class == cls,
             "image": str(img_path),
-            "heatmap": str(heat_path),
-            "overlay": str(over_path),
+            "methods": method_outputs,
         })
 
-    if not overlay_tiles:
+    if not records:
         raise RuntimeError("No tiles were produced — check dataset paths/semantic.")
 
     n_correct = sum(r["correct"] for r in records)
     print(f"\nModel predicted the true class on {n_correct}/{len(records)} tiles.")
 
+    tag = "_".join(methods)
     title_suffix = (
-        f"{args.method.upper()} · {args.score_mode} · {args.semantic} · "
-        f"{Path(args.checkpoint).stem}"
+        f"{'+'.join(m.upper() for m in methods)} · {args.score_mode} · "
+        f"{args.semantic} · {Path(args.checkpoint).stem}"
     )
-    save_grid(
-        overlay_tiles,
-        args.output_dir / f"gallery_{args.method}_overlays.png",
-        ncols=args.ncols,
+    save_comparison_grid(
+        overlay_rows, overlay_cols,
+        args.output_dir / f"gallery_{tag}_overlays.png",
         title=f"Overlays — {title_suffix}",
     )
-    save_grid(
-        heatmap_tiles,
-        args.output_dir / f"gallery_{args.method}_heatmaps.png",
-        ncols=args.ncols,
+    save_comparison_grid(
+        heatmap_rows, heatmap_cols,
+        args.output_dir / f"gallery_{tag}_heatmaps.png",
         title=f"Heatmaps — {title_suffix}",
     )
 
     summary = {
         "checkpoint":  str(args.checkpoint),
         "semantic":    args.semantic,
-        "method":      args.method,
+        "methods":     methods,
         "score_mode":  args.score_mode,
         "image_index": args.image_index,
         "n_correct":   n_correct,
         "n_total":     len(records),
         "tiles":       records,
     }
-    json_path = args.output_dir / f"gallery_{args.method}_summary.json"
+    json_path = args.output_dir / f"gallery_{tag}_summary.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print(f"Summary JSON → {json_path}")

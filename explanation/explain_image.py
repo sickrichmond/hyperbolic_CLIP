@@ -39,9 +39,8 @@ from models.attribution_clip import AttributionCLIP
 from losses.attribution_loss import predict_class
 from explanation.agcam_guided import (
     encode_anchors,
-    compute_agcam_heatmap,
-    compute_guided_heatmap,
     explain_all_classes,
+    HEATMAP_METHODS,
 )
 
 
@@ -150,8 +149,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output_dir",  type=Path, default=Path("outputs/explanation"),
                    help="Directory where outputs are written.")
     p.add_argument("--method",
-                   choices=["agcam", "guided"], default="agcam",
-                   help="Explanation method.")
+                   choices=["agcam", "guided", "chefer"], default="agcam",
+                   help="Explanation method. 'chefer': gradient-weighted "
+                        "relevance rollout through the full attention stack "
+                        "(Chefer et al. 2021), usually the most faithful.")
     p.add_argument("--score_mode",
                    choices=["angle", "margin"], default="margin",
                    help="Score used for backpropagation. "
@@ -171,6 +172,9 @@ def parse_args() -> argparse.Namespace:
                    help="(AGCAM only) How to aggregate transformer layers.")
     p.add_argument("--no_sigmoid",  action="store_true",
                    help="(AGCAM only) Disable sigmoid on attention maps.")
+    p.add_argument("--start_layer", type=int, default=0,
+                   help="(Chefer only) Begin the relevance rollout at this "
+                        "transformer layer (0 = all layers).")
     p.add_argument("--overlay_alpha", type=float, default=0.50,
                    help="Heatmap opacity in overlay images.")
     p.add_argument("--device",
@@ -231,19 +235,20 @@ def main() -> None:
     # ── Run explanation ────────────────────────────────────────────────────────
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
-    agcam_kwargs = dict(
-        head_fusion=args.head_fusion,
-        apply_sigmoid=not args.no_sigmoid,
-    )
-    guided_kwargs = dict(
-        head_fusion=args.head_fusion,
-    )
+    # Only forward the keyword args that the chosen method understands.
     if args.method == "agcam":
-        agcam_kwargs["layer_fusion"] = args.layer_fusion
+        extra = dict(
+            head_fusion=args.head_fusion,
+            apply_sigmoid=not args.no_sigmoid,
+            layer_fusion=args.layer_fusion,
+        )
+    elif args.method == "guided":
+        extra = dict(head_fusion=args.head_fusion)
+    else:  # chefer
+        extra = dict(start_layer=args.start_layer)
 
     if args.all_classes:
         print(f"Running {args.method.upper()} for all {len(class_names)} classes …")
-        extra = agcam_kwargs if args.method == "agcam" else guided_kwargs
         heatmaps = explain_all_classes(
             model=model,
             pixel_values=pixel_values,
@@ -255,8 +260,7 @@ def main() -> None:
         )
     else:
         print(f"Running {args.method.upper()} for class {target_class!r} …")
-        fn     = compute_agcam_heatmap if args.method == "agcam" else compute_guided_heatmap
-        extra  = agcam_kwargs if args.method == "agcam" else guided_kwargs
+        fn     = HEATMAP_METHODS[args.method]
         result = fn(
             model=model,
             pixel_values=pixel_values,
