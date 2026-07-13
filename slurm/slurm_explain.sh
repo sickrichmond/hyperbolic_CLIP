@@ -55,7 +55,7 @@ cd $WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
 # ── Parameters ────────────────────────────────────────────────────────────────
 DIM=${1:-16}                  # arg 1: embedding dim; selects the checkpoint below.
 SEMANTIC=${2:-${SEMANTIC:-COCO}}  # arg 2 (or env): one semantic, shown for every class
-CKPT=${CKPT:-$WORK/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
+CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
 DATA=${DATA:-$WORK/iab_dataset}
 IMAGE_INDEX=${IMAGE_INDEX:-0} # which sample per class (sorted order)
 METHODS=${METHODS:-agcam guided chefer}  # space-separated: agcam | guided | chefer
