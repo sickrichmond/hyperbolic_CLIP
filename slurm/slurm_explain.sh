@@ -27,7 +27,7 @@
 # need the repo root on sys.path, which only the -m form provides.
 # ============================================================================
 
-#SBATCH --account=EUHPC_D26_009B
+#SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod       # A100 partition on Leonardo
 #SBATCH --job-name=explain_attribution
 #SBATCH --nodes=1
@@ -50,7 +50,7 @@ export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_OFFLINE=1          # compute nodes have no internet
 export HF_DATASETS_OFFLINE=1
 
-cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
+cd $WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
 
 # ── Parameters ────────────────────────────────────────────────────────────────
 DIM=${1:-16}                  # arg 1: embedding dim; selects the checkpoint below.
