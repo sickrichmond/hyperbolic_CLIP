@@ -119,10 +119,14 @@ def parse_args() -> argparse.Namespace:
                    choices=["sum", "mean", "max"], default="sum",
                    help="(AGCAM only).")
     p.add_argument("--no_sigmoid",  action="store_true",
-                   help="(AGCAM only) Disable sigmoid on attention maps.")
+                   help="(AGCAM/Guided) Disable sigmoid on attention maps.")
     p.add_argument("--start_layer", type=int, default=0,
                    help="(Chefer only) First transformer layer of the rollout.")
-    p.add_argument("--overlay_alpha", type=float, default=0.50)
+    p.add_argument("--overlay_alpha", type=float, default=0.60,
+                   help="Opacity cap for the most-salient pixels in overlays.")
+    p.add_argument("--cmap", type=str, default="inferno",
+                   help="Matplotlib colormap for heatmaps/overlays "
+                        "(sequential, e.g. inferno/magma/viridis).")
     p.add_argument("--device",
                    choices=["auto", "cpu", "cuda"], default="auto")
     return p.parse_args()
@@ -203,7 +207,7 @@ def _method_kwargs(method: str, args: argparse.Namespace) -> dict:
             apply_sigmoid=not args.no_sigmoid,
         )
     if method == "guided":
-        return dict(head_fusion=args.head_fusion)
+        return dict(head_fusion=args.head_fusion, apply_sigmoid=not args.no_sigmoid)
     return dict(start_layer=args.start_layer)  # chefer
 
 
@@ -278,8 +282,10 @@ def main() -> None:
                 curv=curv,
                 **method_extra[m],
             )
-            heat_pil = heatmap_to_pil(heatmap, pil_image.size)
-            over_pil = overlay_heatmap(pil_image, heatmap, alpha=args.overlay_alpha)
+            heat_pil = heatmap_to_pil(heatmap, pil_image.size, cmap_name=args.cmap)
+            over_pil = overlay_heatmap(
+                pil_image, heatmap, alpha=args.overlay_alpha, cmap_name=args.cmap
+            )
 
             heat_path = args.output_dir / f"{safe}_{m}_heatmap.png"
             over_path = args.output_dir / f"{safe}_{m}_overlay.png"

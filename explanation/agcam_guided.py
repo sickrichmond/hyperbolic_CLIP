@@ -83,11 +83,22 @@ def _reduce(tensor: torch.Tensor, dim: int, mode: str) -> torch.Tensor:
     raise ValueError(f"Unknown reduction mode: {mode!r}")
 
 
-def _normalize_heatmap(h: torch.Tensor) -> torch.Tensor:
-    """Min-max normalise to [0, 1], detach, move to CPU."""
+def _normalize_heatmap(h: torch.Tensor, pct: float = 99.0) -> torch.Tensor:
+    """Robustly normalise to [0, 1], detach, move to CPU.
+
+    Uses the [1, pct] percentile range instead of plain min-max: ViT attention
+    maps (especially last-layer Guided and rolled-out Chefer) are often
+    dominated by a single "attention sink" patch whose value dwarfs everything
+    else.  Plain min-max would map that one patch to 1 and crush the entire
+    rest of the map to ~0, hiding all real structure.  Clipping the top
+    percentile first keeps the map readable while barely touching well-behaved
+    maps like AGCAM (only the top ~1% of patches are clipped).
+    """
     h = h.detach().cpu().float()
-    h = h - h.min()
-    return h / h.max().clamp_min(1e-8)
+    flat = h.flatten()
+    lo = torch.quantile(flat, 0.01)
+    hi = torch.quantile(flat, pct / 100.0)
+    return ((h - lo) / (hi - lo).clamp_min(1e-8)).clamp(0.0, 1.0)
 
 
 def _patches_to_grid(mask: torch.Tensor) -> torch.Tensor:
@@ -349,6 +360,7 @@ def compute_guided_heatmap(
     target_class: int,
     score_mode: Literal["angle", "margin"] = "margin",
     head_fusion: Literal["sum", "mean", "max"] = "sum",
+    apply_sigmoid: bool = True,
     curv: float | None = None,
 ) -> torch.Tensor:
     """
@@ -358,7 +370,13 @@ def compute_guided_heatmap(
     sufficient for localising the most salient attribution region.
     Lacks the multi-layer integration that gives AGCAM its global context.
 
-    Args: same as compute_agcam_heatmap (no layer_fusion, no apply_sigmoid).
+    Args: same as compute_agcam_heatmap (no layer_fusion).
+
+    apply_sigmoid: Sigmoid-squash the attention map before weighting (as in
+                   AGCAM).  Recommended for Guided: the last layer's CLS
+                   attention is heavily dominated by an "attention sink" patch,
+                   and the sigmoid tames that spike so the rest of the map
+                   stays informative.  Disable to use raw post-softmax weights.
 
     Returns:
         heatmap: (side, side) float tensor in [0, 1] on CPU.
@@ -388,6 +406,8 @@ def compute_guided_heatmap(
     cls_attn = last_attn[0, :, 0, 1:]
     cls_grad = gradient[0, :, 0, 1:]
     cls_grad = F.relu(cls_grad)
+    if apply_sigmoid:
+        cls_attn = torch.sigmoid(cls_attn)
 
     mask   = cls_grad * cls_attn                          # [H, n_patches]
     mask   = _reduce(mask, dim=0, mode=head_fusion)       # [n_patches]

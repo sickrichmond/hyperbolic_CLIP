@@ -93,21 +93,25 @@ def load_image(image_path: Path, clip_name: str, device: torch.device):
 # Visualisation helpers
 # ---------------------------------------------------------------------------
 
-def heatmap_to_pil(heatmap: torch.Tensor, size: tuple[int, int]) -> Image.Image:
+def heatmap_to_pil(
+    heatmap: torch.Tensor,
+    size: tuple[int, int],
+    cmap_name: str = "inferno",
+) -> Image.Image:
     """
     Convert a (side, side) float [0,1] tensor to a resized RGB heatmap image
-    using a red-yellow-white colormap.
+    using a perceptually-uniform sequential colormap.
+
+    Default is matplotlib's ``inferno``: dark (low saliency) → bright yellow
+    (high saliency), so low values read as "cold / nothing" instead of the
+    counter-intuitive full red of a naive red-yellow-white ramp.  Perceptually
+    uniform and colourblind-safe by construction.
     """
     import numpy as np
+    from matplotlib import colormaps
 
-    h = heatmap.numpy()
-
-    # Simple red→yellow→white ramp
-    r = np.ones_like(h)
-    g = h
-    b = h * h  # stay near zero for most of the range
-    rgb = np.stack([r, g, b], axis=-1)
-    rgb = (rgb * 255).clip(0, 255).astype("uint8")
+    h = np.clip(heatmap.numpy(), 0.0, 1.0)
+    rgb = (colormaps[cmap_name](h)[..., :3] * 255).astype("uint8")
 
     pil = Image.fromarray(rgb, mode="RGB")
     return pil.resize(size, resample=Image.BILINEAR)
@@ -116,21 +120,40 @@ def heatmap_to_pil(heatmap: torch.Tensor, size: tuple[int, int]) -> Image.Image:
 def overlay_heatmap(
     pil_image: Image.Image,
     heatmap: torch.Tensor,
-    alpha: float = 0.50,
+    alpha: float = 0.60,
+    cmap_name: str = "inferno",
 ) -> Image.Image:
     """
-    Blend a heatmap over the original image.
+    Overlay the heatmap on the image with saliency-modulated opacity.
+
+    Rather than tinting the whole frame uniformly, each pixel's opacity scales
+    with its heatmap value: low-saliency regions stay transparent (the original
+    image shows through) and only high-saliency regions are coloured.  This
+    keeps the underlying image readable and puts the emphasis exactly where the
+    model attributes signal.
 
     Args:
         pil_image: Original RGB image.
         heatmap:   (side, side) float [0, 1] tensor.
-        alpha:     Heatmap opacity (0 = invisible, 1 = opaque).
+        alpha:     Opacity cap for the most-salient pixels (0 = invisible).
+        cmap_name: Colormap name (see heatmap_to_pil).
 
     Returns:
         Composite RGB image, same size as pil_image.
     """
-    heat_pil = heatmap_to_pil(heatmap, pil_image.size)
-    return Image.blend(pil_image.convert("RGB"), heat_pil, alpha=alpha)
+    import numpy as np
+    from matplotlib import colormaps
+
+    h = np.clip(heatmap.numpy(), 0.0, 1.0)
+    color = (colormaps[cmap_name](h)[..., :3] * 255).astype("uint8")
+    color_pil = Image.fromarray(color, mode="RGB").resize(
+        pil_image.size, resample=Image.BILINEAR
+    )
+    # Per-pixel alpha from the heatmap: low saliency → transparent.
+    a_pil = Image.fromarray((h * alpha * 255).astype("uint8"), mode="L").resize(
+        pil_image.size, resample=Image.BILINEAR
+    )
+    return Image.composite(color_pil, pil_image.convert("RGB"), a_pil)
 
 
 # ---------------------------------------------------------------------------
@@ -171,12 +194,15 @@ def parse_args() -> argparse.Namespace:
                    choices=["sum", "mean", "max"], default="sum",
                    help="(AGCAM only) How to aggregate transformer layers.")
     p.add_argument("--no_sigmoid",  action="store_true",
-                   help="(AGCAM only) Disable sigmoid on attention maps.")
+                   help="(AGCAM/Guided) Disable sigmoid on attention maps.")
     p.add_argument("--start_layer", type=int, default=0,
                    help="(Chefer only) Begin the relevance rollout at this "
                         "transformer layer (0 = all layers).")
-    p.add_argument("--overlay_alpha", type=float, default=0.50,
-                   help="Heatmap opacity in overlay images.")
+    p.add_argument("--overlay_alpha", type=float, default=0.60,
+                   help="Opacity cap for the most-salient pixels in overlays.")
+    p.add_argument("--cmap", type=str, default="inferno",
+                   help="Matplotlib colormap for heatmaps/overlays "
+                        "(sequential, e.g. inferno/magma/viridis).")
     p.add_argument("--device",
                    choices=["auto", "cpu", "cuda"], default="auto",
                    help="Compute device.")
@@ -243,7 +269,7 @@ def main() -> None:
             layer_fusion=args.layer_fusion,
         )
     elif args.method == "guided":
-        extra = dict(head_fusion=args.head_fusion)
+        extra = dict(head_fusion=args.head_fusion, apply_sigmoid=not args.no_sigmoid)
     else:  # chefer
         extra = dict(start_layer=args.start_layer)
 
@@ -282,8 +308,10 @@ def main() -> None:
         heatmap_path = args.output_dir / f"{stem}_{args.method}_{safe_name}_heatmap.png"
         overlay_path = args.output_dir / f"{stem}_{args.method}_{safe_name}_overlay.png"
 
-        heat_pil = heatmap_to_pil(heatmap, pil_image.size)
-        over_pil = overlay_heatmap(pil_image, heatmap, alpha=args.overlay_alpha)
+        heat_pil = heatmap_to_pil(heatmap, pil_image.size, cmap_name=args.cmap)
+        over_pil = overlay_heatmap(
+            pil_image, heatmap, alpha=args.overlay_alpha, cmap_name=args.cmap
+        )
 
         heat_pil.save(heatmap_path)
         over_pil.save(overlay_path)
