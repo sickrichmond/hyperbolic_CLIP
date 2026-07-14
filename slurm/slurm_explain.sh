@@ -45,7 +45,7 @@ module load python/3.11.7
 module load cuda/12.6
 source $WORK/hyp_fine_tuning/bin/activate
 
-export HF_HOME=$WORK/hf_cache          # avoid filling home quota
+export HF_HOME=$WORK/hyp_fine_tuning/hf_cache   # avoid filling home quota
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_OFFLINE=1          # compute nodes have no internet
 export HF_DATASETS_OFFLINE=1
