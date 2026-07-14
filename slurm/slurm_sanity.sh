@@ -12,7 +12,7 @@
 #
 # Submit (positional arg DIM picks the checkpoint, like slurm_explain.sh);
 # IMAGE is required (the test runs on one image):
-#   IMAGE=$WORK/iab_dataset/FLUX/FFHQ/00000.png sbatch slurm/slurm_sanity.sh 16
+#   IMAGE=$FAST/datasets/iab_dataset/FLUX/FFHQ/00000.png sbatch slurm/slurm_sanity.sh 16
 #
 # Override method / class / test mode on the CLI:
 #   METHOD=chefer TARGET=FLUX INDEPENDENT=1 \
