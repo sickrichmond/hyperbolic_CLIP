@@ -49,7 +49,7 @@ cd $WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
 
 # ── Parameters ────────────────────────────────────────────────────────────────
 DIM=${1:-16}                  # arg 1: embedding dim; selects the checkpoint below.
-CKPT=${CKPT:-$WORK/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
+CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_all_no_dalle_d${DIM}.pt}
 METHOD=${METHOD:-chefer}      # agcam | guided | chefer
 SCORE_MODE=${SCORE_MODE:-margin}
 OUT=${OUT:-$WORK/outputs/sanity/d${DIM}_${METHOD}}
