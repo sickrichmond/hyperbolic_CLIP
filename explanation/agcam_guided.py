@@ -1,10 +1,15 @@
 """
-AGCAM and Guided attribution for AttributionCLIP.
+AGCAM, Guided and Chefer attribution for AttributionCLIP.
 
-Both methods backpropagate an attribution score through the CLIP vision
-transformer to the per-layer attention maps (AGCAM) or only the last layer
-(Guided), producing a spatial heatmap that highlights which image regions
-drove the model's attribution decision.
+All three methods backpropagate an attribution score through the CLIP vision
+transformer to the attention maps, producing a spatial heatmap that highlights
+which image regions drove the model's attribution decision:
+
+* AGCAM   : gradient-weighted CLS attention fused across all layers.
+* Guided  : the same, but using only the last transformer layer.
+* Chefer  : gradient-weighted relevance rolled out through the full attention
+            stack (Chefer et al., CVPR/ICCV 2021) — residual-aware and usually
+            the most faithful of the three for ViTs.
 
 Adaptation notes vs. the HySAC explanation pipeline
 -----------------------------------------------------
@@ -27,6 +32,7 @@ Usage
         encode_anchors,
         compute_agcam_heatmap,
         compute_guided_heatmap,
+        compute_chefer_heatmap,
         explain_all_classes,
     )
 
@@ -77,11 +83,22 @@ def _reduce(tensor: torch.Tensor, dim: int, mode: str) -> torch.Tensor:
     raise ValueError(f"Unknown reduction mode: {mode!r}")
 
 
-def _normalize_heatmap(h: torch.Tensor) -> torch.Tensor:
-    """Min-max normalise to [0, 1], detach, move to CPU."""
+def _normalize_heatmap(h: torch.Tensor, pct: float = 99.0) -> torch.Tensor:
+    """Robustly normalise to [0, 1], detach, move to CPU.
+
+    Uses the [1, pct] percentile range instead of plain min-max: ViT attention
+    maps (especially last-layer Guided and rolled-out Chefer) are often
+    dominated by a single "attention sink" patch whose value dwarfs everything
+    else.  Plain min-max would map that one patch to 1 and crush the entire
+    rest of the map to ~0, hiding all real structure.  Clipping the top
+    percentile first keeps the map readable while barely touching well-behaved
+    maps like AGCAM (only the top ~1% of patches are clipped).
+    """
     h = h.detach().cpu().float()
-    h = h - h.min()
-    return h / h.max().clamp_min(1e-8)
+    flat = h.flatten()
+    lo = torch.quantile(flat, 0.01)
+    hi = torch.quantile(flat, pct / 100.0)
+    return ((h - lo) / (hi - lo).clamp_min(1e-8)).clamp(0.0, 1.0)
 
 
 def _patches_to_grid(mask: torch.Tensor) -> torch.Tensor:
@@ -343,6 +360,7 @@ def compute_guided_heatmap(
     target_class: int,
     score_mode: Literal["angle", "margin"] = "margin",
     head_fusion: Literal["sum", "mean", "max"] = "sum",
+    apply_sigmoid: bool = True,
     curv: float | None = None,
 ) -> torch.Tensor:
     """
@@ -352,7 +370,13 @@ def compute_guided_heatmap(
     sufficient for localising the most salient attribution region.
     Lacks the multi-layer integration that gives AGCAM its global context.
 
-    Args: same as compute_agcam_heatmap (no layer_fusion, no apply_sigmoid).
+    Args: same as compute_agcam_heatmap (no layer_fusion).
+
+    apply_sigmoid: Sigmoid-squash the attention map before weighting (as in
+                   AGCAM).  Recommended for Guided: the last layer's CLS
+                   attention is heavily dominated by an "attention sink" patch,
+                   and the sigmoid tames that spike so the rest of the map
+                   stays informative.  Disable to use raw post-softmax weights.
 
     Returns:
         heatmap: (side, side) float tensor in [0, 1] on CPU.
@@ -382,6 +406,8 @@ def compute_guided_heatmap(
     cls_attn = last_attn[0, :, 0, 1:]
     cls_grad = gradient[0, :, 0, 1:]
     cls_grad = F.relu(cls_grad)
+    if apply_sigmoid:
+        cls_attn = torch.sigmoid(cls_attn)
 
     mask   = cls_grad * cls_attn                          # [H, n_patches]
     mask   = _reduce(mask, dim=0, mode=head_fusion)       # [n_patches]
@@ -391,15 +417,122 @@ def compute_guided_heatmap(
 
 
 # ---------------------------------------------------------------------------
+# Chefer et al. (transformer attribution / relevance rollout)
+# ---------------------------------------------------------------------------
+
+def compute_chefer_heatmap(
+    model,
+    pixel_values: torch.Tensor,
+    x_anchors: torch.Tensor,
+    target_class: int,
+    score_mode: Literal["angle", "margin"] = "margin",
+    start_layer: int = 0,
+    curv: float | None = None,
+) -> torch.Tensor:
+    """
+    Compute a Chefer-et-al. relevance heatmap for a single image.
+
+    Implements the gradient-weighted attention rollout of
+    Chefer, Gur & Wolf, "Transformer Interpretability Beyond Attention
+    Visualization" (CVPR 2021) / "Generic Attention-model Explainability"
+    (ICCV 2021).  Unlike AGCAM — which weights and fuses each layer's CLS
+    attention independently — this method propagates a relevance matrix
+    through the whole attention stack, modelling how information mixes across
+    tokens layer by layer:
+
+        R^(0)   = I                                   (S x S identity)
+        A_bar   = mean_heads( relu(grad_l * attn_l) )  (S x S, per layer)
+        R^(l)   = R^(l-1) + A_bar @ R^(l-1)
+
+    The identity initialisation and the additive update account for the
+    residual (skip) connections around each attention block.  The CLS row of
+    the final R, restricted to the patch columns, is the per-patch relevance.
+
+    This is generally a stronger, more faithful ViT explanation than raw
+    attention or AGCAM, at the cost of the S x S matrix products.
+
+    Args:
+        model:         AttributionCLIP in eval() mode.
+        pixel_values:  (1, C, H, W) on the model device, fp32 recommended.
+        x_anchors:     (K, D_hyp) detached class prototypes from encode_anchors().
+        target_class:  Index of the class to explain.
+        score_mode:    "angle" or "margin" — see compute_score().
+        start_layer:   Begin the rollout at this transformer layer (0 = all
+                       layers).  Skipping very early layers sometimes sharpens
+                       the map; the CVPR-2021 default is 0.
+        curv:          Curvature; defaults to model.curv.
+
+    Returns:
+        heatmap: (side, side) float tensor in [0, 1] on CPU.
+    """
+    if curv is None:
+        curv = model.curv
+
+    # --- forward (OUTSIDE no_grad) -------------------------------------------
+    x_hyp, attentions = forward_with_attentions(model, pixel_values)
+
+    # --- score + backprop through every attention layer ----------------------
+    score = compute_score(x_hyp, x_anchors, target_class, score_mode, curv)
+    gradients = torch.autograd.grad(
+        score,
+        attentions,
+        retain_graph=False,
+        create_graph=False,
+        allow_unused=True,
+    )
+
+    valid = [
+        (attn, grad)
+        for attn, grad in zip(attentions, gradients)
+        if grad is not None
+    ]
+    if not valid:
+        raise RuntimeError(
+            "No attention gradient is available.  Check that:\n"
+            "  1. forward_with_attentions() is called outside torch.no_grad()\n"
+            "  2. LoRA parameters have requires_grad=True (default in eval mode)\n"
+            "  3. x_anchors is detached so the graph terminates at x_hyp"
+        )
+
+    # --- relevance rollout ----------------------------------------------------
+    S      = valid[0][0].shape[-1]              # tokens = n_patches + 1 (CLS)
+    device = valid[0][0].device
+    R = torch.eye(S, device=device, dtype=torch.float32)
+
+    for layer_idx, (attn, grad) in enumerate(valid):
+        if layer_idx < start_layer:
+            continue
+        # attn / grad: (1, H, S, S).  Gradient-weight the attention, keep only
+        # positive contributions, then average over heads (Chefer's avg_heads).
+        cam = (grad * attn)[0].float()          # (H, S, S)
+        cam = F.relu(cam).mean(dim=0)           # (S, S)
+        R = R + cam @ R                         # additive residual-aware update
+
+    # CLS-row relevance over patch columns (drop the CLS self-relevance).
+    relevance = R[0, 1:]                        # (n_patches,)
+
+    heatmap = _patches_to_grid(relevance)
+    return _normalize_heatmap(heatmap)
+
+
+# ---------------------------------------------------------------------------
 # Multi-class analysis
 # ---------------------------------------------------------------------------
+
+# Registry so callers (and the CLI) can dispatch by method name.
+HEATMAP_METHODS = {
+    "agcam":  compute_agcam_heatmap,
+    "guided": compute_guided_heatmap,
+    "chefer": compute_chefer_heatmap,
+}
+
 
 def explain_all_classes(
     model,
     pixel_values: torch.Tensor,
     x_anchors: torch.Tensor,
     class_names: list[str],
-    method: Literal["agcam", "guided"] = "agcam",
+    method: Literal["agcam", "guided", "chefer"] = "agcam",
     score_mode: Literal["angle", "margin"] = "margin",
     **kwargs,
 ) -> dict[str, torch.Tensor]:
@@ -418,15 +551,16 @@ def explain_all_classes(
         pixel_values: (1, C, H, W).
         x_anchors:   (K, D_hyp) from encode_anchors().
         class_names: List of K generator names in the same order as x_anchors.
-        method:      "agcam" or "guided".
+        method:      "agcam", "guided" or "chefer".
         score_mode:  Passed to the chosen method.
         **kwargs:    Additional keyword args forwarded to the method
-                     (e.g. head_fusion, layer_fusion, apply_sigmoid).
+                     (e.g. head_fusion, layer_fusion, apply_sigmoid for
+                     agcam/guided; start_layer for chefer).
 
     Returns:
         Dict mapping each class name to its (side, side) heatmap.
     """
-    fn = compute_agcam_heatmap if method == "agcam" else compute_guided_heatmap
+    fn = HEATMAP_METHODS[method]
     results: dict[str, torch.Tensor] = {}
     for c, name in enumerate(class_names):
         results[name] = fn(
