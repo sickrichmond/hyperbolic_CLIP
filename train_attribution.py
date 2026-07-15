@@ -88,6 +88,16 @@ def parse_args():
     p.add_argument("--lr",             type=float, default=5e-5)
     p.add_argument("--weight_decay",   type=float, default=0.01)
     p.add_argument("--val_frac",       type=float, default=0.2)
+    p.add_argument("--split_scheme",   choices=["caption", "stratified"], default="caption",
+                   help="'stratified' mirrors the comparison baselines' 80/10/10 label split "
+                        "(disjoint train/val/test) for a leakage-free fair comparison. "
+                        "'caption' is the legacy caption-presence split.")
+    p.add_argument("--test_frac",      type=float, default=0.1,
+                   help="Held-out test fraction; only used with --split_scheme stratified.")
+    p.add_argument("--exclude_manifest", type=str, default=None,
+                   help="JSON split manifest from dump_split_manifest.py. Its val+test "
+                        "image paths are held out of training, so ours can be evaluated "
+                        "on the baselines' EXACT test images with no leakage (Path 1).")
     p.add_argument("--seed",           type=int,   default=42)
     p.add_argument("--max_per_class",  type=int,   default=None)
     p.add_argument("--num_workers",    type=int,   default=8)
@@ -166,6 +176,16 @@ def main():
     for i, (c, t) in enumerate(zip(class_names, anchor_texts)):
         print(f"  [{i}] {c:8s} → \"{t}\"")
 
+    # ── Hold-out manifest (Path 1: leakage-free vs the baselines' exact test) ──
+    exclude_paths = None
+    if args.exclude_manifest:
+        import json
+        with open(args.exclude_manifest) as f:
+            man = json.load(f)
+        exclude_paths = set(man.get("val", [])) | set(man.get("test", []))
+        print(f"Holding out {len(exclude_paths)} baseline val/test images from training "
+              f"(manifest: {args.exclude_manifest})")
+
     # ── Datasets ──────────────────────────────────────────────────────────────
     print("\n=== Train split ===")
     train_ds = IABCLIPDataset(
@@ -178,6 +198,9 @@ def main():
         split="train",
         val_frac=args.val_frac,
         seed=args.seed,
+        split_scheme=args.split_scheme,
+        test_frac=args.test_frac,
+        exclude_paths=exclude_paths,
     )
     print("\n=== Val split ===")
     val_ds = IABCLIPDataset(
@@ -191,6 +214,9 @@ def main():
         val_frac=args.val_frac,
         seed=args.seed,
         include_uncaptioned=True,   # eval is image-only — use every available image
+        split_scheme=args.split_scheme,
+        test_frac=args.test_frac,
+        exclude_paths=exclude_paths,
     )
 
     sampler = make_balanced_sampler(train_ds)

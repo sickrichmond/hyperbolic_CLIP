@@ -169,9 +169,16 @@ class IABCLIPDataset(Dataset):
         seed: int = 42,
         include_uncaptioned: bool = False,
         degraded: int = 0,
+        split_scheme: str = "caption",
+        test_frac: float = 0.1,
+        exclude_paths: Optional[set] = None,
     ):
         """
-        split: "train" | "val" | "all"
+        split_scheme: "caption" (default) | "stratified"
+
+        split_scheme="caption" — legacy behaviour, split is driven by caption
+        presence, per (generator, semantic):
+            split: "train" | "val" | "all"
             - "all":   every captioned sample (plus uncaptioned if include_uncaptioned)
             - "train": 1 - val_frac of CAPTIONED samples per (generator, semantic)
             - "val":   val_frac of captioned samples per class, plus ALL
@@ -179,17 +186,39 @@ class IABCLIPDataset(Dataset):
                        (these never appear in train since the hierarchical loss
                        needs a caption — using them only at eval is loss-free).
 
+        split_scheme="stratified" — mirrors the comparison baselines' protocol
+        (comparison/.../dataloader.py: stratified_split_by_label): pool ALL images
+        per GENERATOR (label) across semantics, deterministic shuffle, then split
+        (1 - val_frac - test_frac)/val_frac/test_frac into train/val/test.
+            split: "train" | "val" | "test" | "all"
+            - train/val/test are DISJOINT (no leakage) and follow the same split
+              scheme + fixed seed as the baselines, so ours can be evaluated under
+              an identical protocol.
+            - val/test keep every image (image-only eval); train keeps only
+              captioned images (the hierarchical cone loss needs a caption).
+
         Deterministic shuffle ensures the same split across runs.
         """
-        if split not in {"train", "val", "all"}:
-            raise ValueError(f"split must be train/val/all, got {split!r}")
+        if split not in {"train", "val", "test", "all"}:
+            raise ValueError(f"split must be train/val/test/all, got {split!r}")
+        if split_scheme not in {"caption", "stratified"}:
+            raise ValueError(f"split_scheme must be caption/stratified, got {split_scheme!r}")
+        if split == "test" and split_scheme != "stratified":
+            raise ValueError("split='test' is only defined for split_scheme='stratified'")
         self.caption_real = caption_real
         self.caption_fake = caption_fake
         self.split = split
+        self.split_scheme = split_scheme
         self.val_frac = val_frac
+        self.test_frac = test_frac
         self.seed = seed
         self.include_uncaptioned = include_uncaptioned
         self.degraded = degraded
+        # Paths (RELATIVE to root) to exclude from EVERY split — used to hold out
+        # the baselines' val/test images so ours' training stays leakage-free while
+        # being evaluated on those exact images through the harness. See
+        # comparison/training/scripts/dump_split_manifest.py.
+        self._exclude_rel: Optional[set] = set(exclude_paths) if exclude_paths else None
         caps_p = Path(captions_dir)
         root_p = Path(root)
 
@@ -222,44 +251,105 @@ class IABCLIPDataset(Dataset):
         self.samples: list[tuple[Path, str, str]] = []
         n_dropped = 0
         n_uncap_in_val = 0
-        for gen in generators:
-            for sem in semantics:
-                img_dir = _img_dir(root_p, gen, sem)
-                if not img_dir.exists():
-                    print(f"  [IABCLIPDataset] not found, skipping: {img_dir}")
-                    continue
-                imgs = sorted(p for p in img_dir.iterdir()
-                               if p.suffix in _IMAGE_EXTS)
-                captioned, uncaptioned = [], []
-                for p in imgs:
-                    if self._get_raw_caption_static(p, gen, sem):
-                        captioned.append(p)
-                    else:
-                        uncaptioned.append(p)
+        n_excluded = 0
 
-                rng = random.Random(f"{seed}:{gen}:{sem}")
-                rng.shuffle(captioned)
-                n_val = int(round(len(captioned) * val_frac))
+        def _drop_excluded(paths: list[Path]) -> list[Path]:
+            nonlocal n_excluded
+            if not self._exclude_rel:
+                return paths
+            kept_ps = []
+            for p in paths:
+                if str(p.relative_to(root_p)) in self._exclude_rel:
+                    n_excluded += 1
+                else:
+                    kept_ps.append(p)
+            return kept_ps
+
+        if self.split_scheme == "stratified":
+            # Baseline-mirroring split: pool ALL images per GENERATOR (label) across
+            # semantics, deterministic shuffle, split into train/val/test. Same split
+            # protocol + fixed seed as the comparison baselines AND ours' train is
+            # disjoint from ours' test (no leakage). val/test keep every image
+            # (image-only eval); train keeps only captioned images (the hierarchical
+            # cone loss needs a caption).
+            train_frac = 1.0 - val_frac - test_frac
+            if train_frac <= 0:
+                raise ValueError(
+                    f"val_frac+test_frac must be < 1 (got {val_frac}+{test_frac})")
+            for gen in generators:
+                pooled: list[tuple[Path, str]] = []
+                for sem in semantics:
+                    img_dir = _img_dir(root_p, gen, sem)
+                    if not img_dir.exists():
+                        print(f"  [IABCLIPDataset] not found, skipping: {img_dir}")
+                        continue
+                    imgs = _drop_excluded(sorted(p for p in img_dir.iterdir()
+                                                 if p.suffix in _IMAGE_EXTS))
+                    pooled.extend((p, sem) for p in imgs)
+
+                rng = random.Random(f"{seed}:strat:{gen}")
+                rng.shuffle(pooled)
+                n = len(pooled)
+                n_train = int(round(n * train_frac))
+                n_val = int(round(n * val_frac))
                 if split == "train":
-                    chosen = captioned[n_val:]
+                    part = pooled[:n_train]
                 elif split == "val":
-                    chosen = captioned[:n_val]
-                    if include_uncaptioned:
-                        chosen = chosen + uncaptioned
-                        n_uncap_in_val += len(uncaptioned)
-                    else:
-                        n_dropped += len(uncaptioned)
+                    part = pooled[n_train:n_train + n_val]
+                elif split == "test":
+                    part = pooled[n_train + n_val:]
                 else:  # "all"
-                    chosen = captioned + (uncaptioned if include_uncaptioned else [])
-                    if not include_uncaptioned:
-                        n_dropped += len(uncaptioned)
-                # For train/all, uncaptioned that we DID NOT include count as dropped.
-                if split == "train":
-                    n_dropped += len(uncaptioned)
-                if max_per_class is not None:
-                    chosen = chosen[:max_per_class]
-                for p in chosen:
+                    part = pooled
+
+                kept = 0
+                for p, sem in part:
+                    # train needs a caption (hierarchical loss); val/test are image-only
+                    if split == "train" and not self._get_raw_caption_static(p, gen, sem):
+                        n_dropped += 1
+                        continue
+                    if max_per_class is not None and kept >= max_per_class:
+                        break
                     self.samples.append((p, gen, sem))
+                    kept += 1
+        else:
+            for gen in generators:
+                for sem in semantics:
+                    img_dir = _img_dir(root_p, gen, sem)
+                    if not img_dir.exists():
+                        print(f"  [IABCLIPDataset] not found, skipping: {img_dir}")
+                        continue
+                    imgs = _drop_excluded(sorted(p for p in img_dir.iterdir()
+                                                 if p.suffix in _IMAGE_EXTS))
+                    captioned, uncaptioned = [], []
+                    for p in imgs:
+                        if self._get_raw_caption_static(p, gen, sem):
+                            captioned.append(p)
+                        else:
+                            uncaptioned.append(p)
+
+                    rng = random.Random(f"{seed}:{gen}:{sem}")
+                    rng.shuffle(captioned)
+                    n_val = int(round(len(captioned) * val_frac))
+                    if split == "train":
+                        chosen = captioned[n_val:]
+                    elif split == "val":
+                        chosen = captioned[:n_val]
+                        if include_uncaptioned:
+                            chosen = chosen + uncaptioned
+                            n_uncap_in_val += len(uncaptioned)
+                        else:
+                            n_dropped += len(uncaptioned)
+                    else:  # "all"
+                        chosen = captioned + (uncaptioned if include_uncaptioned else [])
+                        if not include_uncaptioned:
+                            n_dropped += len(uncaptioned)
+                    # For train/all, uncaptioned that we DID NOT include count as dropped.
+                    if split == "train":
+                        n_dropped += len(uncaptioned)
+                    if max_per_class is not None:
+                        chosen = chosen[:max_per_class]
+                    for p in chosen:
+                        self.samples.append((p, gen, sem))
 
         self.processor = CLIPImageProcessor.from_pretrained(processor_name)
         self.tokenizer = CLIPTokenizer.from_pretrained(processor_name)
@@ -271,6 +361,8 @@ class IABCLIPDataset(Dataset):
             msg += f" — incl. {n_uncap_in_val} uncaptioned (eval-only)"
         if n_dropped:
             msg += f" — dropped {n_dropped} without caption"
+        if n_excluded:
+            msg += f" — held out {n_excluded} (baseline val/test)"
         print(msg)
 
     def _get_raw_caption_static(self, img_path: Path, generator: str, semantic: str) -> str:

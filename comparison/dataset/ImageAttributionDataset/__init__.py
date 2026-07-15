@@ -24,6 +24,7 @@ _DATASET_MODULES = [
     "dataset_dct",
     "dataset_hifi_net",
     "dataset_defl",
+    "dataset_hypclip",
 ]
 for _m in _DATASET_MODULES:
     try:
