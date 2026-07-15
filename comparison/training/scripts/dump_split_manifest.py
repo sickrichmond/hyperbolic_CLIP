@@ -66,16 +66,18 @@ def main():
         'use_semantic_split': args.use_semantic_split,
         'task_id': args.task_id if args.use_semantic_split else None,
         'num_images_per_semantic_per_class': args.num_images_per_semantic_per_class,
-        # paths RELATIVE to root_dir; exclude these from ours' training
+        # all paths RELATIVE to root_dir.
+        #   'train' — allowlist: train ours on exactly these (strict data parity)
+        #   'val'/'test' — the baselines' eval images; keep ours' training off them
+        'train': rel_paths(train_loader, args.root_dir),
         'val': rel_paths(val_loader, args.root_dir),
         'test': rel_paths(test_loader, args.root_dir),
-        'n_train': len(train_loader.dataset),
     }
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, 'w') as f:
         json.dump(manifest, f)
     print(f"Wrote manifest → {args.out}")
-    print(f"  train={manifest['n_train']}  val={len(manifest['val'])}  "
+    print(f"  train={len(manifest['train'])}  val={len(manifest['val'])}  "
           f"test={len(manifest['test'])}")
 
 

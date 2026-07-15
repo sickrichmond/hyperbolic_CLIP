@@ -94,10 +94,11 @@ def parse_args():
                         "'caption' is the legacy caption-presence split.")
     p.add_argument("--test_frac",      type=float, default=0.1,
                    help="Held-out test fraction; only used with --split_scheme stratified.")
-    p.add_argument("--exclude_manifest", type=str, default=None,
-                   help="JSON split manifest from dump_split_manifest.py. Its val+test "
-                        "image paths are held out of training, so ours can be evaluated "
-                        "on the baselines' EXACT test images with no leakage (Path 1).")
+    p.add_argument("--split_manifest", type=str, default=None,
+                   help="JSON split manifest from dump_split_manifest.py. Ours is trained "
+                        "ONLY on the manifest's 'train' images (strict data parity with the "
+                        "baselines) and never on their val/test → leakage-free, and ours can "
+                        "be evaluated on the baselines' EXACT test images (Path 1).")
     p.add_argument("--seed",           type=int,   default=42)
     p.add_argument("--max_per_class",  type=int,   default=None)
     p.add_argument("--num_workers",    type=int,   default=8)
@@ -176,15 +177,18 @@ def main():
     for i, (c, t) in enumerate(zip(class_names, anchor_texts)):
         print(f"  [{i}] {c:8s} → \"{t}\"")
 
-    # ── Hold-out manifest (Path 1: leakage-free vs the baselines' exact test) ──
+    # ── Split manifest (Path 1: strict data parity + leakage-free vs baselines) ──
+    include_paths = None
     exclude_paths = None
-    if args.exclude_manifest:
+    if args.split_manifest:
         import json
-        with open(args.exclude_manifest) as f:
+        with open(args.split_manifest) as f:
             man = json.load(f)
-        exclude_paths = set(man.get("val", [])) | set(man.get("test", []))
-        print(f"Holding out {len(exclude_paths)} baseline val/test images from training "
-              f"(manifest: {args.exclude_manifest})")
+        include_paths = set(man.get("train", []))            # allowlist = harness train
+        exclude_paths = set(man.get("val", [])) | set(man.get("test", []))  # belt & braces
+        print(f"Split manifest: train ours on {len(include_paths)} harness-train images "
+              f"(∩ captioned), holding out {len(exclude_paths)} harness val/test "
+              f"(manifest: {args.split_manifest})")
 
     # ── Datasets ──────────────────────────────────────────────────────────────
     print("\n=== Train split ===")
@@ -200,6 +204,7 @@ def main():
         seed=args.seed,
         split_scheme=args.split_scheme,
         test_frac=args.test_frac,
+        include_paths=include_paths,
         exclude_paths=exclude_paths,
     )
     print("\n=== Val split ===")
@@ -216,6 +221,7 @@ def main():
         include_uncaptioned=True,   # eval is image-only — use every available image
         split_scheme=args.split_scheme,
         test_frac=args.test_frac,
+        include_paths=include_paths,
         exclude_paths=exclude_paths,
     )
 

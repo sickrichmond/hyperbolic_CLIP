@@ -172,6 +172,7 @@ class IABCLIPDataset(Dataset):
         split_scheme: str = "caption",
         test_frac: float = 0.1,
         exclude_paths: Optional[set] = None,
+        include_paths: Optional[set] = None,
     ):
         """
         split_scheme: "caption" (default) | "stratified"
@@ -214,10 +215,13 @@ class IABCLIPDataset(Dataset):
         self.seed = seed
         self.include_uncaptioned = include_uncaptioned
         self.degraded = degraded
-        # Paths (RELATIVE to root) to exclude from EVERY split — used to hold out
-        # the baselines' val/test images so ours' training stays leakage-free while
-        # being evaluated on those exact images through the harness. See
-        # comparison/training/scripts/dump_split_manifest.py.
+        # Path filters (RELATIVE to root), for byte-fair training vs the baselines
+        # (see comparison/training/scripts/dump_split_manifest.py):
+        #   include_paths — allowlist: keep ONLY these images (e.g. the harness TRAIN
+        #                   split) → ours trains on exactly the baselines' train set.
+        #   exclude_paths — blocklist: drop these images (e.g. the harness val+test)
+        #                   → leakage-free. Both may be combined.
+        self._include_rel: Optional[set] = set(include_paths) if include_paths else None
         self._exclude_rel: Optional[set] = set(exclude_paths) if exclude_paths else None
         caps_p = Path(captions_dir)
         root_p = Path(root)
@@ -255,14 +259,18 @@ class IABCLIPDataset(Dataset):
 
         def _drop_excluded(paths: list[Path]) -> list[Path]:
             nonlocal n_excluded
-            if not self._exclude_rel:
+            if not self._include_rel and not self._exclude_rel:
                 return paths
             kept_ps = []
             for p in paths:
-                if str(p.relative_to(root_p)) in self._exclude_rel:
+                rel = str(p.relative_to(root_p))
+                if self._include_rel is not None and rel not in self._include_rel:
                     n_excluded += 1
-                else:
-                    kept_ps.append(p)
+                    continue
+                if self._exclude_rel is not None and rel in self._exclude_rel:
+                    n_excluded += 1
+                    continue
+                kept_ps.append(p)
             return kept_ps
 
         if self.split_scheme == "stratified":
@@ -362,7 +370,7 @@ class IABCLIPDataset(Dataset):
         if n_dropped:
             msg += f" — dropped {n_dropped} without caption"
         if n_excluded:
-            msg += f" — held out {n_excluded} (baseline val/test)"
+            msg += f" — filtered out {n_excluded} (outside split manifest)"
         print(msg)
 
     def _get_raw_caption_static(self, img_path: Path, generator: str, semantic: str) -> str:
