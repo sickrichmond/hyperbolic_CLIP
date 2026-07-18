@@ -16,6 +16,7 @@ from .attributor_base import AbstractAttributor
 import torch.nn.functional as F  
 from comparison.training.attributors import ATTRIBUTOR
 from comparison.training.metrics.base_metrics_class import calculate_metrics_for_train, calculate_metrics_for_test
+from comparison.dataset.ImageAttributionDataset.dataset import model_class_to_label
 
 @ATTRIBUTOR.register_module(module_name='resnet50')
 class Resnet50Attributor(AbstractAttributor):  
@@ -33,8 +34,8 @@ class Resnet50Attributor(AbstractAttributor):
         self.backbone = models.resnet50(pretrained=config.get('pretrained', True))  
         self.backbone.fc = nn.Identity()  
 
-        num_classes = config.get('num_classes', 23)  
-        self.fc = nn.Linear(2048, num_classes)  
+        num_classes = config.get('num_classes', len(model_class_to_label))
+        self.fc = nn.Linear(2048, num_classes)
 
     def build_loss(self, config):  
         self.loss_fn = nn.CrossEntropyLoss()  

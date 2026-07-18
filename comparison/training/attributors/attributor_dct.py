@@ -18,6 +18,7 @@ from comparison.training.attributors import ATTRIBUTOR
 from comparison.training.metrics.base_metrics_class import calculate_metrics_for_train, calculate_metrics_for_test  
 from scipy.fftpack import dct
 from comparison.training.backbones.dct.simple_cnn import SimpleCNN
+from comparison.dataset.ImageAttributionDataset.dataset import model_class_to_label
 
 @ATTRIBUTOR.register_module(module_name='dct')
 class DCTAttributor(AbstractAttributor):  
@@ -31,7 +32,7 @@ class DCTAttributor(AbstractAttributor):
         self.build_loss(self.config)
 
     def build_model(self, config):  
-        self.num_classes = config.get('num_classes', 23)
+        self.num_classes = config.get('num_classes', len(model_class_to_label))
         self.input_channels = config.get('input_channels', 3)  
         self.input_size = config.get('input_size', (256, 256))  
         

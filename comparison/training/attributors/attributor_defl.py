@@ -19,6 +19,7 @@ from comparison.training.metrics.base_metrics_class import calculate_metrics_for
 from comparison.training.loss.loss_dual_margin_contrastive import DualMarginContrastiveLoss
 from comparison.training.backbones.defl.classifier import SimpleNNClassifier
 from comparison.training.backbones.defl.network import DEFLNetwork, SemanticFeatureExtractor
+from comparison.dataset.ImageAttributionDataset.dataset import model_class_to_label
 
 
 @ATTRIBUTOR.register_module(module_name='defl')  
@@ -38,7 +39,7 @@ class DEFLAttributor(AbstractAttributor):
     def build_model(self, config=None):  
         self.defl_model = DEFLNetwork().to(self.device)
         self.semantic_extractor = SemanticFeatureExtractor(self.defl_model).to(self.device)
-        self.nn_classifier = SimpleNNClassifier(num_classes=23).to(self.device) 
+        self.nn_classifier = SimpleNNClassifier(num_classes=len(model_class_to_label)).to(self.device)
 
 
     def build_loss(self, config=None):  

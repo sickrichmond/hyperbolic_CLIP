@@ -79,6 +79,10 @@ def parse_args():
     p.add_argument("--lambda_img_in_cap",   type=float, default=0.0,
                    help="Hierarchical: weight of image-in-own-caption cone term "
                         "(batch negatives).")
+    p.add_argument("--no_captions", action="store_true", default=False,
+                   help="Pure base attribution loss: forces BOTH caption terms "
+                        "(cap_in_class + img_in_cap) to 0 and trains on ALL images (no "
+                        "caption requirement) → same sample set as the baselines.")
     p.add_argument("--lambda_norm",    type=float, default=0.0,
                    help="Weight of the anchor-norm regulariser (0 disables it).")
     p.add_argument("--target_norm",    type=float, default=0.0,
@@ -169,6 +173,9 @@ def run_validation(model_inner, val_loader, anchor_texts, tokenizer, class_names
 
 def main():
     args = parse_args()
+    if args.no_captions:
+        args.lambda_cap_in_class = 0.0
+        args.lambda_img_in_cap = 0.0
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     class_names, anchor_texts = build_anchors(args.generators)
@@ -178,52 +185,57 @@ def main():
         print(f"  [{i}] {c:8s} → \"{t}\"")
 
     # ── Split manifest (Path 1: strict data parity + leakage-free vs baselines) ──
-    include_paths = None
-    exclude_paths = None
+    # With a manifest: train on ALL harness-train images and validate on the harness
+    # VAL split — no internal re-split (avoids the double val carve that shrank the
+    # train set) and no data loss. require_caption follows whether any caption term
+    # is active. Without a manifest: legacy caption-based split.
+    use_caps = (args.lambda_cap_in_class > 0 or args.lambda_img_in_cap > 0)
+    train_include = val_include = None
     if args.split_manifest:
         import json
         with open(args.split_manifest) as f:
             man = json.load(f)
-        include_paths = set(man.get("train", []))            # allowlist = harness train
-        exclude_paths = set(man.get("val", [])) | set(man.get("test", []))  # belt & braces
-        print(f"Split manifest: train ours on {len(include_paths)} harness-train images "
-              f"(∩ captioned), holding out {len(exclude_paths)} harness val/test "
-              f"(manifest: {args.split_manifest})")
+        train_include = set(man["train"])
+        val_include = set(man["val"])
+        print(f"Split manifest: {len(train_include)} train + {len(val_include)} val images "
+              f"(require_caption={use_caps}; harness val used for model selection)")
 
     # ── Datasets ──────────────────────────────────────────────────────────────
     print("\n=== Train split ===")
-    train_ds = IABCLIPDataset(
-        root=args.dataset_path,
-        captions_dir=args.captions_dir,
-        generators=args.generators,
-        semantics=args.semantics,
-        processor_name=args.clip_name,
-        max_per_class=args.max_per_class,
-        split="train",
-        val_frac=args.val_frac,
-        seed=args.seed,
-        split_scheme=args.split_scheme,
-        test_frac=args.test_frac,
-        include_paths=include_paths,
-        exclude_paths=exclude_paths,
-    )
-    print("\n=== Val split ===")
-    val_ds = IABCLIPDataset(
-        root=args.dataset_path,
-        captions_dir=args.captions_dir,
-        generators=args.generators,
-        semantics=args.semantics,
-        processor_name=args.clip_name,
-        max_per_class=args.max_per_class,
-        split="val",
-        val_frac=args.val_frac,
-        seed=args.seed,
-        include_uncaptioned=True,   # eval is image-only — use every available image
-        split_scheme=args.split_scheme,
-        test_frac=args.test_frac,
-        include_paths=include_paths,
-        exclude_paths=exclude_paths,
-    )
+    if train_include is not None:
+        train_ds = IABCLIPDataset(
+            root=args.dataset_path, captions_dir=args.captions_dir,
+            generators=args.generators, semantics=args.semantics,
+            processor_name=args.clip_name, max_per_class=args.max_per_class,
+            split="all", seed=args.seed,
+            include_paths=train_include, require_caption=use_caps,
+        )
+        print("\n=== Val split (harness val) ===")
+        val_ds = IABCLIPDataset(
+            root=args.dataset_path, captions_dir=args.captions_dir,
+            generators=args.generators, semantics=args.semantics,
+            processor_name=args.clip_name, max_per_class=args.max_per_class,
+            split="all", seed=args.seed,
+            include_paths=val_include, require_caption=False, include_uncaptioned=True,
+        )
+    else:
+        train_ds = IABCLIPDataset(
+            root=args.dataset_path, captions_dir=args.captions_dir,
+            generators=args.generators, semantics=args.semantics,
+            processor_name=args.clip_name, max_per_class=args.max_per_class,
+            split="train", val_frac=args.val_frac, seed=args.seed,
+            split_scheme=args.split_scheme, test_frac=args.test_frac,
+            require_caption=use_caps,
+        )
+        print("\n=== Val split ===")
+        val_ds = IABCLIPDataset(
+            root=args.dataset_path, captions_dir=args.captions_dir,
+            generators=args.generators, semantics=args.semantics,
+            processor_name=args.clip_name, max_per_class=args.max_per_class,
+            split="val", val_frac=args.val_frac, seed=args.seed,
+            include_uncaptioned=True, split_scheme=args.split_scheme, test_frac=args.test_frac,
+            require_caption=use_caps,
+        )
 
     sampler = make_balanced_sampler(train_ds)
     train_loader = DataLoader(
@@ -268,10 +280,11 @@ def main():
         lambda_img_in_cap=args.lambda_img_in_cap,
         lambda_norm=args.lambda_norm, target_norm=args.target_norm,
     )
-    use_caps = (args.lambda_cap_in_class > 0 or args.lambda_img_in_cap > 0)
     if use_caps:
         print(f"Hierarchical mode: λ_cap_in_class={args.lambda_cap_in_class} "
               f"λ_img_in_cap={args.lambda_img_in_cap}")
+    else:
+        print("Base attribution loss only (no caption terms).")
 
     # Tokenized anchors stay constant; only the text-encoder weights change.
     tokenizer = CLIPTokenizer.from_pretrained(args.clip_name)

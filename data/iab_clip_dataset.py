@@ -173,6 +173,7 @@ class IABCLIPDataset(Dataset):
         test_frac: float = 0.1,
         exclude_paths: Optional[set] = None,
         include_paths: Optional[set] = None,
+        require_caption: bool = True,
     ):
         """
         split_scheme: "caption" (default) | "stratified"
@@ -223,6 +224,10 @@ class IABCLIPDataset(Dataset):
         #                   → leakage-free. Both may be combined.
         self._include_rel: Optional[set] = set(include_paths) if include_paths else None
         self._exclude_rel: Optional[set] = set(exclude_paths) if exclude_paths else None
+        # require_caption=False → keep uncaptioned images too (pure base attribution
+        # loss needs no caption). Lets ours train on the SAME image set as the
+        # baselines instead of only the captioned subset.
+        self.require_caption = require_caption
         caps_p = Path(captions_dir)
         root_p = Path(root)
 
@@ -329,11 +334,15 @@ class IABCLIPDataset(Dataset):
                     imgs = _drop_excluded(sorted(p for p in img_dir.iterdir()
                                                  if p.suffix in _IMAGE_EXTS))
                     captioned, uncaptioned = [], []
-                    for p in imgs:
-                        if self._get_raw_caption_static(p, gen, sem):
-                            captioned.append(p)
-                        else:
-                            uncaptioned.append(p)
+                    if self.require_caption:
+                        for p in imgs:
+                            if self._get_raw_caption_static(p, gen, sem):
+                                captioned.append(p)
+                            else:
+                                uncaptioned.append(p)
+                    else:
+                        # base loss needs no caption → every image is usable
+                        captioned = list(imgs)
 
                     rng = random.Random(f"{seed}:{gen}:{sem}")
                     rng.shuffle(captioned)

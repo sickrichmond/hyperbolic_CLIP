@@ -19,31 +19,51 @@ semantic_label_map = {
             "church": 8,  
             "classroom": 9,  
         }  
-model_class_to_label = {  
-            '4o': 0,  
-            'CogView3_PLUS': 1,  
-            'FLUX': 2,  
-            'KANDINSKY': 3,  
-            'PIXART': 4,  
-            'PLAYGROUND_2_5': 5,  
-            'SD1_5': 6,  
-            'SD2_1': 7,  
-            'SD3': 8,  
-            'SD3_5': 9,  
-            'SDXL': 10,  
-            'dalle3': 11,  
-            'gemini': 12,  
-            'grok3': 13,  
-            'hidream': 14,  
-            'hunyuan': 15,  
-            'ideogram': 16,  
-            'infinity': 17,  
-            'janus-pro': 18,  
-            'kling': 19,  
-            'mid-5.2': 20,  
-            'mid-6.0': 21,  
-            'real': 22  
-        }  
+# Full 23-class label map (source of truth for generator names + order).
+_FULL_MODEL_CLASS_TO_LABEL = {
+            '4o': 0,
+            'CogView3_PLUS': 1,
+            'FLUX': 2,
+            'KANDINSKY': 3,
+            'PIXART': 4,
+            'PLAYGROUND_2_5': 5,
+            'SD1_5': 6,
+            'SD2_1': 7,
+            'SD3': 8,
+            'SD3_5': 9,
+            'SDXL': 10,
+            'dalle3': 11,
+            'gemini': 12,
+            'grok3': 13,
+            'hidream': 14,
+            'hunyuan': 15,
+            'ideogram': 16,
+            'infinity': 17,
+            'janus-pro': 18,
+            'kling': 19,
+            'mid-5.2': 20,
+            'mid-6.0': 21,
+            'real': 22
+        }
+
+
+def excluded_generators():
+    """Generators dropped from the label space, via env IAB_EXCLUDE_GENERATORS
+    (comma-separated). Lets the WHOLE pipeline (baselines, manifest, ours eval)
+    run at e.g. 22 classes with `IAB_EXCLUDE_GENERATORS=dalle3` — one toggle."""
+    raw = os.environ.get("IAB_EXCLUDE_GENERATORS", "")
+    return set(g.strip() for g in raw.split(",") if g.strip())
+
+
+def build_label_map(exclude=None):
+    """23-class map minus `exclude`, re-indexed contiguously (0..N-1) in the
+    original order. Excluded generators are also skipped during enumeration."""
+    ex = set(exclude) if exclude is not None else excluded_generators()
+    return {k: i for i, k in enumerate(k for k in _FULL_MODEL_CLASS_TO_LABEL if k not in ex)}
+
+
+# Active label map (respects IAB_EXCLUDE_GENERATORS). num_classes = len(this).
+model_class_to_label = build_label_map()
 semantic_to_relpath = {  
             "cat": "AnimalFace/cat",  
             "dog": "AnimalFace/dog",  
@@ -85,8 +105,10 @@ class ImageAttributionDataset(Dataset):
         self.mode = None
         self.degraded = degraded
         assert degraded in range(7), "illegal degrade number"
-        self.samples = []  
-        self._make_dataset()  
+        self.samples = []
+        self._make_dataset()
+        print(f"[ImageAttributionDataset] {len(self.model_class_to_label)} classes, "
+              f"{len(self.samples)} images (excluded: {sorted(excluded_generators()) or 'none'})")
         
     def _make_dataset(self):  
         pattern = re.compile(r'_p(\d+)_i(\d+)')  
