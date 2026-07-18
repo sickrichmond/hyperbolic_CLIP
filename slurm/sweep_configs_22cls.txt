@@ -1,0 +1,12 @@
+--lr 5e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_norm 0.5 --target_norm 4.0
+--lr 2e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_norm 0.5 --target_norm 4.0
+--lr 1e-4 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_norm 0.5 --target_norm 4.0
+--lr 5e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.1 --margin 0.3 --lambda_norm 0.5 --target_norm 4.0
+--lr 5e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 1.0 --margin 0.3 --lambda_norm 0.5 --target_norm 4.0
+--lr 5e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.1 --lambda_norm 0.5 --target_norm 4.0
+--lr 5e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 0.5 --min_radius 0.5 --margin 0.3 --lambda_norm 0.5 --target_norm 4.0
+--lr 5e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 2.0 --min_radius 0.5 --margin 0.3 --lambda_norm 0.5 --target_norm 4.0
+--lr 5e-5 --lora_r 8 --lora_alpha 16 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_norm 0.5 --target_norm 4.0
+--lr 5e-5 --lora_r 32 --lora_alpha 64 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_norm 0.5 --target_norm 4.0
+--lr 5e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 64 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_norm 0.5 --target_norm 4.0
+--lr 5e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_norm 0.0 --target_norm 0.0

@@ -64,6 +64,30 @@ def build_label_map(exclude=None):
 
 # Active label map (respects IAB_EXCLUDE_GENERATORS). num_classes = len(this).
 model_class_to_label = build_label_map()
+
+
+# HiFi-Net coarse hierarchy per generator: (level1, level2, level3) indices.
+#   level1 (2): 0 generated, 1 real
+#   level2 (4): 0 commercial, 1 open-source, ... , real
+#   level3 (6): 0 commercial, 1 SD, 2 diffusers, 3 DiT, 4 AR, 5 real
+_HIFI_HIERARCHY = {
+    '4o': (0, 0, 0), 'CogView3_PLUS': (0, 1, 3), 'FLUX': (0, 1, 2),
+    'KANDINSKY': (0, 1, 2), 'PIXART': (0, 1, 2), 'PLAYGROUND_2_5': (0, 1, 2),
+    'SD1_5': (0, 1, 1), 'SD2_1': (0, 1, 1), 'SD3': (0, 1, 1), 'SD3_5': (0, 1, 1),
+    'SDXL': (0, 1, 1), 'dalle3': (0, 0, 0), 'gemini': (0, 0, 0), 'grok3': (0, 0, 0),
+    'hidream': (0, 1, 3), 'hunyuan': (0, 1, 3), 'ideogram': (0, 0, 0),
+    'infinity': (0, 1, 4), 'janus-pro': (0, 1, 4), 'kling': (0, 0, 0),
+    'mid-5.2': (0, 0, 0), 'mid-6.0': (0, 0, 0), 'real': (1, 2, 5),
+}
+
+
+def hifi_label_mapping():
+    """HiFi-Net hierarchical labels [(level1, level2, level3, fine), ...] in the
+    ACTIVE label order (respects IAB_EXCLUDE_GENERATORS). `fine` is the contiguous
+    0..N-1 index. Drives both the level-4 head size and parent_idx_4 so removing a
+    generator (e.g. dalle3) needs no manual edits."""
+    idx_to_name = {v: k for k, v in model_class_to_label.items()}
+    return [(*_HIFI_HIERARCHY[idx_to_name[i]], i) for i in range(len(model_class_to_label))]
 semantic_to_relpath = {  
             "cat": "AnimalFace/cat",  
             "dog": "AnimalFace/dog",  
