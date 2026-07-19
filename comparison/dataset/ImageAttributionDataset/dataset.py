@@ -136,11 +136,15 @@ class ImageAttributionDataset(Dataset):
         
     def _make_dataset(self):  
         pattern = re.compile(r'_p(\d+)_i(\d+)')  
-        for model_class, model_label in self.model_class_to_label.items(): 
+        for model_class, model_label in self.model_class_to_label.items():
+            # Identify `real` BY NAME, never by index: with IAB_EXCLUDE_GENERATORS
+            # the map is re-indexed (dropping dalle3 moves real 22 -> 21), so a
+            # hardcoded `model_label == 22` silently loaded ZERO real images.
+            is_real = (model_class == 'real')
             if model_class in ["mid-5.2","mid-6.0"]:
                 idx_to_load = (0,1,2,3)
             else:
-                idx_to_load = (0,1) 
+                idx_to_load = (0,1)
             model_path = os.path.join(self.root_dir, model_class)  
             if not os.path.isdir(model_path):  
                 continue  
@@ -153,13 +157,13 @@ class ImageAttributionDataset(Dataset):
                 semantic_label = self.semantic_label_map.get(semantic, -1)  
                 
                 for fname in sorted(os.listdir(full_path)):  
-                    if (model_label != 22 and not fname.lower().endswith(('.png'))) or (model_label == 22 and not fname.lower().endswith(('.png',".jpg",".jpeg"))):  
+                    if (not is_real and not fname.lower().endswith(('.png'))) or (is_real and not fname.lower().endswith(('.png',".jpg",".jpeg"))):
                         # print("do not load:", full_path, fname)
-                        continue  
+                        continue
                     if pic_count_per_semantic >= self.num_images_per_semantic_per_class:
                         break
                     # load real
-                    if model_label == 22:
+                    if is_real:
                         img_path = os.path.join(full_path, fname)  
                         self.samples.append((img_path, model_label, semantic_label, semantic))
                         pic_count_per_semantic +=1 
@@ -242,8 +246,10 @@ class ImageAttributionDataset(Dataset):
         img_path, label, semantic_label, semantic_subclass = self.samples[idx]
         image = self._open_image(img_path)
 
-        GROK_LABEL = 13
-        if label == GROK_LABEL:  
+        # Derive grok3's index from the ACTIVE map: hardcoding 13 cropped the wrong
+        # class once dalle3 was excluded (grok3 -> 12, hidream -> 13).
+        GROK_LABEL = self.model_class_to_label.get('grok3')
+        if GROK_LABEL is not None and label == GROK_LABEL:
             width, height = image.size  
             crop_box = (0, 0, width - 100, height - 50)  
             image = image.crop(crop_box)  
