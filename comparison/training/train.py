@@ -28,7 +28,8 @@ parser.add_argument('--resume_checkpoint', type=str, default=None)
 parser.add_argument('--log_dir', type=str, default="./logs")  
 parser.add_argument('--task_id', type=int, default=1, help='Task ID, used to select different semantic splits, such as 1, 2, 3, etc.' )
 parser.add_argument('--save_freq', type=int, default=5, help='Checkpoint saving frequency (epochs)')  
-parser.add_argument('--do_test', action='store_false', default=True, help='Whether to run test evaluation after training')  
+parser.add_argument('--do_test', action='store_false', default=True, help='Whether to run test evaluation after training')
+parser.add_argument('--pretrained_path', type=str, default=None, help="Override config['pretrained_path'] (DNA stage 2 loads the stage-1 checkpoint)")
 args = parser.parse_args()  
 
 
@@ -90,7 +91,9 @@ def main():
     # config['save_ckpt'] = args.save_ckpt  
     # config['save_feat'] = args.save_feat  
     # config['task_target'] = args.task_target  
-    config['log_dir'] = args.log_dir  
+    config['log_dir'] = args.log_dir
+    if args.pretrained_path:
+        config['pretrained_path'] = args.pretrained_path
 
     use_cuda = torch.cuda.is_available()  
     init_seed(config.get('manualSeed', 42), use_cuda)  

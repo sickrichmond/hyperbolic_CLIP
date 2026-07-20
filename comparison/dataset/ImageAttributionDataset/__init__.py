@@ -25,6 +25,10 @@ _DATASET_MODULES = [
     "dataset_hifi_net",
     "dataset_defl",
     "dataset_hypclip",
+    "dataset_dna",
+    "dataset_repmix",
+    "dataset_patch",
+    "dataset_ucf",
 ]
 for _m in _DATASET_MODULES:
     try:

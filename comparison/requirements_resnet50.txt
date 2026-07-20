@@ -17,12 +17,18 @@ tensorboard
 # ---------------------------------------------------------------------------
 # OPTIONAL: install these only if you later want to run the OTHER methods too.
 # Each line maps to the method(s) that need it:
-#   opencv-python   -> patchcraft, dna, ssp        (cv2)
+#   opencv-python   -> patchcraft, ssp              (cv2)
 #   yacs            -> hifi_net                     (seg_hrnet config)
 #   torch-dct       -> dct, pose                    (torch_dct)
-#   albumentations  -> repmix                       (augmentations)
+#   albumentations<1.4 -> dna    (the 170 transform classes; >=1.4 renamed
+#                                 JpegCompression -> ImageCompression and the
+#                                 list no longer builds)
 #   seaborn         -> pose                         (plots)
-#   git+https://github.com/openai/CLIP.git -> clip_lr
+#   git+https://github.com/openai/CLIP.git -> clip_lr, defl
+#
+# repmix, patch and ucf need no extra pip package. repmix's imagenet_c import was
+# made lazy (the perturbation transform is never applied in the IAB pipeline);
+# ucf needs the Xception weights instead — see scripts/prefetch_new_methods.sh.
 # ---------------------------------------------------------------------------
 # opencv-python
 # yacs

@@ -21,6 +21,10 @@ _ATTRIBUTOR_MODULES = [
     "attributor_dct",
     "attributor_hifi_net",
     "attributor_defl",
+    "attributor_dna",
+    "attributor_repmix",
+    "attributor_patch",
+    "attributor_ucf",
 ]
 for _m in _ATTRIBUTOR_MODULES:
     try:
