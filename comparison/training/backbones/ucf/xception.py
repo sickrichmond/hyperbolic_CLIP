@@ -20,7 +20,7 @@ import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
 from torch.nn import init
 from typing import Union
-from metrics.registry import BACKBONE
+from comparison.training.metrics.registry import BACKBONE
 
 logger = logging.getLogger(__name__)
 

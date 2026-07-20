@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .abstract_loss_func import AbstractLossClass
-from metrics.registry import LOSSFUNC
+from comparison.training.metrics.registry import LOSSFUNC
 
 
 def swap_spe_features(type_list, value_list):

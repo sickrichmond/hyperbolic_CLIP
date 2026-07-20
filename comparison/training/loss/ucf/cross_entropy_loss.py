@@ -1,6 +1,6 @@
 import torch.nn as nn
 from .abstract_loss_func import AbstractLossClass
-from metrics.registry import LOSSFUNC
+from comparison.training.metrics.registry import LOSSFUNC
 
 
 @LOSSFUNC.register_module(module_name="cross_entropy")

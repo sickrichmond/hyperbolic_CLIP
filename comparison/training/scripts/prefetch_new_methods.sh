@@ -28,8 +28,16 @@ echo "DNA deps installed into $PYDEPS (add it to PYTHONPATH in the DNA slurm scr
 # UCF initialises both Xception encoders from ImageNet weights; without them the
 # original authors note the model does not converge to anything useful.
 mkdir -p "$REPO/pretrained"
-curl -fL -o "$REPO/pretrained/xception-b5690688.pth" \
-  http://data.lip6.fr/cadene/pretrainedmodels/xception-b5690688.pth
+# Original host (data.lip6.fr/cadene/...) is dead: expired TLS cert + 503. Use the
+# Hugging Face mirror (valid cert) and VERIFY the sha256 — the file is authentic
+# regardless of transport. Expected hash below is also the source of the -b5690688
+# filename suffix (pretrainedmodels convention: sha256[:8]).
+XCEPTION_SHA=b56906886cbaf573fc8819216d2dcc753fb564fa81a7733a0f2620b2a1973f7a
+XCEPTION_PATH="$REPO/pretrained/xception-b5690688.pth"
+curl -fL -o "$XCEPTION_PATH" \
+  https://huggingface.co/spaces/asdasdasdasd/Face-forgery-detection/resolve/main/xception-b5690688.pth
+echo "$XCEPTION_SHA  $XCEPTION_PATH" | sha256sum -c - \
+  || { echo "ERROR: xception weights failed sha256 check — not using them." >&2; exit 1; }
 
 # RepMix's backbone is a torchvision resnet50(pretrained=True) -> warm TORCH_HOME.
 python -c "import torchvision; torchvision.models.resnet50(pretrained=True)"
