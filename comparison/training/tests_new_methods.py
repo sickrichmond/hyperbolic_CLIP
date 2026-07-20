@@ -47,24 +47,29 @@ assert model_class_to_label["real"] == n - 1, model_class_to_label["real"]
 assert len(hifi_label_mapping()) == n
 assert hifi_label_mapping()[-1][:3] == (1, 2, 5)   # real: generated=1, real, real
 
-# attribution heads sized from the active map, not from a literal 23
-from comparison.training.attributors.attributor_repmix import RepmixAttributor
-r = RepmixAttributor({{"device": "cpu"}})
-assert r.attribution.out_features == n, r.attribution.out_features
-assert r.detection.out_features == 2
+# RepMix's backbone (IAB original, torch_layers.MixupLayer) hardcodes .cuda(), so
+# it can only be instantiated on a GPU node. On a CPU-only login node the checks
+# above already cover the class-count wiring that mattered for the 22-class bug;
+# the RepMix head-size + gating check runs during the GPU dry-run instead.
+if not torch.cuda.is_available():
+    print("  ok: {n} classes (RepMix head/gating skipped: no GPU here)")
+else:
+    # attribution head sized from the active map, not from a literal 23
+    from comparison.training.attributors.attributor_repmix import RepmixAttributor
+    r = RepmixAttributor({{}})
+    assert r.attribution.out_features == n, r.attribution.out_features
+    assert r.detection.out_features == 2
 
-# RepMix gating: the real column must be gated by P(real) (detection col 0) and
-# every other column by P(generated) (col 1). Feed a feature batch and check the
-# sign pattern by driving the detection head to a known state.
-with torch.no_grad():
-    r.detection.weight.zero_(); r.detection.bias.copy_(torch.tensor([50.0, -50.0]))
-    r.attribution.weight.zero_(); r.attribution.bias.fill_(1.0)
-    out, _ = r.classifier(torch.zeros(2, r.config["d_embed"], device=r.device))
-# P(real) ~ 1, P(generated) ~ 0  =>  only the real column survives
-assert out[0, n - 1] > 0.99, out[0, n - 1]
-assert out[0, :n - 1].abs().max() < 0.01, out[0, :n - 1].abs().max()
-
-print("  ok: {n} classes")
+    # RepMix gating: the real column must be gated by P(real) (detection col 0)
+    # and every other column by P(generated) (col 1). Drive the detection head to
+    # a known state and check only the real column survives.
+    with torch.no_grad():
+        r.detection.weight.zero_(); r.detection.bias.copy_(torch.tensor([50.0, -50.0], device=r.device))
+        r.attribution.weight.zero_(); r.attribution.bias.fill_(1.0)
+        out, _ = r.classifier(torch.zeros(2, r.config["d_embed"], device=r.device))
+    assert out[0, n - 1] > 0.99, out[0, n - 1]
+    assert out[0, :n - 1].abs().max() < 0.01, out[0, :n - 1].abs().max()
+    print("  ok: {n} classes (incl. RepMix head + gating)")
 '''
 
 
