@@ -37,6 +37,10 @@ python -m comparison.training.train \
   --root_dir "$DATA" \
   --n_epoch 10 -n 2000 --batch_size 32 \
   --num_workers "${SLURM_CPUS_PER_TASK:-8}" \
+  --do_test \
   --log_dir comparison/training/logs
+# NB: --do_test is action='store_false' -> passing it DISABLES the trailing
+# degraded test loop. Stage 1 classifies the 170 transform classes, so the
+# 0..6 degraded eval would be meaningless (and slow) here. Stage 2 keeps it.
 echo "Stage 1 done. Pass the checkpoint to stage 2:"
 echo "  sbatch comparison/training/scripts/cineca_dna_train_22cls.sh <path/to/ckpt_best.pth>"
