@@ -13,7 +13,17 @@ REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
 # DNA-Det builds its 170 transformation classes with albumentations. Pin < 1.4:
 # A.JpegCompression was renamed ImageCompression and always_apply / GaussNoise's
 # var_limit changed in later versions — on 2.x the transform list fails to build.
-pip install 'albumentations<1.4'
+#
+# The shared venv site-packages is READ-ONLY for us (owned by whoever created the
+# venv), so a plain `pip install` dies with "Permission denied". Install into a
+# personal overlay dir and put it on PYTHONPATH instead. --target does NOT touch
+# deps already satisfied by the venv (numpy/scipy/pillow stay the venv's), so only
+# the missing packages land in PYDEPS — no risk of shadowing torch's numpy.
+PYDEPS="${IAB_PYDEPS:-$HOME/iab_pydeps}"
+mkdir -p "$PYDEPS"
+pip install --no-cache-dir --target "$PYDEPS" 'albumentations<1.4'
+export PYTHONPATH="$PYDEPS:${PYTHONPATH:-}"
+echo "DNA deps installed into $PYDEPS (add it to PYTHONPATH in the DNA slurm scripts)"
 
 # UCF initialises both Xception encoders from ImageNet weights; without them the
 # original authors note the model does not converge to anything useful.

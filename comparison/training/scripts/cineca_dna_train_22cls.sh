@@ -31,7 +31,8 @@ export IAB_EXCLUDE_GENERATORS=dalle3          # <-- 22-class toggle
 REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
 DATA=$FAST/datasets/iab_dataset
 cd $REPO
-export PYTHONPATH="$REPO:${PYTHONPATH:-}"
+PYDEPS="${IAB_PYDEPS:-$HOME/iab_pydeps}"   # DNA-only: albumentations installed here (venv is read-only)
+export PYTHONPATH="$REPO:$PYDEPS:${PYTHONPATH:-}"
 echo "Node: $(hostname) | GPU: ${CUDA_VISIBLE_DEVICES:-?} | exclude=${IAB_EXCLUDE_GENERATORS}"
 # Stage-1 checkpoint: explicit arg, else the newest pretrain run.
 CKPT="${1:-}"
