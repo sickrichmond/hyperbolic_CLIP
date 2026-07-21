@@ -1,0 +1,4 @@
+--lr 5e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_neg 1.0 --lambda_norm 0.5 --target_norm 4.0 --require_caption
+--lr 5e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_neg 1.0 --lambda_norm 0.5 --target_norm 4.0 --require_caption --lambda_cap_in_class 1.0 --lambda_img_in_cap 1.0
+--lr 5e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_neg 1.0 --lambda_norm 0.5 --target_norm 4.0 --require_caption --lambda_cap_in_class 1.0 --lambda_img_in_cap 0.5
+--lr 5e-5 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_neg 1.0 --lambda_norm 0.5 --target_norm 4.0 --require_caption --lambda_cap_in_class 0.5 --lambda_img_in_cap 0.5

@@ -83,6 +83,10 @@ def parse_args():
                    help="Pure base attribution loss: forces BOTH caption terms "
                         "(cap_in_class + img_in_cap) to 0 and trains on ALL images (no "
                         "caption requirement) → same sample set as the baselines.")
+    p.add_argument("--require_caption", action="store_true", default=False,
+                   help="Force training on the captioned-images subset even when the "
+                        "caption loss terms are off. Lets the caption on/off ablation run "
+                        "on the SAME subset (only the loss varies, not the data).")
     p.add_argument("--lambda_norm",    type=float, default=0.0,
                    help="Weight of the anchor-norm regulariser (0 disables it).")
     p.add_argument("--target_norm",    type=float, default=0.0,
@@ -190,6 +194,10 @@ def main():
     # train set) and no data loss. require_caption follows whether any caption term
     # is active. Without a manifest: legacy caption-based split.
     use_caps = (args.lambda_cap_in_class > 0 or args.lambda_img_in_cap > 0)
+    # Training set membership: captioned-only if any caption term is active OR if
+    # --require_caption forces it (caption on/off ablation on the same subset).
+    # Decoupled from use_caps so caption-OFF can share the captioned subset.
+    req_cap = use_caps or args.require_caption
     train_include = val_include = None
     if args.split_manifest:
         import json
@@ -198,7 +206,7 @@ def main():
         train_include = set(man["train"])
         val_include = set(man["val"])
         print(f"Split manifest: {len(train_include)} train + {len(val_include)} val images "
-              f"(require_caption={use_caps}; harness val used for model selection)")
+              f"(require_caption={req_cap}; harness val used for model selection)")
 
     # ── Datasets ──────────────────────────────────────────────────────────────
     print("\n=== Train split ===")
@@ -208,7 +216,7 @@ def main():
             generators=args.generators, semantics=args.semantics,
             processor_name=args.clip_name, max_per_class=args.max_per_class,
             split="all", seed=args.seed,
-            include_paths=train_include, require_caption=use_caps,
+            include_paths=train_include, require_caption=req_cap,
         )
         print("\n=== Val split (harness val) ===")
         val_ds = IABCLIPDataset(
@@ -225,7 +233,7 @@ def main():
             processor_name=args.clip_name, max_per_class=args.max_per_class,
             split="train", val_frac=args.val_frac, seed=args.seed,
             split_scheme=args.split_scheme, test_frac=args.test_frac,
-            require_caption=use_caps,
+            require_caption=req_cap,
         )
         print("\n=== Val split ===")
         val_ds = IABCLIPDataset(

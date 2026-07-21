@@ -15,13 +15,14 @@
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
+#SBATCH --qos=boost_qos_lprod          # long QOS (up to 4 days) for the ~2x wall time on 2 GPUs
 #SBATCH --job-name=hyp_sweep_22
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=32
-#SBATCH --gpus-per-node=4
-#SBATCH --time=06:00:00
-#SBATCH --array=0-11%4               # 12 configs, up to 4 concurrent
+#SBATCH --cpus-per-task=16
+#SBATCH --gpus-per-node=2
+#SBATCH --time=12:00:00
+#SBATCH --array=0-18%4               # base sweep: 19 configs, up to 4 concurrent (override for other files)
 #SBATCH --output=%x_%A_%a.out
 #SBATCH --error=%x_%A_%a.err
 #SBATCH --mail-type=END,FAIL
@@ -40,8 +41,14 @@ REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
 DATA=$FAST/datasets/iab_dataset
 CAPS=$WORK/hyp_fine_tuning/iab_captions
 MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
-OUT=$WORK/hyp_fine_tuning/checkpoints/sweep
-CONFIGS=$REPO/slurm/sweep_configs_22cls.txt
+# Config file is overridable so ONE slurm serves both sweeps. Base sweep by default;
+# caption ablation via:  sbatch --array=0-3%4 \
+#   --export=ALL,SWEEP_CONFIGS=$REPO/slurm/sweep_configs_22cls_captions.txt slurm/slurm_sweep_22cls.sh
+# Match --array to `wc -l` of the chosen config file.
+CONFIGS=${SWEEP_CONFIGS:-$REPO/slurm/sweep_configs_22cls.txt}
+# Per-config subdir so the two sweeps (base vs captions) don't overwrite each
+# other's sweep_<idx>.pt. collect_sweep.py --dir points at the matching subdir.
+OUT=$WORK/hyp_fine_tuning/checkpoints/sweep/$(basename "$CONFIGS" .txt)
 mkdir -p $OUT
 cd $REPO
 
@@ -49,7 +56,10 @@ LINE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$CONFIGS")
 echo "=== sweep task $SLURM_ARRAY_TASK_ID ==="
 echo "config: $LINE"
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
+# 2 GPUs → SLURM exposes them as 0,1. Whole-node (4-GPU) tasks starved PD(Priority)
+# with no reservation at low fairshare; half-node backfills. batch_size unchanged
+# (256) → nn.DataParallel splits 128/GPU, results identical, ~2x wall time.
+CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --dataset_path    $DATA \
     --captions_dir    $CAPS \
     --generators      real 4o CogView3_PLUS FLUX KANDINSKY PIXART PLAYGROUND_2_5 \
@@ -57,7 +67,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
                       ideogram infinity janus-pro kling mid-5.2 mid-6.0 \
     --semantics       COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
     --clip_name       openai/clip-vit-large-patch14 \
-    --no_captions \
     --batch_size      256 \
     --num_epochs      3 \
     --weight_decay    0.01 \
