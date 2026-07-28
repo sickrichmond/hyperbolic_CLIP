@@ -159,18 +159,25 @@ def encode_anchors(model, anchor_texts: list[str], tokenizer, device: str) -> to
 
 
 @torch.no_grad()
-def class_centroids(core, dataset, class_names, args, device) -> torch.Tensor:
+def class_centroids(core, dataset, class_names, args, device,
+                    feat_fn=None, cache_path=None) -> torch.Tensor:
     """Per-class mean of the CLIP-space training image embeddings → (K, D_clip).
 
     Text-free anchor initialisation: one forward pass over the whole train split
     through the vision encoder. LoRA is zero-initialised, so at this point the
     features are exactly the frozen CLIP ones — the result depends only on the
     backbone and the data, which is why it can be cached across runs.
+
+    feat_fn/cache_path override the CLIP-space encoder and the cache file, so a
+    second branch (e.g. the spectral one of patch_freq_attribution) can build its
+    own anchors with the same machinery.
     """
     name_to_idx = {n: i for i, n in enumerate(class_names)}
     K = len(class_names)
+    feat_fn = feat_fn or core._clip_image
 
-    cache = Path(args.anchor_init_cache) if args.anchor_init_cache else None
+    cache_path = cache_path or args.anchor_init_cache
+    cache = Path(cache_path) if cache_path else None
     if cache is not None and cache.exists():
         blob = torch.load(cache, map_location="cpu", weights_only=False)
         if blob["class_names"] != class_names:
@@ -193,7 +200,7 @@ def class_centroids(core, dataset, class_names, args, device) -> torch.Tensor:
     counts = torch.zeros(K, dtype=torch.long, device=device)
     for batch in tqdm(loader, desc="anchor centroids"):
         with autocast("cuda"):
-            feats = core._clip_image(batch["pixel_values"].to(device))
+            feats = feat_fn(batch["pixel_values"].to(device))
         labels = torch.tensor([name_to_idx[g] for g in batch["generator"]],
                               device=device, dtype=torch.long)
         sums.index_add_(0, labels, feats.double())
