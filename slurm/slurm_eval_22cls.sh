@@ -4,7 +4,9 @@
 # Same protocol as the baselines (get_dataloader + calculate_metrics_for_test),
 # at 22 classes (IAB_EXCLUDE_GENERATORS=dalle3). Levels 0..6.
 #
-# CKPT defaults to the base-loss run; point it at the sweep winner once chosen.
+# CKPT and LOGDIR are overridable, e.g. for the image-centroid runs:
+#   sbatch --export=ALL,CKPT=$WORK/hyp_fine_tuning/checkpoints/attribution_22cls_centroid_vitl14.pt,\
+# LOGDIR=$WORK/outputs/hypclip_centroid slurm/slurm_eval_22cls.sh
 # Submit:  sbatch slurm/slurm_eval_22cls.sh
 # ============================================================================
 #SBATCH --account=EUHPC_D35_189
@@ -32,7 +34,7 @@ export IAB_EXCLUDE_GENERATORS=dalle3        # <-- 22-class (anchors + test set)
 REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
 DATA=$FAST/datasets/iab_dataset
 CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_22cls_base_vitl14.pt}
-LOGDIR=$WORK/outputs/hypclip_fair_22cls
+LOGDIR=${LOGDIR:-$WORK/outputs/hypclip_fair_22cls}
 
 mkdir -p $LOGDIR
 cd $REPO

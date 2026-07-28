@@ -20,16 +20,19 @@ Usage:
         --output        $WORK/hyp_fine_tuning/checkpoints/attribution_FLUX_vitl14.pt
 """
 import argparse
+import os
 from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 from transformers import CLIPTokenizer
 
 from data.iab_clip_dataset import IABCLIPDataset
+from geometry.lorentz import exp_map0, half_aperture
 from models.attribution_clip import AttributionCLIP
 from losses.attribution_loss import EntailmentConeLoss, predict_class
 
@@ -87,6 +90,25 @@ def parse_args():
                    help="Force training on the captioned-images subset even when the "
                         "caption loss terms are off. Lets the caption on/off ablation run "
                         "on the SAME subset (only the loss varies, not the data).")
+    p.add_argument("--anchor_init", choices=["text", "image_centroid"], default="text",
+                   help="'text' (default): anchors are the class text templates encoded by "
+                        "CLIP at every step. 'image_centroid': anchors are FREE parameters in "
+                        "tangent space, initialised at the per-class mean of the training image "
+                        "embeddings (one forward pass before training) — no text dependency.")
+    p.add_argument("--anchor_init_norm", type=float, default=2.0,
+                   help="Common tangent-space radius the centroid anchors are rescaled to "
+                        "(only their directions carry the centroid information; the radius sets "
+                        "the initial cone width, ψ = asin(2·min_radius/‖t‖)). 0 keeps the raw "
+                        "scale, which is tiny at init and degenerates every cone to a halfspace.")
+    p.add_argument("--anchor_init_cache", type=str, default=None,
+                   help="Cache file for the CLIP-space class means. Reused across runs (LoRA is "
+                        "zero-init, so the pre-pass output is run-independent) → the ~20 min "
+                        "forward pass over the train split happens once.")
+    p.add_argument("--train_augment", action="store_true", default=False,
+                   help="Random corruption augmentation (JPEG / blur / downsample, see "
+                        "data.degradations.random_degradation) on the TRAIN split only. NOTE: "
+                        "these are the test-time corruption families → report such a run with an "
+                        "asterisk, it is not head-to-head comparable with the baselines.")
     p.add_argument("--lambda_norm",    type=float, default=0.0,
                    help="Weight of the anchor-norm regulariser (0 disables it).")
     p.add_argument("--target_norm",    type=float, default=0.0,
@@ -137,15 +159,67 @@ def encode_anchors(model, anchor_texts: list[str], tokenizer, device: str) -> to
 
 
 @torch.no_grad()
-def run_validation(model_inner, val_loader, anchor_texts, tokenizer, class_names,
-                   device, curv) -> dict:
-    model_inner.eval()
+def class_centroids(core, dataset, class_names, args, device) -> torch.Tensor:
+    """Per-class mean of the CLIP-space training image embeddings → (K, D_clip).
 
-    # Anchors must be re-encoded under the current text-encoder weights
-    tok = tokenizer(anchor_texts, return_tensors="pt", padding="max_length",
-                    truncation=True, max_length=77)
-    x_anc, _ = model_inner.encode_text(tok["input_ids"].to(device),
-                                       tok["attention_mask"].to(device))
+    Text-free anchor initialisation: one forward pass over the whole train split
+    through the vision encoder. LoRA is zero-initialised, so at this point the
+    features are exactly the frozen CLIP ones — the result depends only on the
+    backbone and the data, which is why it can be cached across runs.
+    """
+    name_to_idx = {n: i for i, n in enumerate(class_names)}
+    K = len(class_names)
+
+    cache = Path(args.anchor_init_cache) if args.anchor_init_cache else None
+    if cache is not None and cache.exists():
+        blob = torch.load(cache, map_location="cpu", weights_only=False)
+        if blob["class_names"] != class_names:
+            raise ValueError(
+                f"anchor cache {cache} was built for {blob['class_names']}, "
+                f"not for {class_names}")
+        print(f"Anchor centroids: loaded from cache {cache}")
+        return blob["mean_clip"]
+
+    # Sequential loader: we want the true per-class mean, not the balanced-sampler
+    # one. Augmentation off — centroids are always computed on clean images so the
+    # clean and augmented runs start from the same anchors.
+    was_aug, dataset.train_augment = dataset.train_augment, False
+    was_training = core.training
+    core.eval()
+    loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
+                        num_workers=args.num_workers, pin_memory=True)
+    clip_dim = core.clip.base_model.model.config.projection_dim
+    sums = torch.zeros(K, clip_dim, dtype=torch.float64, device=device)
+    counts = torch.zeros(K, dtype=torch.long, device=device)
+    for batch in tqdm(loader, desc="anchor centroids"):
+        with autocast("cuda"):
+            feats = core._clip_image(batch["pixel_values"].to(device))
+        labels = torch.tensor([name_to_idx[g] for g in batch["generator"]],
+                              device=device, dtype=torch.long)
+        sums.index_add_(0, labels, feats.double())
+        counts.index_add_(0, labels, torch.ones_like(labels))
+    dataset.train_augment = was_aug
+    core.train(was_training)
+
+    empty = [c for c, n in zip(class_names, counts.tolist()) if n == 0]
+    if empty:
+        raise RuntimeError(f"No training images for class(es) {empty} — cannot build anchors")
+    mean_clip = F.normalize((sums / counts.unsqueeze(1)).float(), dim=-1).cpu()
+    print("Anchor centroids (images per class): "
+          + ", ".join(f"{c}={n}" for c, n in zip(class_names, counts.tolist())))
+
+    if cache is not None:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache.with_suffix(cache.suffix + f".tmp{os.getpid()}")
+        torch.save({"class_names": class_names, "mean_clip": mean_clip}, tmp)
+        os.replace(tmp, cache)   # atomic: two jobs may race to build the cache
+        print(f"Anchor centroids: cached → {cache}")
+    return mean_clip
+
+
+@torch.no_grad()
+def run_validation(model_inner, val_loader, x_anc, class_names, device, curv) -> dict:
+    model_inner.eval()
 
     per_class_correct = {c: 0 for c in class_names}
     per_class_total   = {c: 0 for c in class_names}
@@ -184,9 +258,19 @@ def main():
 
     class_names, anchor_texts = build_anchors(args.generators)
     name_to_idx = {n: i for i, n in enumerate(class_names)}
-    print(f"Class anchors:")
-    for i, (c, t) in enumerate(zip(class_names, anchor_texts)):
-        print(f"  [{i}] {c:8s} → \"{t}\"")
+    centroid_anchors = args.anchor_init == "image_centroid"
+    if centroid_anchors:
+        if args.lambda_cap_in_class > 0 or args.lambda_img_in_cap > 0:
+            raise ValueError(
+                "--anchor_init image_centroid removes the text encoder from the objective; "
+                "the caption terms have no class anchor to attach to. Use --no_captions.")
+        print(f"Class anchors: image centroids (text-free), {len(class_names)} classes")
+        for i, c in enumerate(class_names):
+            print(f"  [{i}] {c}")
+    else:
+        print(f"Class anchors:")
+        for i, (c, t) in enumerate(zip(class_names, anchor_texts)):
+            print(f"  [{i}] {c:8s} → \"{t}\"")
 
     # ── Split manifest (Path 1: strict data parity + leakage-free vs baselines) ──
     # With a manifest: train on ALL harness-train images and validate on the harness
@@ -245,6 +329,13 @@ def main():
             require_caption=use_caps,
         )
 
+    # Augmentation on the train split only: the val split stays clean so model
+    # selection is not measured under corruption.
+    train_ds.train_augment = args.train_augment
+    if args.train_augment:
+        print("Train-time augmentation: ON (random JPEG / blur / downsample) — "
+              "results are NOT head-to-head comparable with the baselines.")
+
     sampler = make_balanced_sampler(train_ds)
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, sampler=sampler,
@@ -264,6 +355,27 @@ def main():
         curv=args.curv,
     ).to(device)
 
+    # ── Anchors ───────────────────────────────────────────────────────────────
+    # Centroid mode: one pre-pass over the train split (single GPU, before the
+    # DataParallel wrap) gives the per-class CLIP-space mean; the projection head
+    # maps it into tangent space and the direction is kept while the radius is
+    # reset to a common value (only the relative geometry of the centroids is
+    # meaningful; the raw radius at init is ~0.1 and would make every cone a
+    # halfspace). From there the anchors are free parameters.
+    anchor_tangent = None
+    if centroid_anchors:
+        mean_clip = class_centroids(model, train_ds, class_names, args, device)
+        with torch.no_grad():
+            t0 = model.projection(mean_clip.to(device))
+            if args.anchor_init_norm > 0:
+                t0 = F.normalize(t0, dim=-1) * args.anchor_init_norm
+        anchor_tangent = nn.Parameter(t0.detach().float())
+        with torch.no_grad():
+            psi0 = half_aperture(exp_map0(anchor_tangent, curv=args.curv),
+                                 curv=args.curv, min_radius=args.min_radius)
+        print(f"Anchor init: ‖t‖={anchor_tangent.norm(dim=-1).mean():.2f}  "
+              f"ψ={psi0.mean():.3f} rad  (K={len(class_names)})")
+
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
@@ -271,8 +383,11 @@ def main():
     core = model.module if isinstance(model, nn.DataParallel) else model
     core.print_trainable_summary()
 
+    trainable = core.trainable_parameters()
+    if anchor_tangent is not None:
+        trainable = trainable + [anchor_tangent]
     optimizer = torch.optim.AdamW(
-        core.trainable_parameters(),
+        trainable,
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
@@ -331,13 +446,19 @@ def main():
                 else:
                     x_img = model(pixel)
                     x_cap = None
-                x_anc, _ = core.encode_text(anchor_ids, anchor_mask)
+                if anchor_tangent is None:
+                    x_anc, _ = core.encode_text(anchor_ids, anchor_mask)
+            if anchor_tangent is not None:
+                # fp32, outside autocast: the hyperbolic ops are unstable in fp16
+                # (same reason AttributionCLIP.to_hyperbolic disables autocast).
+                with autocast("cuda", enabled=False):
+                    x_anc = exp_map0(anchor_tangent.float(), curv=args.curv)
             loss, stats = cone_loss(x_img, x_anc, labels, x_cap=x_cap)
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(core.trainable_parameters(), 1.0)
+            nn.utils.clip_grad_norm_(trainable, 1.0)
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
@@ -384,8 +505,16 @@ def main():
                   f"‖t̄_cap‖={avg['mean_cap_norm']:.2f}")
 
         # ── Validation ───────────────────────────────────────────────────────
-        val = run_validation(core, val_loader, anchor_texts, tokenizer,
-                             class_names, device, args.curv)
+        # Anchors under the CURRENT weights: text ones must be re-encoded, the
+        # centroid ones are the parameter itself. eval() first — the text anchors
+        # must not be encoded with LoRA dropout active.
+        core.eval()
+        with torch.no_grad():
+            if anchor_tangent is None:
+                x_anc_val, _ = core.encode_text(anchor_ids, anchor_mask)
+            else:
+                x_anc_val = exp_map0(anchor_tangent.float(), curv=args.curv)
+        val = run_validation(core, val_loader, x_anc_val, class_names, device, args.curv)
         print(f"  val: overall={100*val['overall_acc']:.1f}%  "
               f"balanced={100*val['balanced_acc']:.1f}%  ({val['total']} samples)")
         for c, a in val["per_class_acc"].items():
@@ -406,6 +535,12 @@ def main():
                     "min_radius":      args.min_radius,
                     "class_names":     class_names,
                     "anchor_texts":    anchor_texts,
+                    "anchor_init":     args.anchor_init,
+                    # centroid mode only: learned anchors in tangent space, in
+                    # class_names order. Inference lifts them with exp_map0.
+                    "anchor_tangent":  (anchor_tangent.detach().cpu()
+                                        if anchor_tangent is not None else None),
+                    "train_augment":   args.train_augment,
                     "generators":      args.generators,
                     "semantics":       args.semantics,
                     "val_balanced":    val["balanced_acc"],

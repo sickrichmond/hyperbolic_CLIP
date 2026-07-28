@@ -38,7 +38,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 from transformers import CLIPImageProcessor, CLIPTokenizer
 
-from data.degradations import apply_degradation
+from data.degradations import apply_degradation, random_degradation
 
 # ── Real-image lookup: semantic key → (CSV file, caption column) ──────────────
 _REAL_CSV: dict[str, tuple[str, int]] = {
@@ -174,6 +174,7 @@ class IABCLIPDataset(Dataset):
         exclude_paths: Optional[set] = None,
         include_paths: Optional[set] = None,
         require_caption: bool = True,
+        train_augment: bool = False,
     ):
         """
         split_scheme: "caption" (default) | "stratified"
@@ -216,6 +217,12 @@ class IABCLIPDataset(Dataset):
         self.seed = seed
         self.include_uncaptioned = include_uncaptioned
         self.degraded = degraded
+        # Random train-time corruption (see data.degradations.random_degradation).
+        # Mutually exclusive with `degraded`, which is the deterministic test-time
+        # degradation — a sample must never be both augmented and evaluated.
+        if train_augment and degraded:
+            raise ValueError("train_augment and degraded>0 are mutually exclusive")
+        self.train_augment = train_augment
         # Path filters (RELATIVE to root), for byte-fair training vs the baselines
         # (see comparison/training/scripts/dump_split_manifest.py):
         #   include_paths — allowlist: keep ONLY these images (e.g. the harness TRAIN
@@ -412,6 +419,8 @@ class IABCLIPDataset(Dataset):
         # baselines, applied AFTER the grok crop and BEFORE CLIP preprocessing.
         if self.degraded:
             img = apply_degradation(img, self.degraded)
+        elif self.train_augment:
+            img = random_degradation(img)
 
         pixel = self.processor(images=img, return_tensors="pt")["pixel_values"][0]
 

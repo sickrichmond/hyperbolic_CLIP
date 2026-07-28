@@ -17,6 +17,7 @@ curves are directly comparable:
 NOTE: downsample uses Image.NEAREST for both directions (as in the upstream port),
 which is more aggressive than a bilinear/bicubic resize — kept identical on purpose.
 """
+import random
 from io import BytesIO
 from PIL import Image, ImageFilter
 
@@ -60,3 +61,44 @@ def apply_degradation(image, level):
     if level == 6:
         return _blur(image, sigma=5)
     return image
+
+
+# ── Train-time augmentation ───────────────────────────────────────────────────
+# Same three corruption FAMILIES as the test pipeline above (identical operators,
+# NEAREST downsampling included), but with continuously sampled parameters that
+# span the test levels instead of the seven fixed settings. Each family fires
+# independently, in random order, so an image gets 0-3 corruptions.
+#
+# ⚠️ A model trained with this has seen the test-time corruption families →
+# report it with an asterisk, like DNA-Det (see the fairness audit).
+_AUG = (
+    (0.5, lambda img: _compress(img, quality=random.randint(30, 95))),
+    (0.4, lambda img: _blur(img, sigma=random.uniform(0.5, 5.0))),
+    (0.4, lambda img: _downsample(img, scale_factor=random.uniform(0.25, 1.0))),
+)
+
+
+def random_degradation(image):
+    """Randomly corrupt `image` for training augmentation. Returns a PIL image
+    of the same size (JPEG round-trips through a buffer, so the result is
+    re-materialised as RGB)."""
+    ops = [op for p, op in _AUG if random.random() < p]
+    random.shuffle(ops)
+    for op in ops:
+        image = op(image)
+    return image.convert("RGB")
+
+
+if __name__ == "__main__":
+    from PIL import ImageDraw
+    img = Image.new("RGB", (256, 200))
+    ImageDraw.Draw(img).rectangle([20, 20, 180, 150], fill=(200, 30, 60))
+    random.seed(0)
+    outs = [random_degradation(img) for _ in range(50)]
+    assert all(o.size == img.size and o.mode == "RGB" for o in outs), "size/mode changed"
+    changed = sum(o.tobytes() != img.tobytes() for o in outs)
+    assert changed > 25, f"augmentation barely fires: {changed}/50 changed"
+    assert changed < 50, f"augmentation never leaves an image clean: {changed}/50"
+    for lvl in range(7):
+        assert apply_degradation(img, lvl).size == img.size
+    print(f"ok — {changed}/50 augmented, 7 test levels intact")
