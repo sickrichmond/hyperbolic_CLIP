@@ -83,8 +83,8 @@ CUDA_VISIBLE_DEVICES=0,1 python -m patch_freq_attribution.train \
     --lambda_neg      1.0 \
     --lambda_norm     0.0 \
     --target_norm     0.0 \
-    --batch_size      32 \
-    --grad_accum      8 \
+    --batch_size      16 \
+    --grad_accum      16 \
     --samples_per_epoch 44000 \
     --num_epochs      4 \
     --lr              3e-4 \

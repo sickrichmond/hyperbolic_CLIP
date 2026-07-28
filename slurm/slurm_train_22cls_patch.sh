@@ -9,9 +9,9 @@
 #
 # COST: 10 forward passes per sample. The single-view run did 5 epochs x 350k
 # images in ~40h on 2 GPUs, so a 48h job here fits roughly 190k sample draws —
-# hence --samples_per_epoch. The micro-batch drops to 32 to fit 320 images per
-# step in memory, and --grad_accum 8 keeps the EFFECTIVE batch at the 256 the
-# learning rate was swept at.
+# hence --samples_per_epoch. The micro-batch drops to 16 so each GPU sees 80
+# images per forward (the proven single-view run peaked at 128/GPU), and
+# --grad_accum 16 keeps the EFFECTIVE batch at the 256 the lr was swept at.
 #
 # Anchors: image centroids, reusing the cache written by the centroid run — same
 # space, same head, so the ~20 min pre-pass is not paid again.
@@ -88,8 +88,8 @@ CUDA_VISIBLE_DEVICES=0,1 python -m patch_attribution.train \
     --lambda_neg      1.0 \
     --lambda_norm     0.0 \
     --target_norm     0.0 \
-    --batch_size      32 \
-    --grad_accum      8 \
+    --batch_size      16 \
+    --grad_accum      16 \
     --samples_per_epoch 48000 \
     --num_epochs      4 \
     --lr              3e-4 \
