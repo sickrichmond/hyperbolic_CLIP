@@ -26,6 +26,8 @@
 # Submit:  sbatch slurm/slurm_train_22cls_patchfreq.sh
 # Fusion ablation (plain sum, temperatures frozen at 1):
 #   sbatch --export=ALL,LAMBDA_FUSE=0 slurm/slurm_train_22cls_patchfreq.sh
+# Narrower spectral cones, if that branch stalls at chance:
+#   sbatch --export=ALL,ANCHOR_INIT_NORM_SPEC=6.0 slurm/slurm_train_22cls_patchfreq.sh
 # ============================================================================
 
 #SBATCH --account=EUHPC_D35_189          # verify with `saldo -b`
@@ -70,6 +72,15 @@ fi
 WARM=""
 if [ -n "$INIT_FROM" ]; then WARM="--init_from $INIT_FROM"; fi
 
+# Left UNSET by default: the spectral anchors then share --anchor_init_norm with the
+# pixel ones. Set it only if the anchor-init line warns that the spectral cones
+# overlap, or if spectral cone_acc stalls at 1/22 — a larger radius = narrower cones.
+SPEC_NORM=""
+if [ -n "$ANCHOR_INIT_NORM_SPEC" ]; then
+    SPEC_NORM="--anchor_init_norm_spec $ANCHOR_INIT_NORM_SPEC"
+    echo "Spectral anchor init norm overridden: $ANCHOR_INIT_NORM_SPEC"
+fi
+
 CUDA_VISIBLE_DEVICES=0,1 python -m patch_freq_attribution.train \
     --dataset_path    $DATA \
     --captions_dir    $CAPS \
@@ -83,6 +94,7 @@ CUDA_VISIBLE_DEVICES=0,1 python -m patch_freq_attribution.train \
     --anchor_init_norm       2.0 \
     --anchor_init_cache      $ANCHOR_CACHE \
     --anchor_init_cache_spec $ANCHOR_CACHE_SPEC \
+    $SPEC_NORM \
     --lambda_fuse     ${LAMBDA_FUSE:-1.0} \
     --lora_r          16 \
     --lora_alpha      32 \
