@@ -43,6 +43,15 @@ def parse_args():
     p.add_argument("--anchor_init_cache_spec", type=str, default=None,
                    help="Cache for the SPECTRAL class centroids (separate file from "
                         "--anchor_init_cache, which holds the pixel ones).")
+    p.add_argument("--anchor_init_norm_spec", type=float, default=None,
+                   help="Tangent radius for the SPECTRAL anchors (default: same as "
+                        "--anchor_init_norm). Their centroids sit ~7x closer together "
+                        "than the pixel ones, so at a shared radius their cones start "
+                        "on top of each other and the branch can settle on the "
+                        "degenerate 'everything far from every anchor' solution — "
+                        "hinges satisfied, accuracy at chance. A larger radius means "
+                        "narrower cones; watch the pairwise-angle line the anchor "
+                        "init prints.")
     args = p.parse_args()
     if args.anchor_init == "text":
         print("NOTE: --anchor_init text applies to the PIXEL branch only; the "
@@ -118,7 +127,8 @@ def main():
         anchor_spec = init_anchors(model, train_ds, class_names, args, device,
                                    feat_fn=model._clip_spectrum,
                                    cache_path=args.anchor_init_cache_spec,
-                                   head=model.projection_spec)
+                                   head=model.projection_spec,
+                                   init_norm=args.anchor_init_norm_spec)
     anchors = Anchors(tangent_pix, CLIPTokenizer.from_pretrained(args.clip_name),
                       anchor_texts, device, args.curv)
 

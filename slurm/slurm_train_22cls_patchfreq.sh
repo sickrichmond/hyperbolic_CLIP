@@ -16,10 +16,12 @@
 # The pixel anchors reuse the centroid cache; the SPECTRAL anchors need their own
 # pre-pass (~20 min, cached in ANCHOR_CACHE_SPEC) the first time.
 #
-# ⚠️ RUN tests/inspect_centroids.py ON $ANCHOR_CACHE_SPEC FIRST. In the failed run
-# the spectral branch sat at 1/22 = chance for four epochs while its loss fell: if
-# the spectral centroids are near-parallel (off-diagonal cosine ~0.99+), the
-# FFT-into-CLIP embedding carries no class signal and this job is 23h wasted.
+# The spectral branch DOES carry class signal — tests/probe_spectral.py, frozen
+# backbone, ~3k samples: 19.9% balanced vs 4.5% chance (pixel control 49.0%). What
+# it lacks is separation at init: its centroids sit ~7x closer together than the
+# pixel ones (1 - mean cosine 0.0042 vs 0.0298). Watch the pairwise-angle line the
+# anchor init prints; if the spectral cone_acc stalls at 4.5% again, raise
+# --anchor_init_norm_spec (narrower cones) rather than the budget.
 #
 # Submit:  sbatch slurm/slurm_train_22cls_patchfreq.sh
 # Fusion ablation (plain sum, temperatures frozen at 1):

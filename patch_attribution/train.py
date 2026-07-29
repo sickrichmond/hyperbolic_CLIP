@@ -147,22 +147,38 @@ def build_loaders(args, train_ds, val_ds) -> tuple[DataLoader, DataLoader]:
 
 
 def init_anchors(core, train_ds, class_names, args, device,
-                 feat_fn=None, cache_path=None, head=None) -> nn.Parameter:
+                 feat_fn=None, cache_path=None, head=None,
+                 init_norm=None) -> nn.Parameter:
     """Free tangent-space anchors initialised at the per-class embedding centroids.
 
-    feat_fn/head default to the pixel branch; the spectral branch passes its own.
+    feat_fn/head/init_norm default to the pixel branch; the spectral branch passes
+    its own (its centroids sit ~7x closer together, so it may need a larger radius
+    to get cones that are narrow enough to separate).
     """
     mean_clip = class_centroids(core, train_ds, class_names, args, device,
                                 feat_fn=feat_fn, cache_path=cache_path)
     head = head or core.projection
+    norm = args.anchor_init_norm if init_norm is None else init_norm
     with torch.no_grad():
         t0 = head(mean_clip.to(device))
-        if args.anchor_init_norm > 0:
-            t0 = F.normalize(t0, dim=-1) * args.anchor_init_norm
+        if norm > 0:
+            t0 = F.normalize(t0, dim=-1) * norm
         psi0 = half_aperture(exp_map0(t0, curv=args.curv),
                              curv=args.curv, min_radius=args.min_radius)
+        # How far apart the anchors actually START. Two cones of half-aperture psi
+        # whose axes are less than 2*psi apart overlap from the first step, and the
+        # negative term then has a trivial escape (push everything away from every
+        # anchor) that satisfies 21 hinges out of 22 while staying at chance
+        # accuracy — which is exactly what the spectral branch did for four epochs.
+        d = F.normalize(t0, dim=-1)
+        cos = (d @ d.T)[~torch.eye(len(t0), dtype=torch.bool, device=t0.device)]
+        theta = torch.arccos(cos.clamp(-1, 1))
     print(f"Anchor init: ‖t‖={t0.norm(dim=-1).mean():.2f}  ψ={psi0.mean():.3f} rad  "
+          f"pairwise angle mean={theta.mean():.3f} min={theta.min():.3f} rad  "
           f"(K={len(class_names)})")
+    if theta.mean() < 2 * psi0.mean():
+        print(f"  ⚠️  mean anchor separation < 2ψ — the cones overlap at init. "
+              f"Raise the init norm (narrower cones) if this branch stalls at chance.")
     return nn.Parameter(t0.detach().float())
 
 
