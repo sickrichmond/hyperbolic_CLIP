@@ -21,11 +21,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from tqdm import tqdm
+from transformers import CLIPTokenizer
 
 from geometry.lorentz import exp_map0
 from losses.attribution_loss import EntailmentConeLoss
 from patch_attribution.train import (
-    add_common_args, build_datasets, build_loaders, init_anchors, lift,
+    Anchors, add_common_args, build_datasets, build_loaders, init_anchors, lift,
     save_checkpoint,
 )
 from patch_freq_attribution.model import PatchFreqAttributionCLIP, fused_logits
@@ -42,7 +43,12 @@ def parse_args():
     p.add_argument("--anchor_init_cache_spec", type=str, default=None,
                    help="Cache for the SPECTRAL class centroids (separate file from "
                         "--anchor_init_cache, which holds the pixel ones).")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.anchor_init == "text":
+        print("NOTE: --anchor_init text applies to the PIXEL branch only; the "
+              "spectral anchors stay centroid-initialised (a text template has no "
+              "meaning for a frequency spectrum).")
+    return args
 
 
 @torch.no_grad()
@@ -73,10 +79,10 @@ def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    class_names, _ = build_anchors(args.generators)
+    class_names, anchor_texts = build_anchors(args.generators)
     name_to_idx = {n: i for i, n in enumerate(class_names)}
-    print(f"Class anchors: image centroids (text-free), {len(class_names)} classes, "
-          f"two hyperbolic spaces (pixel + spectrum)")
+    print(f"Class anchors: pixel={args.anchor_init}, spectral=image_centroid, "
+          f"{len(class_names)} classes, two hyperbolic spaces")
 
     train_ds, val_ds = build_datasets(args)
     train_loader, val_loader = build_loaders(args, train_ds, val_ds)
@@ -89,6 +95,7 @@ def main():
     # Raw temperatures; exp(0) = 1 → the plain sum of the two logit vectors.
     tau = nn.Parameter(torch.zeros(2, device=device))
 
+    tangent_pix = None
     if args.init_from:
         ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
         if ckpt["class_names"] != class_names:
@@ -96,20 +103,24 @@ def main():
         model.clip.load_state_dict(ckpt["lora_state"])
         model.projection.load_state_dict(ckpt["projection"])
         model.projection_spec.load_state_dict(ckpt["projection_spec"])
-        anchor_pix = nn.Parameter(ckpt["anchor_tangent"].to(device).float())
+        if ckpt["anchor_tangent"] is not None:
+            tangent_pix = nn.Parameter(ckpt["anchor_tangent"].to(device).float())
         anchor_spec = nn.Parameter(ckpt["anchor_tangent_spec"].to(device).float())
         with torch.no_grad():
             tau.copy_(ckpt["fusion_tau"].to(device))
         print(f"Warm start from {args.init_from} "
               f"(epoch {ckpt['epoch']}, val_balanced {100*ckpt['val_balanced']:.1f}%)")
     else:
-        print("\n--- pixel anchors ---")
-        anchor_pix = init_anchors(model, train_ds, class_names, args, device)
+        if args.anchor_init == "image_centroid":
+            print("\n--- pixel anchors ---")
+            tangent_pix = init_anchors(model, train_ds, class_names, args, device)
         print("\n--- spectral anchors ---")
         anchor_spec = init_anchors(model, train_ds, class_names, args, device,
                                    feat_fn=model._clip_spectrum,
                                    cache_path=args.anchor_init_cache_spec,
                                    head=model.projection_spec)
+    anchors = Anchors(tangent_pix, CLIPTokenizer.from_pretrained(args.clip_name),
+                      anchor_texts, device, args.curv)
 
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs")
@@ -117,21 +128,24 @@ def main():
     core = model.module if isinstance(model, nn.DataParallel) else model
     core.print_trainable_summary()
 
-    trainable = core.trainable_parameters() + [anchor_pix, anchor_spec, tau]
+    trainable = core.trainable_parameters() + anchors.params + [anchor_spec, tau]
     optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=args.weight_decay)
-    opt_steps = (len(train_loader) // args.grad_accum) * args.num_epochs
+    steps_per_epoch = len(train_loader) // args.grad_accum
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(opt_steps, 1), eta_min=1e-6)
+        optimizer, T_max=max(steps_per_epoch * args.num_epochs, 1), eta_min=1e-6)
     scaler = GradScaler("cuda")
     cone_loss = EntailmentConeLoss(
         curv=args.curv, min_radius=args.min_radius, margin=args.margin,
         lambda_neg=args.lambda_neg, lambda_norm=args.lambda_norm,
         target_norm=args.target_norm,
     )
-    print(f"Views/sample=11 (1 global + 9 patches of {args.patch_size}px + 1 spectrum)  "
+    grid = ("from the 224 tensor" if args.patch_source == "tensor"
+            else "from the full-resolution image")
+    print(f"Views/sample=11 (1 global + 9 patches {grid} + 1 spectrum)  "
           f"micro-batch={args.batch_size} x grad_accum={args.grad_accum} "
-          f"→ effective batch {args.batch_size * args.grad_accum}  "
-          f"λ_fuse={args.lambda_fuse}")
+          f"→ effective batch {args.batch_size * args.grad_accum}, "
+          f"{steps_per_epoch} optimizer steps/epoch "
+          f"({steps_per_epoch * args.num_epochs} total)  λ_fuse={args.lambda_fuse}")
 
     best_balanced = -1.0
     out_path = Path(args.output)
@@ -147,8 +161,8 @@ def main():
                                   device=device, dtype=torch.long)
             with autocast("cuda"):
                 x_views, x_spec = model(batch["pixel_values"].to(device))
+                x_anc_pix = anchors.points(core)
             V = x_views.shape[1]
-            x_anc_pix = lift(anchor_pix, args.curv)
             x_anc_spec = lift(anchor_spec, args.curv)
 
             L_pix, st_pix = cone_loss(x_views.reshape(-1, x_views.shape[-1]),
@@ -192,9 +206,10 @@ def main():
               f"spectral={100*sums['acc_spec']/n:.1f}%  "
               f"τ_pix={tau.exp()[0]:.3f}  τ_spec={tau.exp()[1]:.3f}")
 
+        # eval() first: text anchors must not be encoded with LoRA dropout active.
         core.eval()
         with torch.no_grad():
-            x_anc_pix = exp_map0(anchor_pix.float(), curv=args.curv)
+            x_anc_pix = anchors.points(core)
             x_anc_spec = exp_map0(anchor_spec.float(), curv=args.curv)
         val = run_validation(core, val_loader, x_anc_pix, x_anc_spec, tau,
                              class_names, device)
@@ -205,7 +220,7 @@ def main():
 
         if val["balanced_acc"] > best_balanced:
             best_balanced = val["balanced_acc"]
-            save_checkpoint(out_path, core, anchor_pix, class_names, args, val, epoch,
+            save_checkpoint(out_path, core, anchors, class_names, args, val, epoch,
                             extra={
                                 "projection_spec": core.projection_spec.state_dict(),
                                 "anchor_tangent_spec": anchor_spec.detach().cpu(),

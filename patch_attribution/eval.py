@@ -76,7 +76,14 @@ def run_eval(args, build=build_patch_model):
     model, logits_fn = build(ckpt, device)
 
     os.makedirs(args.log_dir, exist_ok=True)
-    config = {'model_name': 'hypclip', 'clip_name': ckpt['clip_name']}
+    # The view source is read from the CHECKPOINT, never from a flag: evaluating a
+    # native-grid model on 224-tensor views (or vice versa) silently produces a full
+    # set of wrong metrics. 'hypclip' returns the plain 224 tensor and the model cuts
+    # its own grid; 'hypclip_patch' returns the 10 full-resolution views.
+    model_name = ('hypclip_patch' if ckpt.get('patch_source') == 'native'
+                  else 'hypclip')
+    print(f"Patch source: {ckpt.get('patch_source', 'tensor')} → dataset '{model_name}'")
+    config = {'model_name': model_name, 'clip_name': ckpt['clip_name']}
 
     train_semantics = test_semantics = None
     if args.use_semantic_split:
@@ -88,7 +95,7 @@ def run_eval(args, build=build_patch_model):
 
         _, _, test_loader = get_dataloader(
             root_dir=args.root_dir,
-            model_name='hypclip',
+            model_name=model_name,
             num_images_per_semantic_per_class=args.num_images_per_semantic_per_class,
             batch_size=args.batch_size,
             degraded=degraded,

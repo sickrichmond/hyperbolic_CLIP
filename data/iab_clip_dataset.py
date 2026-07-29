@@ -87,6 +87,24 @@ _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".JPEG"}
 _FAKE_STEM_RE = re.compile(r"^(.+)_p(\d+)_i\d+$")
 
 
+def native_patch_grid(img: "Image.Image") -> list:
+    """PIL image → [whole image] + 3x3 grid of half-size overlapping windows.
+
+    Cut from the FULL-RESOLUTION image, before CLIP's resize, so each window keeps
+    ~2x the detail of the whole-image view — the opposite regime from cutting the
+    same grid out of the already-downscaled 224px tensor (see
+    patch_attribution.model.patch_views). Geometry is the same: windows of half the
+    side at offsets 0, quarter, half.
+    """
+    w, h = img.size
+    pw, ph = w // 2, h // 2
+    return [img] + [
+        img.crop((x, y, x + pw, y + ph))
+        for y in (0, ph // 2, ph)
+        for x in (0, pw // 2, pw)
+    ]
+
+
 # ── CSV loaders ───────────────────────────────────────────────────────────────
 
 def _load_by_stem(captions_dir: Path, csv_name: str, cap_col: int) -> dict[str, str]:
@@ -175,6 +193,7 @@ class IABCLIPDataset(Dataset):
         include_paths: Optional[set] = None,
         require_caption: bool = True,
         train_augment: bool = False,
+        patch_grid: bool = False,
     ):
         """
         split_scheme: "caption" (default) | "stratified"
@@ -223,6 +242,11 @@ class IABCLIPDataset(Dataset):
         if train_augment and degraded:
             raise ValueError("train_augment and degraded>0 are mutually exclusive")
         self.train_augment = train_augment
+        # patch_grid=True → 'pixel_values' is (10, 3, 224, 224): the whole image plus
+        # a 3x3 grid cut at FULL resolution (--patch_source native). One decode, ten
+        # resizes. Off by default: the multi-view models can also cut the grid out of
+        # the 224px tensor themselves, which costs nothing but keeps less detail.
+        self.patch_grid = patch_grid
         # Path filters (RELATIVE to root), for byte-fair training vs the baselines
         # (see comparison/training/scripts/dump_split_manifest.py):
         #   include_paths — allowlist: keep ONLY these images (e.g. the harness TRAIN
@@ -422,7 +446,11 @@ class IABCLIPDataset(Dataset):
         elif self.train_augment:
             img = random_degradation(img)
 
-        pixel = self.processor(images=img, return_tensors="pt")["pixel_values"][0]
+        if self.patch_grid:
+            pixel = self.processor(images=native_patch_grid(img),
+                                   return_tensors="pt")["pixel_values"]     # (10,3,H,W)
+        else:
+            pixel = self.processor(images=img, return_tensors="pt")["pixel_values"][0]
 
         raw_cap = self._get_raw_caption(img_path, generator, semantic)
         if is_real:

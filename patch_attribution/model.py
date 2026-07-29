@@ -58,9 +58,14 @@ class PatchAttributionCLIP(AttributionCLIP):
         self.patch_size = patch_size
 
     def encode_views(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """(B, C, H, W) → (B, V, D_hyp). All views go through the shared backbone
-        in a single batch."""
-        views = patch_views(pixel_values, self.patch_size)
+        """→ (B, V, D_hyp). All views go through the shared backbone in one batch.
+
+        Accepts either (B, C, H, W) — views are cut here from the preprocessed
+        tensor — or (B, V, C, H, W), when the dataset already built the grid from
+        the full-resolution image (`--patch_source native`).
+        """
+        views = (pixel_values if pixel_values.dim() == 5
+                 else patch_views(pixel_values, self.patch_size))
         B, V = views.shape[:2]
         x, _ = self.encode_image(views.flatten(0, 1))
         return x.view(B, V, -1)

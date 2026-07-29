@@ -9,7 +9,7 @@ of meaningless metrics.
 import torch
 
 from data.spectral import spectrum
-from patch_attribution.model import patch_views, view_logits
+from patch_attribution.model import PatchAttributionCLIP, patch_views, view_logits
 
 
 def test_patch_grid():
@@ -34,6 +34,62 @@ def test_patch_grid():
             assert abs(got - want) < 500, \
                 f"patch_size={ps} view {k}: corner {got:.0f}, expected ≈{want}"
         assert 2 * s + ps <= H, f"grid overruns the input for patch_size={ps}"
+
+
+class _StubBackbone:
+    """encode_views without CLIP: the embedding of a view is its first 4 pixels."""
+    patch_size = 112
+
+    def encode_image(self, x):
+        return x.flatten(1)[:, :4], None
+
+
+def test_view_source_dispatch():
+    """4-D input → the model cuts the grid; 5-D input → the dataset already did.
+
+    If the 5-D branch were missing, a native-grid batch would be re-cropped and
+    silently turn 10 full-resolution views into 100 nonsense ones.
+    """
+    stub = _StubBackbone()
+    out4 = PatchAttributionCLIP.encode_views(stub, torch.randn(2, 3, 224, 224))
+    assert out4.shape == (2, 10, 4), out4.shape
+
+    pre = torch.randn(2, 10, 3, 224, 224)
+    out5 = PatchAttributionCLIP.encode_views(stub, pre)
+    assert out5.shape == (2, 10, 4), out5.shape
+    assert torch.equal(out5, pre.flatten(0, 1).flatten(1)[:, :4].view(2, 10, 4)), \
+        "5-D input must be used as-is, not re-cropped"
+    # a different view count must pass through untouched too
+    assert PatchAttributionCLIP.encode_views(stub, torch.randn(2, 3, 3, 224, 224)
+                                             ).shape == (2, 3, 4)
+
+
+def test_native_grid_geometry():
+    """The PIL-side grid must match the tensor-side one: same offsets, same
+    row-major order, whole image first."""
+    from PIL import Image
+    from data.iab_clip_dataset import native_patch_grid
+
+    # Non-square on purpose, and every pixel encodes its own coordinates, so each
+    # window is identified by its corner alone.
+    W, H = 64, 48
+    img = Image.new("RGB", (W, H))
+    for y in range(H):
+        for x in range(W):
+            img.putpixel((x, y), (x, y, 0))
+
+    views = native_patch_grid(img)
+    assert len(views) == 10, len(views)
+    assert views[0].size == (W, H) and views[0].getpixel((0, 0)) == (0, 0, 0), \
+        "view 0 must be the whole image"
+
+    pw, ph = W // 2, H // 2
+    expected = [(x, y) for y in (0, ph // 2, ph) for x in (0, pw // 2, pw)]
+    for k, (ex, ey) in enumerate(expected, start=1):
+        assert views[k].size == (pw, ph), views[k].size
+        assert views[k].getpixel((0, 0)) == (ex, ey, 0), \
+            f"window {k} starts at {views[k].getpixel((0, 0))[:2]}, expected {(ex, ey)}"
+        assert ex + pw <= W and ey + ph <= H, "window falls outside the image"
 
 
 def test_view_label_alignment():
@@ -78,6 +134,8 @@ def test_spectrum():
 
 if __name__ == "__main__":
     test_patch_grid()
+    test_view_source_dispatch()
+    test_native_grid_geometry()
     test_view_label_alignment()
     test_view_logits()
     test_spectrum()

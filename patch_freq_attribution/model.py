@@ -38,7 +38,13 @@ class PatchFreqAttributionCLIP(PatchAttributionCLIP):
             self.projection_spec[-1].bias.zero_()
 
     def _clip_spectrum(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        """CLIP-space embedding of the image's spectrum (B, D_clip)."""
+        """CLIP-space embedding of the image's spectrum (B, D_clip).
+
+        With `--patch_source native` the input already carries the view axis; the
+        spectrum is always taken on the whole-image view (index 0), never on a crop.
+        """
+        if pixel_values.dim() == 5:
+            pixel_values = pixel_values[:, 0]
         return self._clip_image(spectrum(pixel_values))
 
     def encode_spectrum(self, pixel_values: torch.Tensor) -> torch.Tensor:

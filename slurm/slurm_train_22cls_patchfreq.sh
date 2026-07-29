@@ -7,11 +7,19 @@
 # = sum of the two branches' logits with a learned per-branch temperature (the CE
 # term sees detached angles, so it trains only those two scalars).
 #
-# COST: 11 forward passes per sample — see the budget note in
-# slurm_train_22cls_patch.sh. Slightly shorter epochs than the patch run.
+# RECIPE = identical to the single-view reference run (full train split, 5 epochs,
+# effective batch 256, lr 3e-4 → 6830 optimizer steps), so the only variable is the
+# views. 11 forwards/sample x 349888 x 5 = 19.2M forwards ~= 23h at the measured
+# 210-238 forward/s on 2 GPUs → one job. See the budget note in
+# slurm_train_22cls_patch.sh for why the first attempt collapsed.
 #
 # The pixel anchors reuse the centroid cache; the SPECTRAL anchors need their own
 # pre-pass (~20 min, cached in ANCHOR_CACHE_SPEC) the first time.
+#
+# ⚠️ RUN tests/inspect_centroids.py ON $ANCHOR_CACHE_SPEC FIRST. In the failed run
+# the spectral branch sat at 1/22 = chance for four epochs while its loss fell: if
+# the spectral centroids are near-parallel (off-diagonal cosine ~0.99+), the
+# FFT-into-CLIP embedding carries no class signal and this job is 23h wasted.
 #
 # Submit:  sbatch slurm/slurm_train_22cls_patchfreq.sh
 # Fusion ablation (plain sum, temperatures frozen at 1):
@@ -85,8 +93,7 @@ CUDA_VISIBLE_DEVICES=0,1 python -m patch_freq_attribution.train \
     --target_norm     0.0 \
     --batch_size      16 \
     --grad_accum      16 \
-    --samples_per_epoch 44000 \
-    --num_epochs      4 \
+    --num_epochs      5 \
     --lr              3e-4 \
     --weight_decay    0.01 \
     --num_workers     8 \

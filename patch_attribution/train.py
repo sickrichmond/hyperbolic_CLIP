@@ -26,6 +26,7 @@ import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from transformers import CLIPTokenizer
 
 from data.iab_clip_dataset import IABCLIPDataset
 from geometry.lorentz import exp_map0, half_aperture
@@ -63,7 +64,19 @@ def add_common_args(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
     p.add_argument("--target_norm",    type=float, default=0.0)
     p.add_argument("--patch_size",     type=int,   default=112,
                    help="Side of the 3x3 grid crops in the 224px input. 112 = "
-                        "overlapping quarter-image windows, 75 = disjoint ninths.")
+                        "overlapping quarter-image windows, 75 = disjoint ninths. "
+                        "Only used with --patch_source tensor.")
+    p.add_argument("--patch_source",   choices=["tensor", "native"], default="tensor",
+                   help="Where the 3x3 grid is cut. 'tensor': out of the 224px "
+                        "preprocessed image — free, but the crops hold LESS detail "
+                        "than the whole-image view. 'native': out of the "
+                        "full-resolution image before CLIP's resize — the crops hold "
+                        "~2x the detail of the whole view, at ~2-3x dataloader CPU.")
+    p.add_argument("--anchor_init", choices=["text", "image_centroid"],
+                   default="image_centroid",
+                   help="'image_centroid': free anchors initialised at the per-class "
+                        "mean image embedding. 'text': the class templates encoded by "
+                        "CLIP at every step, as in train_attribution.py.")
     p.add_argument("--anchor_init_norm",  type=float, default=2.0,
                    help="Common tangent radius the centroid anchors start at; only "
                         "their directions carry information, and the raw radius at "
@@ -110,6 +123,7 @@ def build_datasets(args) -> tuple[IABCLIPDataset, IABCLIPDataset]:
         generators=args.generators, semantics=args.semantics,
         processor_name=args.clip_name, max_per_class=args.max_per_class,
         split="all", seed=args.seed, require_caption=False,
+        patch_grid=(args.patch_source == "native"),
     )
     print("\n=== Train split ===")
     train_ds = IABCLIPDataset(include_paths=set(man["train"]), **common)
@@ -158,6 +172,36 @@ def lift(anchor_tangent: torch.Tensor, curv: float) -> torch.Tensor:
         return exp_map0(anchor_tangent.float(), curv=curv)
 
 
+class Anchors:
+    """The class anchors, either free tangent parameters or the text templates.
+
+    Text anchors are not parameters: they are re-encoded from the templates at
+    every step, so they move as the text encoder's LoRA moves (exactly what
+    train_attribution.py does).
+    """
+
+    def __init__(self, tangent, tokenizer=None, texts=None, device="cuda", curv=1.0):
+        self.tangent, self.curv = tangent, curv
+        self.params = [tangent] if tangent is not None else []
+        self.ids = self.mask = None
+        if tangent is None:
+            tok = tokenizer(texts, return_tensors="pt", padding="max_length",
+                            truncation=True, max_length=77)
+            self.ids = tok["input_ids"].to(device)
+            self.mask = tok["attention_mask"].to(device)
+
+    @property
+    def mode(self) -> str:
+        return "image_centroid" if self.tangent is not None else "text"
+
+    def points(self, core) -> torch.Tensor:
+        """(K, D) on the hyperboloid, under the CURRENT weights."""
+        if self.tangent is not None:
+            return lift(self.tangent, self.curv)
+        x_anc, _ = core.encode_text(self.ids, self.mask)
+        return x_anc
+
+
 @torch.no_grad()
 def run_validation(core, val_loader, x_anc, class_names, device) -> dict:
     """Balanced accuracy under the multi-view decision rule (mean of -xi)."""
@@ -180,7 +224,7 @@ def run_validation(core, val_loader, x_anc, class_names, device) -> dict:
     }
 
 
-def save_checkpoint(path, core, anchor_tangent, class_names, args, val, epoch, extra=None):
+def save_checkpoint(path, core, anchors, class_names, args, val, epoch, extra=None):
     torch.save(
         {
             "lora_state":     core.clip.state_dict(),
@@ -192,10 +236,14 @@ def save_checkpoint(path, core, anchor_tangent, class_names, args, val, epoch, e
             "curv":           args.curv,
             "min_radius":     args.min_radius,
             "patch_size":     args.patch_size,
+            "patch_source":   args.patch_source,
             "class_names":    class_names,
-            "anchor_init":    "image_centroid",
-            # tangent-space anchors in class_names order; inference lifts them.
-            "anchor_tangent": anchor_tangent.detach().cpu(),
+            "anchor_init":    anchors.mode,
+            # Centroid mode only: tangent-space anchors in class_names order, which
+            # inference lifts. None in text mode, and test_hypclip.load_anchors then
+            # falls back to re-encoding the templates.
+            "anchor_tangent": (anchors.tangent.detach().cpu()
+                               if anchors.tangent is not None else None),
             "generators":     args.generators,
             "semantics":      args.semantics,
             "val_balanced":   val["balanced_acc"],
@@ -210,9 +258,9 @@ def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    class_names, _ = build_anchors(args.generators)
+    class_names, anchor_texts = build_anchors(args.generators)
     name_to_idx = {n: i for i, n in enumerate(class_names)}
-    print(f"Class anchors: image centroids (text-free), {len(class_names)} classes")
+    print(f"Class anchors: {args.anchor_init}, {len(class_names)} classes")
 
     train_ds, val_ds = build_datasets(args)
     train_loader, val_loader = build_loaders(args, train_ds, val_ds)
@@ -222,17 +270,21 @@ def main():
         hyperbolic_dim=args.hyperbolic_dim, curv=args.curv, patch_size=args.patch_size,
     ).to(device)
 
+    tangent = None
     if args.init_from:
         ckpt = torch.load(args.init_from, map_location=device, weights_only=False)
-        model.clip.load_state_dict(ckpt["lora_state"])
-        model.projection.load_state_dict(ckpt["projection"])
         if ckpt["class_names"] != class_names:
             raise ValueError(f"--init_from was trained on {ckpt['class_names']}")
-        anchor_tangent = nn.Parameter(ckpt["anchor_tangent"].to(device).float())
+        model.clip.load_state_dict(ckpt["lora_state"])
+        model.projection.load_state_dict(ckpt["projection"])
+        if ckpt["anchor_tangent"] is not None:
+            tangent = nn.Parameter(ckpt["anchor_tangent"].to(device).float())
         print(f"Warm start from {args.init_from} "
               f"(epoch {ckpt['epoch']}, val_balanced {100*ckpt['val_balanced']:.1f}%)")
-    else:
-        anchor_tangent = init_anchors(model, train_ds, class_names, args, device)
+    elif args.anchor_init == "image_centroid":
+        tangent = init_anchors(model, train_ds, class_names, args, device)
+    anchors = Anchors(tangent, CLIPTokenizer.from_pretrained(args.clip_name),
+                      anchor_texts, device, args.curv)
 
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs")
@@ -240,20 +292,27 @@ def main():
     core = model.module if isinstance(model, nn.DataParallel) else model
     core.print_trainable_summary()
 
-    trainable = core.trainable_parameters() + [anchor_tangent]
+    trainable = core.trainable_parameters() + anchors.params
     optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=args.weight_decay)
-    opt_steps = (len(train_loader) // args.grad_accum) * args.num_epochs
+    steps_per_epoch = len(train_loader) // args.grad_accum
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=max(opt_steps, 1), eta_min=1e-6)
+        optimizer, T_max=max(steps_per_epoch * args.num_epochs, 1), eta_min=1e-6)
     scaler = GradScaler("cuda")
     cone_loss = EntailmentConeLoss(
         curv=args.curv, min_radius=args.min_radius, margin=args.margin,
         lambda_neg=args.lambda_neg, lambda_norm=args.lambda_norm,
         target_norm=args.target_norm,
     )
-    print(f"Views/sample=10 (1 global + 9 patches of {args.patch_size}px)  "
+    grid = (f"9 patches of {args.patch_size}px from the 224 tensor"
+            if args.patch_source == "tensor" else
+            "9 half-size patches from the full-resolution image")
+    # The optimizer-step count is the number that actually decides whether a run
+    # converges; printing it makes an over-large grad_accum obvious immediately.
+    print(f"Views/sample=10 (1 global + {grid})  "
           f"micro-batch={args.batch_size} x grad_accum={args.grad_accum} "
-          f"→ effective batch {args.batch_size * args.grad_accum}")
+          f"→ effective batch {args.batch_size * args.grad_accum}, "
+          f"{steps_per_epoch} optimizer steps/epoch "
+          f"({steps_per_epoch * args.num_epochs} total)")
 
     best_balanced = -1.0
     out_path = Path(args.output)
@@ -271,11 +330,11 @@ def main():
                                   device=device, dtype=torch.long)
             with autocast("cuda"):
                 x = model(batch["pixel_values"].to(device))            # (B, V, D)
+                x_anc = anchors.points(core)
             V = x.shape[1]
             # Every view is an independent sample of its class: fold the view axis
             # into the batch and repeat the labels. The cone loss needs no change.
-            loss, stats = cone_loss(x.reshape(-1, x.shape[-1]),
-                                    lift(anchor_tangent, args.curv),
+            loss, stats = cone_loss(x.reshape(-1, x.shape[-1]), x_anc,
                                     labels.repeat_interleave(V))
 
             scaler.scale(loss / args.grad_accum).backward()
@@ -304,9 +363,10 @@ def main():
               f"ξ_view→anc={avg['mean_xi_img_anc']:.3f}  "
               f"‖t̄_anc‖={avg['mean_anc_norm']:.2f}")
 
+        # eval() first: text anchors must not be encoded with LoRA dropout active.
         core.eval()
         with torch.no_grad():
-            x_anc_val = exp_map0(anchor_tangent.float(), curv=args.curv)
+            x_anc_val = anchors.points(core)
         val = run_validation(core, val_loader, x_anc_val, class_names, device)
         print(f"  val: overall={100*val['overall_acc']:.1f}%  "
               f"balanced={100*val['balanced_acc']:.1f}%  ({val['total']} samples)")
@@ -315,7 +375,7 @@ def main():
 
         if val["balanced_acc"] > best_balanced:
             best_balanced = val["balanced_acc"]
-            save_checkpoint(out_path, core, anchor_tangent, class_names, args, val, epoch)
+            save_checkpoint(out_path, core, anchors, class_names, args, val, epoch)
             print(f"  ↳ saved checkpoint (balanced val={100*best_balanced:.1f}%) → {out_path}")
 
     print(f"\nBest balanced val accuracy: {100*best_balanced:.1f}%  ({out_path})")
