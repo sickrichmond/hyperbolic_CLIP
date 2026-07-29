@@ -1,7 +1,8 @@
 import os
-import time
 from PIL import Image
 from torch.utils.data import Dataset
+
+from data.image_io import open_image_retry
 import re
 from io import BytesIO
 from PIL import ImageFilter
@@ -226,21 +227,9 @@ class ImageAttributionDataset(Dataset):
         return image  
 
     def _open_image(self, img_path, retries=8, backoff=0.5):
-        # Leonardo's Lustre $WORK filesystem sporadically returns transient
-        # PermissionError/OSError on individual files under heavy parallel I/O
-        # (a file readable for many epochs can suddenly fail once). Retry the
-        # SAME file with escalating backoff — no skipping/substitution, so the
-        # dataset stays intact. If it is still unreadable after all retries the
-        # error propagates and the job fails, signalling a real permission issue
-        # to fix on disk rather than silently dropping data.
-        last_err = None
-        for attempt in range(retries):
-            try:
-                return Image.open(img_path).convert("RGB")
-            except (PermissionError, OSError) as e:
-                last_err = e
-                time.sleep(backoff * (attempt + 1))
-        raise last_err
+        # Same retry policy as every other loader in the project — see
+        # data/image_io.py for why it exists and why it never skips a file.
+        return open_image_retry(img_path, retries=retries, backoff=backoff)
 
     def __getitem__(self, idx):
         img_path, label, semantic_label, semantic_subclass = self.samples[idx]

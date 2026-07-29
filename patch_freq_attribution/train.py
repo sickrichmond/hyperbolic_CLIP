@@ -88,6 +88,11 @@ def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
+    # See the note in patch_attribution.train.main: reproducible init and sampler
+    # order, not bit-exact across GPU reductions.
+    torch.manual_seed(args.seed)
+    print(f"Seed: {args.seed}")
+
     class_names, anchor_texts = build_anchors(args.generators)
     name_to_idx = {n: i for i, n in enumerate(class_names)}
     print(f"Class anchors: pixel={args.anchor_init}, spectral=image_centroid, "

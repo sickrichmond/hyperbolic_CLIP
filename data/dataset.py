@@ -5,8 +5,9 @@ from pathlib import Path
 import pandas as pd
 import torch
 from torch.utils.data import Dataset, Sampler, WeightedRandomSampler
-from PIL import Image
 from transformers import CLIPImageProcessor
+
+from data.image_io import open_image_retry
 
 
 class OpenFakePairedDataset(Dataset):
@@ -51,7 +52,7 @@ class OpenFakePairedDataset(Dataset):
     def __getitem__(self, idx):
         row = self.manifest.iloc[idx]
         img_path = self.root / row["image_path"]
-        img = Image.open(img_path).convert("RGB")
+        img = open_image_retry(img_path)
         pixel = self.processor(images=img, return_tensors="pt")["pixel_values"][0]
         return {
             "pixel_values": pixel,

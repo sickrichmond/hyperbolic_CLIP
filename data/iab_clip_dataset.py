@@ -39,6 +39,7 @@ from PIL import Image
 from transformers import CLIPImageProcessor, CLIPTokenizer
 
 from data.degradations import apply_degradation, random_degradation
+from data.image_io import open_image_retry
 
 # ── Real-image lookup: semantic key → (CSV file, caption column) ──────────────
 _REAL_CSV: dict[str, tuple[str, int]] = {
@@ -429,7 +430,9 @@ class IABCLIPDataset(Dataset):
         img_path, generator, semantic = self.samples[idx]
         is_real = generator == "real"
 
-        img = Image.open(img_path).convert("RGB")
+        # Retrying open: Lustre returns transient EACCES on individual files under
+        # heavy parallel I/O, which killed three 20h jobs at ~40 minutes in.
+        img = open_image_retry(img_path)
 
         # grok3 images carry a visible watermark in the bottom-right corner.
         # Matching the IAB benchmark, crop it out (100 px wide × 50 px tall)

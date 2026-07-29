@@ -273,6 +273,11 @@ def save_checkpoint(path, core, anchors, class_names, args, val, epoch, extra=No
 def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Covers the projection-head init and the balanced sampler's draw order (the
+    # dataset splits already seed their own RNG). NOT bit-exact: GPU reduction
+    # order still varies, so two seeded runs agree closely, not to the last digit.
+    torch.manual_seed(args.seed)
+    print(f"Seed: {args.seed}")
 
     class_names, anchor_texts = build_anchors(args.generators)
     name_to_idx = {n: i for i, n in enumerate(class_names)}
