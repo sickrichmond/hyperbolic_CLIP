@@ -4,12 +4,23 @@
 # Same protocol as every baseline (get_dataloader + calculate_metrics_for_test),
 # levels 0..6, output files in the baselines' format.
 #
-# Defaults to the patch model. For the pixel+spectrum one:
+# ANCHOR_INIT / PATCH_SOURCE mirror slurm_train_22cls_patch.sh and derive BOTH the
+# checkpoint name and the output dir, so the four runs of the ablation matrix never
+# overwrite each other's result files:
+#   sbatch slurm/slurm_eval_22cls_patch.sh                                    # P1
+#   sbatch --export=ALL,ANCHOR_INIT=text slurm/slurm_eval_22cls_patch.sh      # P2
+#   sbatch --export=ALL,PATCH_SOURCE=native slurm/slurm_eval_22cls_patch.sh   # P3
+#   sbatch --export=ALL,ANCHOR_INIT=text,PATCH_SOURCE=native \
+#          slurm/slurm_eval_22cls_patch.sh                                    # P4
+#
+# For the pixel+spectrum model (its checkpoint keeps a flat name):
 #   sbatch --export=ALL,MODULE=patch_freq_attribution.eval,\
 # CKPT=$WORK/hyp_fine_tuning/checkpoints/attribution_22cls_patchfreq_vitl14.pt,\
-# LOGDIR=$WORK/outputs/hypclip_patchfreq slurm/slurm_eval_22cls_patch.sh
+# LOGDIR=$WORK/outputs/hypclip_patchfreq_22cls slurm/slurm_eval_22cls_patch.sh
 #
-# Submit:  sbatch slurm/slurm_eval_22cls_patch.sh
+# The VIEW SOURCE is read from the checkpoint, never from a flag: evaluating a
+# native-grid model on 224-tensor views would silently produce a full set of wrong
+# metrics. CKPT/LOGDIR can still be overridden directly.
 # ============================================================================
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -36,8 +47,11 @@ export IAB_EXCLUDE_GENERATORS=dalle3        # <-- 22-class (anchors + test set)
 REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
 DATA=$FAST/datasets/iab_dataset
 MODULE=${MODULE:-patch_attribution.eval}
-CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_22cls_patch_vitl14.pt}
-LOGDIR=${LOGDIR:-$WORK/outputs/hypclip_patch_22cls}
+ANCHOR_INIT=${ANCHOR_INIT:-image_centroid}   # image_centroid | text
+PATCH_SOURCE=${PATCH_SOURCE:-tensor}         # tensor | native
+SUFFIX=${ANCHOR_INIT}_${PATCH_SOURCE}
+CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_22cls_patch_${SUFFIX}_vitl14.pt}
+LOGDIR=${LOGDIR:-$WORK/outputs/hypclip_patch_${SUFFIX}_22cls}
 
 mkdir -p $LOGDIR
 cd $REPO
