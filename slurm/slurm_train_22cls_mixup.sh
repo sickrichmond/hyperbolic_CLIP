@@ -17,8 +17,15 @@
 #
 # ~1.75M forwards at the measured 210 forward/s on 2 GPUs → ~2.5h.
 #
+# MIXUP_AT decides WHERE the batch is mixed, and it matters more than alpha: mixup
+# only regularises the layers ABOVE the mixing point. 'clip' (default) mixes the CLIP
+# embedding so the projection head is trained on mixed inputs; 'tangent' mixes after
+# the head, where nothing trainable is left, and reproduces the first run
+# (acc DS0.25 0.731 / Blur3 0.767 — both 1st — but JPEG65 0.161 vs 0.186).
+#
 # Submit:  sbatch slurm/slurm_train_22cls_mixup.sh
 #          sbatch --export=ALL,MIXUP_ALPHA=0.4 slurm/slurm_train_22cls_mixup.sh
+#          sbatch --export=ALL,MIXUP_AT=tangent slurm/slurm_train_22cls_mixup.sh
 # ============================================================================
 
 #SBATCH --account=EUHPC_D35_189
@@ -51,7 +58,10 @@ CAPS=$WORK/hyp_fine_tuning/iab_captions
 OUT=$WORK/hyp_fine_tuning/checkpoints
 MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 MIXUP_ALPHA=${MIXUP_ALPHA:-0.2}
-CKPT=$OUT/attribution_22cls_mixup${MIXUP_ALPHA}_vitl14.pt
+MIXUP_AT=${MIXUP_AT:-clip}          # clip | tangent
+SUFFIX=$MIXUP_ALPHA
+[ "$MIXUP_AT" = tangent ] || SUFFIX=${MIXUP_ALPHA}_${MIXUP_AT}
+CKPT=$OUT/attribution_22cls_mixup${SUFFIX}_vitl14.pt
 
 mkdir -p $OUT
 cd $REPO
@@ -80,6 +90,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --target_norm     4.0 \
     --no_captions \
     --mixup_alpha     $MIXUP_ALPHA \
+    --mixup_at        $MIXUP_AT \
     --batch_size      256 \
     --num_epochs      5 \
     --lr              3e-4 \

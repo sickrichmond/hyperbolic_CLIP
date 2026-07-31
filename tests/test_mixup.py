@@ -58,6 +58,23 @@ def test_mix_moves_points_and_pairs_labels():
     assert (labels_b == perm).all(), "second target is not the permuted label"
 
 
+def test_clip_level_mix_is_unit_norm():
+    """The 'clip' mode feeds the projection head, which has only ever seen unit
+    vectors. A convex combination of two unit vectors is shorter, so the mix MUST be
+    re-normalised — otherwise mixup silently doubles as a norm regulariser."""
+    torch.manual_seed(0)
+    e = torch.nn.functional.normalize(torch.randn(16, 32), dim=-1)
+    perm = torch.randperm(16)
+    for lam in (0.5, 0.2, 0.8):
+        raw = lam * e + (1 - lam) * e[perm]
+        assert (raw.norm(dim=-1) <= 1.0 + 1e-5).all()
+        mixed = torch.nn.functional.normalize(raw, dim=-1)
+        assert torch.allclose(mixed.norm(dim=-1), torch.ones(16), atol=1e-5)
+    # λ=1 stays exactly the input, so 'clip' mode is the identity too
+    assert torch.allclose(
+        torch.nn.functional.normalize(1.0 * e + 0.0 * e[perm], dim=-1), e, atol=1e-6)
+
+
 def test_gradient_flows():
     x = exp_map0(torch.randn(8, 32, requires_grad=True), curv=CURV)
     x.retain_grad()
@@ -76,5 +93,6 @@ if __name__ == "__main__":
     test_log_exp_roundtrip()
     test_lam_one_is_identity()
     test_mix_moves_points_and_pairs_labels()
+    test_clip_level_mix_is_unit_norm()
     test_gradient_flows()
     print("ok")

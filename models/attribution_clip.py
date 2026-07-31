@@ -105,6 +105,7 @@ class AttributionCLIP(nn.Module):
         pixel_values: torch.Tensor,
         caption_ids: torch.Tensor | None = None,
         caption_mask: torch.Tensor | None = None,
+        return_clip_emb: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         DataParallel-friendly forward.
@@ -113,9 +114,16 @@ class AttributionCLIP(nn.Module):
         Hierarchical mode: returns (x_img, x_cap), both (B, D_hyp). Both inputs
         are sliced along dim 0 by DataParallel — same B for both.
 
+        return_clip_emb stops one step earlier and returns the L2-normalised CLIP
+        embedding (B, D_clip), so a caller can mix samples BEFORE the projection
+        head and then finish with to_hyperbolic() on the primary GPU. The ViT stays
+        sharded across GPUs, which is the only expensive part.
+
         Anchors are NOT processed here: they have shape (K, *) not (B, *) and
         must be encoded separately on the primary GPU via encode_text().
         """
+        if return_clip_emb:
+            return self._clip_image(pixel_values)
         x_img, _ = self.encode_image(pixel_values)
         if caption_ids is None:
             return x_img

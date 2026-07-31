@@ -117,6 +117,14 @@ def parse_args():
                         "with the baselines: it is the mechanism repmix uses (its ImageNet-C "
                         "perturbation is commented out in dataset_repmix.py) and repmix is the "
                         "only method that holds up under JPEG without seeing degradations.")
+    p.add_argument("--mixup_at", choices=["clip", "tangent"], default="clip",
+                   help="WHERE the batch is mixed. Mixup only regularises the layers ABOVE the "
+                        "mixing point, since they are the ones that receive a mixed vector. "
+                        "'clip' mixes the CLIP embedding, so the projection head is trained on "
+                        "mixed inputs. 'tangent' mixes after the head, where the only thing left "
+                        "is the parameter-free exp_map0 — it reshapes the loss surface but no "
+                        "layer ever processes a mixed vector. 'tangent' reproduces the "
+                        "attribution_22cls_mixup0.2 checkpoint; 'clip' is the better default.")
     p.add_argument("--lambda_norm",    type=float, default=0.0,
                    help="Weight of the anchor-norm regulariser (0 disables it).")
     p.add_argument("--target_norm",    type=float, default=0.0,
@@ -434,7 +442,8 @@ def main():
             raise ValueError("--mixup_alpha needs --no_captions: mixing images but not their "
                              "captions makes L_img_in_cap meaningless.")
         mixup_beta = torch.distributions.Beta(args.mixup_alpha, args.mixup_alpha)
-        print(f"Tangent-space mixup: α={args.mixup_alpha}")
+        print(f"Mixup: α={args.mixup_alpha} at '{args.mixup_at}'")
+    mix_at_clip = args.mixup_alpha > 0 and args.mixup_at == "clip"
 
     # Tokenized anchors stay constant; only the text-encoder weights change.
     tokenizer = CLIPTokenizer.from_pretrained(args.clip_name)
@@ -470,6 +479,11 @@ def main():
             with autocast("cuda"):
                 if use_caps:
                     x_img, x_cap = model(pixel, cap_ids, cap_mask)
+                elif mix_at_clip:
+                    # Stop before the projection head; the mix happens below and
+                    # to_hyperbolic finishes the job on the primary GPU.
+                    clip_emb = model(pixel, return_clip_emb=True)
+                    x_cap = None
                 else:
                     x_img = model(pixel)
                     x_cap = None
@@ -481,16 +495,27 @@ def main():
                 with autocast("cuda", enabled=False):
                     x_anc = exp_map0(anchor_tangent.float(), curv=args.curv)
             if args.mixup_alpha > 0:
-                # Mixup lives in the tangent space at the origin: exp_map0 is radial,
-                # so a convex combination there is the manifold-mixup analogue (mixing
-                # on the hyperboloid itself would need a geodesic). EntailmentConeLoss
-                # is untouched — the mixed target is expressed by calling it twice,
-                # exactly as the multi-view trainer folds views into the batch.
+                # EntailmentConeLoss is untouched — the mixed target is expressed by
+                # calling it twice, exactly as the multi-view trainer folds views into
+                # the batch. Only the mixing POINT differs between the two modes.
                 with autocast("cuda", enabled=False):
                     lam = mixup_beta.sample().item()
-                    perm = torch.randperm(x_img.size(0), device=device)
-                    t = log_map0(x_img.float(), curv=args.curv)
-                    x_mix = exp_map0(lam * t + (1 - lam) * t[perm], curv=args.curv)
+                    if mix_at_clip:
+                        e = clip_emb.float()
+                        perm = torch.randperm(e.size(0), device=device)
+                        # Re-normalise: _clip_image only ever emits unit vectors, and
+                        # a convex combination of two of them is SHORTER. Without this
+                        # every mixed sample would get a smaller tangent and land closer
+                        # to the origin, turning mixup into a norm regulariser as well.
+                        mixed = F.normalize(lam * e + (1 - lam) * e[perm], dim=-1)
+                        x_mix, _ = core.to_hyperbolic(mixed)
+                    else:
+                        # Tangent space at the origin: exp_map0 is radial, so a convex
+                        # combination there is the manifold-mixup analogue (mixing on
+                        # the hyperboloid itself would need a geodesic).
+                        perm = torch.randperm(x_img.size(0), device=device)
+                        t = log_map0(x_img.float(), curv=args.curv)
+                        x_mix = exp_map0(lam * t + (1 - lam) * t[perm], curv=args.curv)
                 loss_a, stats = cone_loss(x_mix, x_anc, labels)
                 loss_b, _     = cone_loss(x_mix, x_anc, labels[perm])
                 loss = lam * loss_a + (1 - lam) * loss_b
@@ -584,6 +609,7 @@ def main():
                                         if anchor_tangent is not None else None),
                     "train_augment":   args.train_augment,
                     "mixup_alpha":     args.mixup_alpha,
+                    "mixup_at":        args.mixup_at,
                     "generators":      args.generators,
                     "semantics":       args.semantics,
                     "val_balanced":    val["balanced_acc"],
