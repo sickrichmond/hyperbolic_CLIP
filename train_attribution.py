@@ -32,7 +32,7 @@ from tqdm import tqdm
 from transformers import CLIPTokenizer
 
 from data.iab_clip_dataset import IABCLIPDataset
-from geometry.lorentz import exp_map0, half_aperture
+from geometry.lorentz import exp_map0, half_aperture, log_map0
 from models.attribution_clip import AttributionCLIP
 from losses.attribution_loss import EntailmentConeLoss, predict_class
 
@@ -109,6 +109,14 @@ def parse_args():
                         "data.degradations.random_degradation) on the TRAIN split only. NOTE: "
                         "these are the test-time corruption families → report such a run with an "
                         "asterisk, it is not head-to-head comparable with the baselines.")
+    p.add_argument("--mixup_alpha",    type=float, default=0.0,
+                   help="Manifold mixup in the tangent space at the origin (0 disables it). "
+                        "λ~Beta(α,α) mixes the batch with a permutation of itself and the cone "
+                        "loss is evaluated twice, weighted λ / 1-λ. Unlike --train_augment this "
+                        "shows the model NO corruption, so a run stays head-to-head comparable "
+                        "with the baselines: it is the mechanism repmix uses (its ImageNet-C "
+                        "perturbation is commented out in dataset_repmix.py) and repmix is the "
+                        "only method that holds up under JPEG without seeing degradations.")
     p.add_argument("--lambda_norm",    type=float, default=0.0,
                    help="Weight of the anchor-norm regulariser (0 disables it).")
     p.add_argument("--target_norm",    type=float, default=0.0,
@@ -421,6 +429,13 @@ def main():
     else:
         print("Base attribution loss only (no caption terms).")
 
+    if args.mixup_alpha > 0:
+        if use_caps:
+            raise ValueError("--mixup_alpha needs --no_captions: mixing images but not their "
+                             "captions makes L_img_in_cap meaningless.")
+        mixup_beta = torch.distributions.Beta(args.mixup_alpha, args.mixup_alpha)
+        print(f"Tangent-space mixup: α={args.mixup_alpha}")
+
     # Tokenized anchors stay constant; only the text-encoder weights change.
     tokenizer = CLIPTokenizer.from_pretrained(args.clip_name)
     anchor_tok = tokenizer(anchor_texts, return_tensors="pt", padding="max_length",
@@ -465,7 +480,22 @@ def main():
                 # (same reason AttributionCLIP.to_hyperbolic disables autocast).
                 with autocast("cuda", enabled=False):
                     x_anc = exp_map0(anchor_tangent.float(), curv=args.curv)
-            loss, stats = cone_loss(x_img, x_anc, labels, x_cap=x_cap)
+            if args.mixup_alpha > 0:
+                # Mixup lives in the tangent space at the origin: exp_map0 is radial,
+                # so a convex combination there is the manifold-mixup analogue (mixing
+                # on the hyperboloid itself would need a geodesic). EntailmentConeLoss
+                # is untouched — the mixed target is expressed by calling it twice,
+                # exactly as the multi-view trainer folds views into the batch.
+                with autocast("cuda", enabled=False):
+                    lam = mixup_beta.sample().item()
+                    perm = torch.randperm(x_img.size(0), device=device)
+                    t = log_map0(x_img.float(), curv=args.curv)
+                    x_mix = exp_map0(lam * t + (1 - lam) * t[perm], curv=args.curv)
+                loss_a, stats = cone_loss(x_mix, x_anc, labels)
+                loss_b, _     = cone_loss(x_mix, x_anc, labels[perm])
+                loss = lam * loss_a + (1 - lam) * loss_b
+            else:
+                loss, stats = cone_loss(x_img, x_anc, labels, x_cap=x_cap)
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -553,6 +583,7 @@ def main():
                     "anchor_tangent":  (anchor_tangent.detach().cpu()
                                         if anchor_tangent is not None else None),
                     "train_augment":   args.train_augment,
+                    "mixup_alpha":     args.mixup_alpha,
                     "generators":      args.generators,
                     "semantics":       args.semantics,
                     "val_balanced":    val["balanced_acc"],
