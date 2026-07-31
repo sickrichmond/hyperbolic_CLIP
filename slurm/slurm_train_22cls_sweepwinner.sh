@@ -16,6 +16,7 @@
 # ~1.75M forwards at the measured 210 forward/s on 2 GPUs → ~2.5h.
 #
 # Submit:  sbatch slurm/slurm_train_22cls_sweepwinner.sh
+#          sbatch --export=ALL,AUGMENT=1 slurm/slurm_train_22cls_sweepwinner.sh   # -> aug*
 # ============================================================================
 
 #SBATCH --account=EUHPC_D35_189
@@ -48,6 +49,18 @@ CAPS=$WORK/hyp_fine_tuning/iab_captions
 OUT=$WORK/hyp_fine_tuning/checkpoints
 MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 
+# AUGMENT=1 -> random JPEG/blur/downsample on the TRAIN split (data.degradations
+# .random_degradation). Those are the test-time corruption FAMILIES, so the run goes
+# in the tables with an asterisk, like dna* and ours-centroid-aug*.
+AUGMENT=${AUGMENT:-0}
+if [ "$AUGMENT" = 1 ]; then
+    AUG_FLAG=--train_augment
+    CKPT=$OUT/attribution_22cls_sweepwin_aug_vitl14.pt
+else
+    AUG_FLAG=
+    CKPT=$OUT/attribution_22cls_sweepwin_vitl14.pt
+fi
+
 mkdir -p $OUT
 cd $REPO
 
@@ -74,12 +87,13 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --lambda_norm     0.5 \
     --target_norm     4.0 \
     --no_captions \
+    $AUG_FLAG \
     --batch_size      256 \
     --num_epochs      5 \
     --lr              3e-4 \
     --weight_decay    0.01 \
     --num_workers     8 \
     --split_manifest  $MANIFEST \
-    --output          $OUT/attribution_22cls_sweepwin_vitl14.pt
+    --output          $CKPT
 
-echo "Done: $OUT/attribution_22cls_sweepwin_vitl14.pt"
+echo "Done: $CKPT"
