@@ -82,8 +82,12 @@ def main(ckpt_path):
     subset = Subset(test_ds, keep)
     print(f"{len(test_ds)} test images, evaluating on {len(subset)}")
 
+    if 'real' not in names or len(names) != 22:
+        print(f"WARNING: {len(names)} classes — set IAB_EXCLUDE_GENERATORS=dalle3 for the "
+              f"22-class setup the checkpoint was trained on.")
+
     print(f"\n{'quality':>8} {'acc':>8} {'auc':>8} {'recall(real)':>14} {'recall(other)':>14}"
-          f" {'mean |x|':>10} {'pred=real':>10}")
+          f" {'mean |x|':>10} {'pred=real':>10} {'xi(real)':>10} {'xi(true)':>10}")
     for q in QUALITIES:
         base.jpeg_q = q
         base.get_degraded_img = types.MethodType(
@@ -104,14 +108,21 @@ def main(ckpt_path):
                 sems.append(b['semantic_label'].cpu())
 
         all_logits = torch.cat(logits)
+        all_labels = torch.cat(labels)
         auc, acc, ap, _, _, extra = calculate_metrics_for_test(
-            torch.cat(labels), all_logits, torch.cat(sems), need_softmax=True)
+            all_labels, all_logits, torch.cat(sems), need_softmax=True)
         rec = extra['recall_per_class']
         other = [r for i, r in enumerate(rec) if i != real_idx]
         pred_real = (all_logits.argmax(1) == real_idx).float().mean()
+        # logits are -xi, so flip the sign back. Excluding the images that ARE real
+        # keeps xi(real) an honest "how close is everything else to the real cone".
+        xi = -all_logits
+        not_real = all_labels != real_idx
+        xi_real = xi[not_real, real_idx].mean()
+        xi_true = xi.gather(1, all_labels.unsqueeze(1)).squeeze(1)[not_real].mean()
         print(f"{q:>8} {acc:>8.4f} {auc:>8.4f} {rec[real_idx]:>14.3f} "
               f"{sum(other)/len(other):>14.3f} {torch.cat(norms).mean():>10.2f} "
-              f"{pred_real:>10.3f}")
+              f"{pred_real:>10.3f} {xi_real:>10.3f} {xi_true:>10.3f}")
 
 
 if __name__ == '__main__':
