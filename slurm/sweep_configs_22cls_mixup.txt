@@ -1,0 +1,6 @@
+--lr 3e-4 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_neg 1.0 --lambda_norm 0.5 --target_norm 4.0 --mixup_alpha 0.1 --mixup_at clip
+--lr 3e-4 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_neg 1.0 --lambda_norm 0.5 --target_norm 4.0 --mixup_alpha 0.2 --mixup_at clip
+--lr 3e-4 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_neg 1.0 --lambda_norm 0.5 --target_norm 4.0 --mixup_alpha 0.4 --mixup_at clip
+--lr 3e-4 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_neg 1.0 --lambda_norm 0.5 --target_norm 4.0 --mixup_alpha 0.8 --mixup_at clip
+--lr 3e-4 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_neg 1.0 --lambda_norm 0.5 --target_norm 4.0 --mixup_alpha 0.2 --mixup_at tangent
+--lr 3e-4 --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 --curv 1.0 --min_radius 0.5 --margin 0.3 --lambda_neg 1.0 --lambda_norm 0.5 --target_norm 4.0 --mixup_alpha 0.8 --mixup_at tangent

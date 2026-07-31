@@ -10,7 +10,20 @@
 #
 # PREREQUISITE: 22-class manifest (split_manifest_22cls.json). See slurm_train_22cls_base.sh.
 # Submit:  sbatch slurm/slurm_sweep_22cls.sh
-# The array size (0-11) must match the number of lines in sweep_configs_22cls.txt.
+# The array size must match `wc -l` of the chosen config file.
+#
+# Sweep 2 (19 configs, 5 epochs) — extends lr past 3e-4, which was the BOUNDARY of
+# sweep 1 and its monotonic winner, and fills the never-tested lr 3e-4 x lambda_norm 0
+# cell (lambda_norm 0 was worth +4.3 at lr 5e-5, but the winner kept 0.5/4.0):
+#   sbatch --array=0-18%4 --export=ALL,NUM_EPOCHS=5,\
+# SWEEP_CONFIGS=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo/slurm/sweep_configs_22cls_v2.txt \
+#     slurm/slurm_sweep_22cls.sh
+#
+# Mixup sweep (6 configs) — alpha x mixing point. Its base line is sweep 1's winner, so
+# if sweep 2 moves the base, regenerate this file before running it:
+#   sbatch --array=0-5%3 --export=ALL,NUM_EPOCHS=5,\
+# SWEEP_CONFIGS=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo/slurm/sweep_configs_22cls_mixup.txt \
+#     slurm/slurm_sweep_22cls.sh
 # ============================================================================
 
 #SBATCH --account=EUHPC_D35_189
@@ -46,6 +59,10 @@ MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 #   --export=ALL,SWEEP_CONFIGS=$REPO/slurm/sweep_configs_22cls_captions.txt slurm/slurm_sweep_22cls.sh
 # Match --array to `wc -l` of the chosen config file.
 CONFIGS=${SWEEP_CONFIGS:-$REPO/slurm/sweep_configs_22cls.txt}
+# 3 epochs is enough to RANK, but in sweep 1 every top config still had epoch=3 as its
+# best — nothing had converged, so the ranking was of learning SPEED as much as of final
+# quality. Sweep 2 runs at 5, the same length as the final trainings.
+NUM_EPOCHS=${NUM_EPOCHS:-3}
 # Per-config subdir so the two sweeps (base vs captions) don't overwrite each
 # other's sweep_<idx>.pt. collect_sweep.py --dir points at the matching subdir.
 OUT=$WORK/hyp_fine_tuning/checkpoints/sweep/$(basename "$CONFIGS" .txt)
@@ -68,7 +85,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --semantics       COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
     --clip_name       openai/clip-vit-large-patch14 \
     --batch_size      256 \
-    --num_epochs      3 \
+    --num_epochs      $NUM_EPOCHS \
     --weight_decay    0.01 \
     --num_workers     8 \
     --split_manifest  $MANIFEST \
