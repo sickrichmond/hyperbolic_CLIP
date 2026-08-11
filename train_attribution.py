@@ -125,6 +125,14 @@ def parse_args():
                         "is the parameter-free exp_map0 — it reshapes the loss surface but no "
                         "layer ever processes a mixed vector. 'tangent' reproduces the "
                         "attribution_22cls_mixup0.2 checkpoint; 'clip' is the better default.")
+    p.add_argument("--blackout_max",   type=float, default=0.0,
+                   help="Random pixel blackout on the TRAIN split (0 disables it). Per sample "
+                        "λ~U(0, blackout_max) of the pixels are set to BLACK, drawn i.i.d. and "
+                        "shared across the 3 channels. Unlike --train_augment none of the three "
+                        "test corruption families (JPEG/blur/downsample) is involved → no "
+                        "asterisk. Unlike --mixup_alpha the label stays single, so the cone loss "
+                        "is called ONCE: no double positive hinge, and λ is a true intensity "
+                        "instead of a choice of dominant class.")
     p.add_argument("--lambda_norm",    type=float, default=0.0,
                    help="Weight of the anchor-norm regulariser (0 disables it).")
     p.add_argument("--target_norm",    type=float, default=0.0,
@@ -364,6 +372,13 @@ def main():
         print("Train-time augmentation: ON (random JPEG / blur / downsample) — "
               "results are NOT head-to-head comparable with the baselines.")
 
+    # "Black" AFTER the CLIP normalisation is (0 − mean)/std ≈ −1.79, not 0 — zeroing
+    # the normalised tensor would paint the CLIP mean colour (grey) instead.
+    black = -(torch.tensor(train_ds.processor.image_mean, device=device)
+              / torch.tensor(train_ds.processor.image_std, device=device)).view(1, 3, 1, 1)
+    if args.blackout_max > 0:
+        print(f"Blackout: λ~U(0,{args.blackout_max}) per sample")
+
     sampler = make_balanced_sampler(train_ds)
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, sampler=sampler,
@@ -475,6 +490,15 @@ def main():
             cap_mask = batch["attention_mask"].to(device)
             labels   = torch.tensor([name_to_idx[g] for g in batch["generator"]],
                                     device=device, dtype=torch.long)
+
+            if args.blackout_max > 0:
+                # One λ per sample, so a batch carries the whole spectrum of occlusion.
+                # The mask is (B,1,H,W) → broadcast over the channels, i.e. the whole
+                # pixel goes black. Applied on the full batch, before the DataParallel
+                # scatter. The label is untouched: the cone loss below runs once.
+                lam  = torch.rand(pixel.size(0), 1, 1, 1, device=device) * args.blackout_max
+                mask = torch.rand(pixel.size(0), 1, *pixel.shape[-2:], device=device) < lam
+                pixel = torch.where(mask, black.to(pixel.dtype), pixel)
 
             with autocast("cuda"):
                 if use_caps:
@@ -610,6 +634,7 @@ def main():
                     "train_augment":   args.train_augment,
                     "mixup_alpha":     args.mixup_alpha,
                     "mixup_at":        args.mixup_at,
+                    "blackout_max":    args.blackout_max,
                     "generators":      args.generators,
                     "semantics":       args.semantics,
                     "val_balanced":    val["balanced_acc"],
