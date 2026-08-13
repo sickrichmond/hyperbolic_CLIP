@@ -42,10 +42,31 @@ RES_GROUP = {
 
 
 def parse_conf(path):
+    """The KxK matrix, read by BRACKET NESTING rather than "everything after the key".
+
+    test_hypclip.py happens to write conf_matrix last, but the baselines iterate
+    test_metrics.items() (test.py:114-118), so semantic_acc and the *_per_class lists
+    can follow it — and their digits would be swallowed by a greedier parser.
+    """
     txt = path.read_text()
-    if "conf_matrix:" not in txt:
+    head = txt.find("conf_matrix:")
+    if head < 0:
         return None
-    nums = [int(n) for n in re.findall(r"-?\d+", txt.split("conf_matrix:", 1)[1])]
+    start = txt.find("[", head)
+    if start < 0:
+        return None
+    depth, end = 0, None
+    for i in range(start, len(txt)):
+        if txt[i] == "[":
+            depth += 1
+        elif txt[i] == "]":
+            depth -= 1
+            if depth == 0:
+                end = i + 1
+                break
+    if end is None:
+        raise ValueError(f"{path}: unterminated conf_matrix")
+    nums = [int(n) for n in re.findall(r"-?\d+", txt[start:end])]
     k = int(round(len(nums) ** 0.5))
     if k * k != len(nums):
         raise ValueError(f"{path}: {len(nums)} ints is not a square matrix")
@@ -139,7 +160,7 @@ def main(dirs):
     family = [_HIFI_HIERARCHY[n][2] for n in names]
     print(f"{len(names)} classes, real = index {real}\n")
 
-    rows, clean = {}, {}
+    rows, clean, skipped = {}, {}, {}
     for spec in dirs:
         label, _, path = spec.partition("=")
         d = Path(path or label)
@@ -148,11 +169,20 @@ def main(dirs):
             conf = parse_conf(f)
             if conf is None:
                 continue
+            if len(conf) != len(names):
+                # 23-class runs (hypclip_fair) and diagnostics live in the same tree.
+                skipped.setdefault(label, len(conf))
+                continue
             rows[(label, lvl)] = (detection(conf, real), routing(conf, real, family))
             if lvl == 0:
                 clean[label] = conf
 
+    if skipped:
+        print("skipped (class count does not match this label map): "
+              + ", ".join(f"{m} ({k} classes)" for m, k in sorted(skipped.items())))
     methods = sorted({m for m, _ in rows})
+    if not methods:
+        sys.exit("no usable results found")
     for title, pick in (("balanced detection accuracy (real vs fake)", lambda d: d[0][2]),
                         ("recall(real)", lambda d: d[0][0]),
                         ("recall(fake)", lambda d: d[0][1]),
