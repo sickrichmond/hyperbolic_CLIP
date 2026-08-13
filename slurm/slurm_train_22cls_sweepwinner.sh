@@ -17,6 +17,8 @@
 #
 # Submit:  sbatch slurm/slurm_train_22cls_sweepwinner.sh
 #          sbatch --export=ALL,AUGMENT=1 slurm/slurm_train_22cls_sweepwinner.sh   # -> aug*
+#          sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa \
+#                 slurm/slurm_train_22cls_sweepwinner.sh                          # -> omniaug†
 # ============================================================================
 
 #SBATCH --account=EUHPC_D35_189
@@ -49,13 +51,21 @@ CAPS=$WORK/hyp_fine_tuning/iab_captions
 OUT=$WORK/hyp_fine_tuning/checkpoints
 MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 
-# AUGMENT=1 -> random JPEG/blur/downsample on the TRAIN split (data.degradations
-# .random_degradation). Those are the test-time corruption FAMILIES, so the run goes
-# in the tables with an asterisk, like dna* and ours-centroid-aug*.
+# AUGMENT=1 -> train-time augmentation on the TRAIN split. Two policies:
+#   AUG_POLICY=corruption (default) — random JPEG/blur/downsample, i.e. the test-time
+#     corruption FAMILIES → the run goes in the tables with an asterisk, like dna*.
+#   AUG_POLICY=omnidfa — Table 8 of arXiv 2509.25682. Milder: only DS0.5 of the seven
+#     test levels falls inside its ranges → weaker asterisk (†), a literature recipe
+#     rather than an augmentation shaped on the test set.
 AUGMENT=${AUGMENT:-0}
+AUG_POLICY=${AUG_POLICY:-corruption}
 if [ "$AUGMENT" = 1 ]; then
-    AUG_FLAG=--train_augment
-    CKPT=$OUT/attribution_22cls_sweepwin_aug_vitl14.pt
+    AUG_FLAG="--train_augment --aug_policy $AUG_POLICY"
+    if [ "$AUG_POLICY" = omnidfa ]; then
+        CKPT=$OUT/attribution_22cls_sweepwin_omniaug_vitl14.pt
+    else
+        CKPT=$OUT/attribution_22cls_sweepwin_aug_vitl14.pt
+    fi
 else
     AUG_FLAG=
     CKPT=$OUT/attribution_22cls_sweepwin_vitl14.pt

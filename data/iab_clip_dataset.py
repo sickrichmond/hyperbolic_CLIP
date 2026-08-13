@@ -38,7 +38,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 from transformers import CLIPImageProcessor, CLIPTokenizer
 
-from data.degradations import apply_degradation, random_degradation
+from data.degradations import AUG_POLICIES, apply_degradation
 from data.image_io import open_image_retry
 
 # ── Real-image lookup: semantic key → (CSV file, caption column) ──────────────
@@ -194,6 +194,7 @@ class IABCLIPDataset(Dataset):
         include_paths: Optional[set] = None,
         require_caption: bool = True,
         train_augment: bool = False,
+        aug_policy: str = "corruption",
         patch_grid: bool = False,
     ):
         """
@@ -243,6 +244,12 @@ class IABCLIPDataset(Dataset):
         if train_augment and degraded:
             raise ValueError("train_augment and degraded>0 are mutually exclusive")
         self.train_augment = train_augment
+        # Which policy train_augment applies: "corruption" (the test-time families,
+        # sampled continuously) or "omnidfa" (Table 8 of arXiv 2509.25682).
+        if aug_policy not in AUG_POLICIES:
+            raise ValueError(f"aug_policy must be one of {sorted(AUG_POLICIES)}, "
+                             f"got {aug_policy!r}")
+        self.aug_policy = aug_policy
         # patch_grid=True → 'pixel_values' is (10, 3, 224, 224): the whole image plus
         # a 3x3 grid cut at FULL resolution (--patch_source native). One decode, ten
         # resizes. Off by default: the multi-view models can also cut the grid out of
@@ -447,7 +454,9 @@ class IABCLIPDataset(Dataset):
         if self.degraded:
             img = apply_degradation(img, self.degraded)
         elif self.train_augment:
-            img = random_degradation(img)
+            # Applied to the FULL-resolution image, so with patch_grid=True all ten
+            # views inherit one consistent augmentation instead of ten different ones.
+            img = AUG_POLICIES[self.aug_policy](img)
 
         if self.patch_grid:
             pixel = self.processor(images=native_patch_grid(img),

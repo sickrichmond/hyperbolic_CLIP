@@ -72,30 +72,44 @@ def build_anchor_texts():
 def load_anchors(ckpt, model, curv, device):
     """Class anchors in the HARNESS label order → logits column c == label c.
 
-    Centroid checkpoints carry the learned anchors as tangent vectors in their
-    OWN class order ('real' first); text checkpoints have none and the anchors
-    are re-encoded from the templates.
-    """
-    tangent = ckpt.get('anchor_tangent')
-    if tangent is None:
-        anchor_texts = build_anchor_texts()
-        tokenizer = CLIPTokenizer.from_pretrained(ckpt['clip_name'])
-        tok = tokenizer(anchor_texts, return_tensors='pt', padding='max_length',
-                        truncation=True, max_length=77)
-        print(f"Anchors: {len(anchor_texts)} text templates")
-        x_anc, _ = model.encode_text(tok['input_ids'].to(device),
-                                     tok['attention_mask'].to(device))
-        return x_anc
+    Both anchor kinds live in the checkpoint's OWN class order ('real' first) and
+    are permuted here into the harness order ('real' last):
+      - free anchors (image_centroid / text_free) → 'anchor_tangent', lifted with exp_map0;
+      - text anchors → re-encoded from the checkpoint's OWN 'anchor_texts'.
 
+    Re-encoding from the checkpoint rather than from build_anchor_texts() is what
+    makes --anchor_prompts safe: a run trained on different prompts would otherwise
+    be evaluated against the default templates, silently and without any error.
+    """
     ckpt_names = list(ckpt['class_names'])
-    missing = [n for n in harness_class_names() if n not in ckpt_names]
+    harness_names = harness_class_names()
+    missing = [n for n in harness_names if n not in ckpt_names]
     if missing:
         raise ValueError(f"checkpoint has no anchor for class(es) {missing}; "
                          f"it was trained on {ckpt_names}")
-    perm = [ckpt_names.index(n) for n in harness_class_names()]
-    print(f"Anchors: {len(perm)} learned image-centroid anchors "
-          f"(reordered {ckpt_names[:2]}… → harness order)")
-    return exp_map0(tangent[perm].float().to(device), curv=curv)
+    perm = [ckpt_names.index(n) for n in harness_names]
+
+    tangent = ckpt.get('anchor_tangent')
+    if tangent is not None:
+        print(f"Anchors: {len(perm)} learned {ckpt.get('anchor_init', 'free')} anchors "
+              f"(reordered {ckpt_names[:2]}… → harness order)")
+        return exp_map0(tangent[perm].float().to(device), curv=curv)
+
+    ckpt_texts = ckpt.get('anchor_texts')
+    if ckpt_texts:
+        anchor_texts = [ckpt_texts[i] for i in perm]
+        src = 'checkpoint prompts'
+    else:
+        anchor_texts = build_anchor_texts()      # pre-anchor_texts checkpoints
+        src = 'default templates'
+    tokenizer = CLIPTokenizer.from_pretrained(ckpt['clip_name'])
+    tok = tokenizer(anchor_texts, return_tensors='pt', padding='max_length',
+                    truncation=True, max_length=77)
+    print(f"Anchors: {len(anchor_texts)} text anchors from {src}")
+    print(f"  [0] {harness_names[0]} → \"{anchor_texts[0]}\"")
+    x_anc, _ = model.encode_text(tok['input_ids'].to(device),
+                                 tok['attention_mask'].to(device))
+    return x_anc
 
 
 @torch.no_grad()

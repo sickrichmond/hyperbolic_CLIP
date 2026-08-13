@@ -38,11 +38,17 @@ from losses.attribution_loss import EntailmentConeLoss, predict_class
 
 
 # Class-anchor text templates. Order matters: this defines the integer labels.
-def build_anchors(generators: list[str]) -> tuple[list[str], list[str]]:
+def build_anchors(generators: list[str],
+                  prompts_path: str | None = None) -> tuple[list[str], list[str]]:
     """
     Returns (class_names, anchor_texts) in a fixed order.
     class_names[i] is the generator string ("real", "FLUX", ...) used in the dataset;
     anchor_texts[i] is the natural-language anchor encoded by CLIP.
+
+    Default: two templates, so 21 of the 22 anchors differ by a single token and
+    CLIP embeds them almost collinearly. `prompts_path` points at a JSON map
+    {class_name: sentence} (see data/anchor_prompts_structural.json) whose
+    sentences differ in FORM, which spreads the anchors out at init.
     """
     ordered: list[str] = []
     if "real" in generators:
@@ -50,6 +56,16 @@ def build_anchors(generators: list[str]) -> tuple[list[str], list[str]]:
     for g in generators:
         if g != "real":
             ordered.append(g)
+
+    if prompts_path:
+        import json
+        with open(prompts_path) as f:
+            prompts = json.load(f)
+        missing = [c for c in ordered if c not in prompts]
+        if missing:
+            raise ValueError(f"{prompts_path} has no prompt for {missing}")
+        return ordered, [prompts[c] for c in ordered]
+
     anchor_texts = []
     for c in ordered:
         if c == "real":
@@ -90,14 +106,29 @@ def parse_args():
                    help="Force training on the captioned-images subset even when the "
                         "caption loss terms are off. Lets the caption on/off ablation run "
                         "on the SAME subset (only the loss varies, not the data).")
-    p.add_argument("--anchor_init", choices=["text", "image_centroid"], default="text",
-                   help="'text' (default): anchors are the class text templates encoded by "
-                        "CLIP at every step. 'image_centroid': anchors are FREE parameters in "
-                        "tangent space, initialised at the per-class mean of the training image "
-                        "embeddings (one forward pass before training) — no text dependency.")
+    p.add_argument("--anchor_init", choices=["text", "image_centroid", "text_free"],
+                   default="text",
+                   help="'text' (default): anchors are the class text prompts encoded by "
+                        "CLIP at every step (they still move, through the text-encoder LoRA). "
+                        "'image_centroid': anchors are FREE parameters in tangent space, "
+                        "initialised at the per-class mean of the training image embeddings "
+                        "(one forward pass before training) — no text dependency. "
+                        "'text_free': free parameters too, but initialised at the encoded "
+                        "PROMPTS and allowed to drift only by a learned amount (see "
+                        "--anchor_drift_init); at step 0 it is identical to 'text'.")
+    p.add_argument("--anchor_prompts", type=str, default=None,
+                   help="JSON map {class_name: sentence} replacing the two default templates "
+                        "(e.g. data/anchor_prompts_structural.json). Used by both 'text' and "
+                        "'text_free'. Saved into the checkpoint, and the eval re-encodes THOSE "
+                        "sentences — never the defaults.")
+    p.add_argument("--anchor_drift_init", type=float, default=0.1,
+                   help="'text_free' only: initial value of the single learned scalar s in "
+                        "t_c = t0_c + s·δ_c (δ init 0). Small s means the anchors start pinned "
+                        "to the prompts and the model decides how far to move them.")
     p.add_argument("--anchor_init_norm", type=float, default=2.0,
-                   help="Common tangent-space radius the centroid anchors are rescaled to "
-                        "(only their directions carry the centroid information; the radius sets "
+                   help="Common tangent-space radius the FREE anchors (image_centroid and "
+                        "text_free) are rescaled to at init "
+                        "(only their directions carry the information; the radius sets "
                         "the initial cone width, ψ = asin(2·min_radius/‖t‖)). 0 keeps the raw "
                         "scale, which is tiny at init and degenerates every cone to a halfspace.")
     p.add_argument("--anchor_init_cache", type=str, default=None,
@@ -109,6 +140,13 @@ def parse_args():
                         "data.degradations.random_degradation) on the TRAIN split only. NOTE: "
                         "these are the test-time corruption families → report such a run with an "
                         "asterisk, it is not head-to-head comparable with the baselines.")
+    p.add_argument("--aug_policy", choices=["corruption", "omnidfa"], default="corruption",
+                   help="Which policy --train_augment applies. 'corruption' (default): the three "
+                        "test-time families with continuously sampled parameters. 'omnidfa': "
+                        "Table 8 of arXiv 2509.25682 — JPEG q75-95, resize 0.5-2.0, hflip, "
+                        "RandAugment (no shear/translate), blur sigma 0.1-2.0. The omnidfa ranges "
+                        "cover only DS0.5 of the seven test levels, so its asterisk is much "
+                        "weaker than 'corruption''s.")
     p.add_argument("--mixup_alpha",    type=float, default=0.0,
                    help="Manifold mixup in the tangent space at the origin (0 disables it). "
                         "λ~Beta(α,α) mixes the batch with a permutation of itself and the cone "
@@ -137,6 +175,21 @@ def parse_args():
                    help="Weight of the anchor-norm regulariser (0 disables it).")
     p.add_argument("--target_norm",    type=float, default=0.0,
                    help="Target ‖t_anchor‖. With curv=1, ψ ≈ π/8 at ‖t‖≈2.6, π/16 at ‖t‖≈5.")
+    p.add_argument("--lambda_ce",      type=float, default=0.0,
+                   help="Weight of a cross-entropy term on softmax(-ξ/τ) (0 disables it, and "
+                        "the loss is then bit-identical to before). The cone hinge saturates: "
+                        "once an image is inside its own cone the gradient is zero, and the "
+                        "negative term is averaged over K-1 classes so each wrong class weighs "
+                        "λ_neg/21. Nothing therefore optimises the RANKING of ξ, which is what "
+                        "inference (argmin ξ) actually uses — hence AUC that holds up while "
+                        "top-1 collapses under JPEG. The CE penalises probability mass on wrong "
+                        "classes in proportion to how close they are. Inference is unchanged: "
+                        "argmin ξ is scale-invariant, so τ never reaches the eval.")
+    p.add_argument("--ce_tau_init",    type=float, default=1.0,
+                   help="Initial temperature of the --lambda_ce term. τ = softplus(param) is "
+                        "LEARNED: the exterior angles live in [0, π], so a fixed τ=1 is an "
+                        "arbitrary choice of softmax sharpness (same reasoning as CLIP's "
+                        "logit_scale).")
     p.add_argument("--batch_size",     type=int,   default=256)
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
@@ -292,21 +345,25 @@ def main():
     torch.manual_seed(args.seed)
     print(f"Seed: {args.seed}")
 
-    class_names, anchor_texts = build_anchors(args.generators)
+    class_names, anchor_texts = build_anchors(args.generators, args.anchor_prompts)
     name_to_idx = {n: i for i, n in enumerate(class_names)}
-    centroid_anchors = args.anchor_init == "image_centroid"
-    if centroid_anchors:
-        if args.lambda_cap_in_class > 0 or args.lambda_img_in_cap > 0:
-            raise ValueError(
-                "--anchor_init image_centroid removes the text encoder from the objective; "
-                "the caption terms have no class anchor to attach to. Use --no_captions.")
+    if args.anchor_init != "text" and (args.lambda_cap_in_class > 0
+                                       or args.lambda_img_in_cap > 0):
+        # Free anchors take the text encoder out of the objective (it is used at most
+        # once, at init), so the caption terms have no anchor that keeps moving with
+        # the captions. Same reasoning for both free modes.
+        raise ValueError(f"--anchor_init {args.anchor_init} makes the anchors free "
+                         f"parameters; the caption terms have no class anchor to attach "
+                         f"to. Use --no_captions.")
+    if args.anchor_init == "image_centroid":
         print(f"Class anchors: image centroids (text-free), {len(class_names)} classes")
         for i, c in enumerate(class_names):
             print(f"  [{i}] {c}")
     else:
-        print(f"Class anchors:")
+        src = args.anchor_prompts or "default templates"
+        print(f"Class anchors ({args.anchor_init}, from {src}):")
         for i, (c, t) in enumerate(zip(class_names, anchor_texts)):
-            print(f"  [{i}] {c:8s} → \"{t}\"")
+            print(f"  [{i}] {c:14s} → \"{t}\"")
 
     # ── Split manifest (Path 1: strict data parity + leakage-free vs baselines) ──
     # With a manifest: train on ALL harness-train images and validate on the harness
@@ -368,8 +425,11 @@ def main():
     # Augmentation on the train split only: the val split stays clean so model
     # selection is not measured under corruption.
     train_ds.train_augment = args.train_augment
+    train_ds.aug_policy = args.aug_policy
     if args.train_augment:
-        print("Train-time augmentation: ON (random JPEG / blur / downsample) — "
+        what = ("random JPEG / blur / downsample" if args.aug_policy == "corruption"
+                else "OmniDFA Table 8 (JPEG 75-95 / resize / hflip / RandAugment / blur)")
+        print(f"Train-time augmentation: ON  policy={args.aug_policy}  ({what}) — "
               "results are NOT head-to-head comparable with the baselines.")
 
     # "Black" AFTER the CLIP normalisation is (0 − mean)/std ≈ −1.79, not 0 — zeroing
@@ -399,25 +459,72 @@ def main():
     ).to(device)
 
     # ── Anchors ───────────────────────────────────────────────────────────────
-    # Centroid mode: one pre-pass over the train split (single GPU, before the
-    # DataParallel wrap) gives the per-class CLIP-space mean; the projection head
-    # maps it into tangent space and the direction is kept while the radius is
-    # reset to a common value (only the relative geometry of the centroids is
-    # meaningful; the raw radius at init is ~0.1 and would make every cone a
-    # halfspace). From there the anchors are free parameters.
-    anchor_tangent = None
-    if centroid_anchors:
-        mean_clip = class_centroids(model, train_ds, class_names, args, device)
+    # Two free-anchor modes, both producing a tangent-space starting point t0 whose
+    # DIRECTIONS carry the information and whose radius is reset to a common value
+    # (the raw radius out of the projection head is ~0.1 because of init_scale, and
+    # that degenerates every cone into a halfspace):
+    #   image_centroid — t0 = per-class mean of the training image embeddings, from
+    #                    one pre-pass over the train split (single GPU, before the
+    #                    DataParallel wrap). No text at all.
+    #   text_free      — t0 = the encoded class PROMPTS. Same starting point as plain
+    #                    'text' mode up to the common rescale, but from there the
+    #                    anchors may drift by t = t0 + softplus(s)·δ, with δ init 0
+    #                    and s a SINGLE learned scalar: the model decides how far to
+    #                    move away from the prompts.
+    anchor_tangent = None                      # image_centroid: the parameter itself
+    anchor_t0 = anchor_delta = anchor_drift = None    # text_free
+
+    # Tokenized anchors stay constant; only the text-encoder weights change.
+    tokenizer = CLIPTokenizer.from_pretrained(args.clip_name)
+    anchor_tok = tokenizer(anchor_texts, return_tensors="pt", padding="max_length",
+                           truncation=True, max_length=77)
+    anchor_ids  = anchor_tok["input_ids"].to(device)
+    anchor_mask = anchor_tok["attention_mask"].to(device)
+
+    if args.anchor_init != "text":
         with torch.no_grad():
-            t0 = model.projection(mean_clip.to(device))
+            if args.anchor_init == "image_centroid":
+                t0 = model.projection(
+                    class_centroids(model, train_ds, class_names, args, device).to(device))
+            else:
+                _, t0 = model.encode_text(anchor_ids, anchor_mask)
             if args.anchor_init_norm > 0:
                 t0 = F.normalize(t0, dim=-1) * args.anchor_init_norm
-        anchor_tangent = nn.Parameter(t0.detach().float())
+            t0 = t0.detach().float()
+
+        if args.anchor_init == "image_centroid":
+            anchor_tangent = nn.Parameter(t0)
+        else:
+            anchor_t0 = t0                                        # fixed reference
+            anchor_delta = nn.Parameter(torch.zeros_like(t0))
+            # s = softplus(raw): positive, unconstrained, one scalar for all classes.
+            anchor_drift = nn.Parameter(
+                torch.tensor(float(args.anchor_drift_init)).expm1().clamp(min=1e-6).log())
+
         with torch.no_grad():
-            psi0 = half_aperture(exp_map0(anchor_tangent, curv=args.curv),
+            psi0 = half_aperture(exp_map0(t0, curv=args.curv),
                                  curv=args.curv, min_radius=args.min_radius)
-        print(f"Anchor init: ‖t‖={anchor_tangent.norm(dim=-1).mean():.2f}  "
-              f"ψ={psi0.mean():.3f} rad  (K={len(class_names)})")
+            # Angular spread at init: if the anchors sit closer together than 2ψ their
+            # cones overlap and the free parameters can collapse winner-take-all (this
+            # is what killed mid-6.0 in the centroid run).
+            d = F.normalize(t0, dim=-1)
+            cos = (d @ d.T).clamp(-1, 1)
+            iu = torch.triu_indices(len(class_names), len(class_names), offset=1)
+            ang = torch.arccos(cos[iu[0], iu[1]])     # off-diagonal pairs only
+        print(f"Anchor init ({args.anchor_init}): ‖t‖={t0.norm(dim=-1).mean():.2f}  "
+              f"ψ={psi0.mean():.3f} rad  min∠={ang.min():.3f}  mean∠={ang.mean():.3f}  "
+              f"(K={len(class_names)})")
+        if ang.min() < 2 * psi0.mean():
+            print(f"  ⚠️  closest anchor pair is inside 2ψ={2 * psi0.mean():.3f} rad — "
+                  f"those cones overlap at init")
+        if anchor_drift is not None:
+            print(f"  drift scale s={F.softplus(anchor_drift).item():.3f} (learned)")
+
+    def anchor_tangent_now():
+        """Current tangent anchors (K, D_hyp), or None in plain 'text' mode."""
+        if anchor_delta is not None:
+            return anchor_t0 + F.softplus(anchor_drift) * anchor_delta
+        return anchor_tangent
 
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs")
@@ -426,9 +533,22 @@ def main():
     core = model.module if isinstance(model, nn.DataParallel) else model
     core.print_trainable_summary()
 
+    # Built before the optimizer: with --lambda_ce it owns a learned temperature that
+    # has to be in the parameter list.
+    cone_loss = EntailmentConeLoss(
+        curv=args.curv, min_radius=args.min_radius,
+        margin=args.margin, lambda_neg=args.lambda_neg,
+        lambda_cap_in_class=args.lambda_cap_in_class,
+        lambda_img_in_cap=args.lambda_img_in_cap,
+        lambda_norm=args.lambda_norm, target_norm=args.target_norm,
+        lambda_ce=args.lambda_ce, ce_tau_init=args.ce_tau_init,
+    ).to(device)
+
     trainable = core.trainable_parameters()
-    if anchor_tangent is not None:
-        trainable = trainable + [anchor_tangent]
+    for extra in (anchor_tangent, anchor_delta, anchor_drift):
+        if extra is not None:
+            trainable = trainable + [extra]
+    trainable = trainable + list(cone_loss.parameters())
     optimizer = torch.optim.AdamW(
         trainable,
         lr=args.lr,
@@ -439,13 +559,8 @@ def main():
         optimizer, T_max=args.num_epochs * steps_per_epoch, eta_min=1e-6
     )
     scaler = GradScaler("cuda")
-    cone_loss = EntailmentConeLoss(
-        curv=args.curv, min_radius=args.min_radius,
-        margin=args.margin, lambda_neg=args.lambda_neg,
-        lambda_cap_in_class=args.lambda_cap_in_class,
-        lambda_img_in_cap=args.lambda_img_in_cap,
-        lambda_norm=args.lambda_norm, target_norm=args.target_norm,
-    )
+    if args.lambda_ce > 0:
+        print(f"CE ranking term: λ_ce={args.lambda_ce}  τ_init={args.ce_tau_init} (learned)")
     if use_caps:
         print(f"Hierarchical mode: λ_cap_in_class={args.lambda_cap_in_class} "
               f"λ_img_in_cap={args.lambda_img_in_cap}")
@@ -460,13 +575,6 @@ def main():
         print(f"Mixup: α={args.mixup_alpha} at '{args.mixup_at}'")
     mix_at_clip = args.mixup_alpha > 0 and args.mixup_at == "clip"
 
-    # Tokenized anchors stay constant; only the text-encoder weights change.
-    tokenizer = CLIPTokenizer.from_pretrained(args.clip_name)
-    anchor_tok = tokenizer(anchor_texts, return_tensors="pt", padding="max_length",
-                           truncation=True, max_length=77)
-    anchor_ids  = anchor_tok["input_ids"].to(device)
-    anchor_mask = anchor_tok["attention_mask"].to(device)
-
     best_balanced = -1.0
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -477,10 +585,11 @@ def main():
                  "mean_anc_norm"]
     cap_keys  = ["inside_cap", "inside_img_cap", "mean_psi_cap",
                  "mean_xi_cap_anc", "mean_xi_img_cap", "mean_cap_norm"]
+    ce_keys   = ["loss_ce", "ce_tau"] if args.lambda_ce > 0 else []
 
     for epoch in range(1, args.num_epochs + 1):
         model.train()
-        sums = {"loss": 0.0, **{k: 0.0 for k in base_keys}}
+        sums = {"loss": 0.0, **{k: 0.0 for k in base_keys + ce_keys}}
         if use_caps:
             sums.update({k: 0.0 for k in cap_keys})
         bar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.num_epochs}")
@@ -511,13 +620,14 @@ def main():
                 else:
                     x_img = model(pixel)
                     x_cap = None
-                if anchor_tangent is None:
+                t_anc = anchor_tangent_now()
+                if t_anc is None:
                     x_anc, _ = core.encode_text(anchor_ids, anchor_mask)
-            if anchor_tangent is not None:
+            if t_anc is not None:
                 # fp32, outside autocast: the hyperbolic ops are unstable in fp16
                 # (same reason AttributionCLIP.to_hyperbolic disables autocast).
                 with autocast("cuda", enabled=False):
-                    x_anc = exp_map0(anchor_tangent.float(), curv=args.curv)
+                    x_anc = exp_map0(t_anc.float(), curv=args.curv)
             if args.mixup_alpha > 0:
                 # EntailmentConeLoss is untouched — the mixed target is expressed by
                 # calling it twice, exactly as the multi-view trainer folds views into
@@ -555,7 +665,7 @@ def main():
             scheduler.step()
 
             sums["loss"] += loss.item()
-            for k in base_keys:
+            for k in base_keys + ce_keys:
                 sums[k] += stats[k].item()
             if use_caps:
                 for k in cap_keys:
@@ -580,7 +690,12 @@ def main():
         if use_caps:
             line1 += (f"  L_cap_cls={avg['loss_cap_in_cls']:.4f}"
                       f"  L_img_cap={avg['loss_img_in_cap']:.4f}")
-        line1 += f"  L_norm={avg['loss_norm']:.4f}  lr={scheduler.get_last_lr()[0]:.2e}"
+        line1 += f"  L_norm={avg['loss_norm']:.4f}"
+        if ce_keys:
+            line1 += f"  L_ce={avg['loss_ce']:.4f}  τ={avg['ce_tau']:.3f}"
+        if anchor_drift is not None:
+            line1 += f"  drift_s={F.softplus(anchor_drift).item():.4f}"
+        line1 += f"  lr={scheduler.get_last_lr()[0]:.2e}"
         print(line1)
         print(f"           cone_acc={100*avg['cone_acc']:.1f}%  "
               f"inside_img={100*avg['inside_img']:.1f}%  "
@@ -596,15 +711,16 @@ def main():
                   f"‖t̄_cap‖={avg['mean_cap_norm']:.2f}")
 
         # ── Validation ───────────────────────────────────────────────────────
-        # Anchors under the CURRENT weights: text ones must be re-encoded, the
-        # centroid ones are the parameter itself. eval() first — the text anchors
-        # must not be encoded with LoRA dropout active.
+        # Anchors under the CURRENT weights: text ones must be re-encoded, the free
+        # ones come out of anchor_tangent_now(). eval() first — the text anchors must
+        # not be encoded with LoRA dropout active.
         core.eval()
         with torch.no_grad():
-            if anchor_tangent is None:
+            t_anc_val = anchor_tangent_now()
+            if t_anc_val is None:
                 x_anc_val, _ = core.encode_text(anchor_ids, anchor_mask)
             else:
-                x_anc_val = exp_map0(anchor_tangent.float(), curv=args.curv)
+                x_anc_val = exp_map0(t_anc_val.float(), curv=args.curv)
         val = run_validation(core, val_loader, x_anc_val, class_names, device, args.curv)
         print(f"  val: overall={100*val['overall_acc']:.1f}%  "
               f"balanced={100*val['balanced_acc']:.1f}%  ({val['total']} samples)")
@@ -627,11 +743,20 @@ def main():
                     "class_names":     class_names,
                     "anchor_texts":    anchor_texts,
                     "anchor_init":     args.anchor_init,
-                    # centroid mode only: learned anchors in tangent space, in
-                    # class_names order. Inference lifts them with exp_map0.
-                    "anchor_tangent":  (anchor_tangent.detach().cpu()
-                                        if anchor_tangent is not None else None),
+                    "anchor_prompts":  args.anchor_prompts,
+                    # Free-anchor modes only (image_centroid / text_free): the learned
+                    # anchors in tangent space, in class_names order. Inference lifts
+                    # them with exp_map0. None in 'text' mode, where the eval re-encodes
+                    # anchor_texts instead.
+                    "anchor_tangent":  (t_anc_val.detach().cpu()
+                                        if t_anc_val is not None else None),
+                    "anchor_drift":    (F.softplus(anchor_drift).item()
+                                        if anchor_drift is not None else None),
+                    "lambda_ce":       args.lambda_ce,
+                    "ce_tau":          (F.softplus(cone_loss.ce_tau_raw).item()
+                                        if args.lambda_ce > 0 else None),
                     "train_augment":   args.train_augment,
+                    "aug_policy":      args.aug_policy,
                     "mixup_alpha":     args.mixup_alpha,
                     "mixup_at":        args.mixup_at,
                     "blackout_max":    args.blackout_max,

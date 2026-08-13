@@ -1,25 +1,33 @@
 #!/bin/bash
 # ============================================================================
-# CINECA Leonardo — Extract FROZEN CLIP image features (Fase A of the probe).
-# Runs off-the-shelf CLIP ViT-L/14 (no LoRA) once over train+val and caches
-# (features 768-d, label) to $WORK/hyp_fine_tuning/clip_features/clip_features_{train,val}.pt.
-# Extract once → then train_linear_probe.py many times on the cache (cheap).
+# CINECA Leonardo — Phase A of the linear probe: cache image features once.
 #
-# Same 22 classes / semantics / val_frac / seed as slurm_cineca_all.sh, so the
-# val set matches the fine-tuned models' eval exactly (apples-to-apples).
+# Three sources, selected by SOURCE=, all written to their own directory and all
+# consumed by the same slurm_train_probe.sh. Together they answer "how much of the
+# 0.993 is CLIP, how much is the LoRA, how much is the geometry":
 #
-# Smoke test first (fast): add  --max_per_class 50  to the python call.
+#   SOURCE=frozen      off-the-shelf CLIP ViT-L/14, no LoRA        (the baseline)
+#   SOURCE=lora        the trained LoRA CLIP embedding             (CKPT required)
+#   SOURCE=projection  the tangent vectors out of the projection   (CKPT required)
 #
-# Submit:  sbatch slurm/slurm_extract_features.sh
+# --split_manifest puts all three on the SAME images as the results tables. Without
+# it the split is the legacy caption-based one (94,673 val images) and the numbers
+# are not comparable with anything.
+#
+# Submit:  sbatch --export=ALL,SOURCE=frozen slurm/slurm_extract_features.sh
+#          sbatch --export=ALL,SOURCE=lora,CKPT=$WORK/hyp_fine_tuning/checkpoints/attribution_22cls_sweepwin_vitl14.pt \
+#                 slurm/slurm_extract_features.sh
 # ============================================================================
-#SBATCH --account=EUHPC_D26_009B
+
+#SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
+#SBATCH --qos=boost_qos_lprod
 #SBATCH --job-name=extract_clip
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=1
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 #SBATCH --mail-type=END,FAIL
@@ -33,23 +41,36 @@ export HF_HOME=$WORK/hyp_fine_tuning/hf_cache
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
+export IAB_EXCLUDE_GENERATORS=dalle3      # <-- 22-class toggle (whole pipeline)
 
-cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
+REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
+DATA=$FAST/datasets/iab_dataset
+CAPS=$WORK/hyp_fine_tuning/iab_captions
+MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
+FEAT=$WORK/hyp_fine_tuning/clip_features
+
+SOURCE=${SOURCE:-frozen}
+case "$SOURCE" in
+  frozen)     EXTRA="" ;;
+  lora)       EXTRA="--checkpoint $CKPT --features clip" ;;
+  projection) EXTRA="--checkpoint $CKPT --features projection" ;;
+  *) echo "SOURCE must be frozen, lora or projection (got '$SOURCE')"; exit 1 ;;
+esac
+
+cd $REPO
 
 python -m scripts.extract_clip_features \
-    --dataset_path $WORK/hyp_fine_tuning/iab_dataset \
-    --captions_dir $WORK/hyp_fine_tuning/iab_captions \
-    --clip_name    openai/clip-vit-large-patch14 \
-    --generators   real 4o gemini grok3 FLUX \
-                   SD1_5 SD2_1 SD3 SD3_5 SDXL \
-                   PIXART PLAYGROUND_2_5 KANDINSKY CogView3_PLUS \
-                   hidream hunyuan ideogram infinity janus-pro kling \
-                   mid-5.2 mid-6.0 \
-    --semantics    COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
-    --val_frac     0.2 \
-    --seed         42 \
-    --batch_size   256 \
-    --num_workers  8 \
-    --out_dir      $WORK/hyp_fine_tuning/clip_features
+    --dataset_path   $DATA \
+    --captions_dir   $CAPS \
+    --clip_name      openai/clip-vit-large-patch14 \
+    --generators     real 4o CogView3_PLUS FLUX KANDINSKY PIXART PLAYGROUND_2_5 \
+                     SD1_5 SD2_1 SD3 SD3_5 SDXL gemini grok3 hidream hunyuan \
+                     ideogram infinity janus-pro kling mid-5.2 mid-6.0 \
+    --semantics      COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
+    --split_manifest $MANIFEST \
+    $EXTRA \
+    --batch_size     256 \
+    --num_workers    8 \
+    --out_dir        ${FEAT}_${SOURCE}
 
-echo "Done. Cache in $WORK/hyp_fine_tuning/clip_features/"
+echo "Done. Cache in ${FEAT}_${SOURCE}/"

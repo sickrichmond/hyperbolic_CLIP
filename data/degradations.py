@@ -89,6 +89,70 @@ def random_degradation(image):
     return image.convert("RGB")
 
 
+# ── OmniDFA train-time augmentation ──────────────────────────────────────────
+# Table 8 of "Few-Shot Synthetic Image Attribution" (OmniDFA, arXiv 2509.25682,
+# §E.2), applied in the order the table lists:
+#   random JPEG  p=0.5, quality (75, 95)
+#   resize       scale (0.5, 2.0)
+#   hflip        p=0.5
+#   RandAugment  p=0.5, magnitude=9, layers=2, WITHOUT shear/translate
+#   gaussian blur p=0.5, sigma (0.1, 2.0)
+#   normalize    [0,1]        <-- SKIPPED: CLIPImageProcessor already rescales and
+#                                 normalises; doing it here would normalise twice.
+#
+# The paper excludes shear/translate so the local feature extractor never sees
+# padding artifacts from beyond the image border — the same reason applies to us.
+#
+# Milder than random_degradation on purpose: of the seven test levels only DS0.5
+# falls inside these ranges (q75-95 misses JPEG65/30, sigma<=2 misses Blur3/5,
+# scale>=0.5 misses DS0.25). Report as `omniaug†`, a weaker asterisk than `aug*`.
+_RANDAUG_DROP = ("ShearX", "ShearY", "TranslateX", "TranslateY")
+_randaug = None
+
+
+def _randaugment():
+    """torchvision RandAugment minus the four geometric ops. Built once, lazily:
+    this module is pure-PIL and is imported by scripts with no torchvision."""
+    global _randaug
+    if _randaug is None:
+        from torchvision.transforms import RandAugment
+
+        class _NoShiftRandAugment(RandAugment):
+            def _augmentation_space(self, num_bins, image_size):
+                space = super()._augmentation_space(num_bins, image_size)
+                return {k: v for k, v in space.items() if k not in _RANDAUG_DROP}
+
+        _randaug = _NoShiftRandAugment(num_ops=2, magnitude=9)
+    return _randaug
+
+
+def _rescale(img, scale):
+    """Resize by `scale` at native resolution. Unlike _downsample this does NOT
+    restore the original size — the CLIP processor resizes to 224 afterwards, so
+    the effect is a change of effective detail (down AND up, scale can exceed 1)."""
+    w, h = img.size
+    return img.resize((max(1, round(w * scale)), max(1, round(h * scale))),
+                      Image.BICUBIC)
+
+
+def omnidfa_augment(image):
+    """OmniDFA Table 8 augmentation. PIL in, PIL RGB out. The size CHANGES (the
+    resize step is not undone); the CLIP processor normalises it to 224 later."""
+    if random.random() < 0.5:
+        image = _compress(image, quality=random.randint(75, 95))
+    image = _rescale(image, random.uniform(0.5, 2.0))
+    if random.random() < 0.5:
+        image = image.transpose(Image.FLIP_LEFT_RIGHT)
+    if random.random() < 0.5:
+        image = _randaugment()(image.convert("RGB"))
+    if random.random() < 0.5:
+        image = _blur(image, sigma=random.uniform(0.1, 2.0))
+    return image.convert("RGB")
+
+
+AUG_POLICIES = {"corruption": random_degradation, "omnidfa": omnidfa_augment}
+
+
 if __name__ == "__main__":
     from PIL import ImageDraw
     img = Image.new("RGB", (256, 200))
@@ -101,4 +165,17 @@ if __name__ == "__main__":
     assert changed < 50, f"augmentation never leaves an image clean: {changed}/50"
     for lvl in range(7):
         assert apply_degradation(img, lvl).size == img.size
-    print(f"ok — {changed}/50 augmented, 7 test levels intact")
+
+    # OmniDFA policy (needs torchvision — CINECA only).
+    space = _randaugment()._augmentation_space(31, (200, 256))
+    assert not any(k in space for k in _RANDAUG_DROP), \
+        f"shear/translate still in the op space: {sorted(space)}"
+    assert len(space) >= 8, f"op space collapsed to {sorted(space)}"
+    outs = [omnidfa_augment(img) for _ in range(50)]
+    assert all(o.mode == "RGB" for o in outs), "mode changed"
+    # The resize step always fires, so every output must differ from the input.
+    assert all(o.size != img.size or o.tobytes() != img.tobytes() for o in outs)
+    scales = {o.size for o in outs}
+    assert len(scales) > 10, f"resize is not sampling: {scales}"
+    print(f"ok — {changed}/50 corruption-augmented, 7 test levels intact; "
+          f"omnidfa ops={len(space)} (no shear/translate), {len(scales)} distinct sizes")

@@ -24,16 +24,26 @@ For each term:
   L_neg = max(0, ψ_neg + margin - ξ_neg)
 where ξ = oxy_angle(apex, point) and ψ = half_aperture(apex).
 
+Optional ranking term (λ_ce > 0):
+  L_ce = CE(softmax(-ξ_img_anc / τ), y),  τ = softplus(param), LEARNED.
+Why it is not redundant with the hinges: L_pos saturates the moment the image is
+inside its own cone, and L_neg is averaged over K-1 classes so a single wrong class
+carries λ_neg/(K-1). Neither optimises the ORDER of the ξ across classes, which is
+exactly what inference (argmin ξ) reads. Inference stays untouched — argmin is
+scale-invariant, so τ never leaves training.
+
 Total:
   L = L_img_in_class
       + λ_cap_in_class * L_cap_in_class
       + λ_img_in_cap   * L_img_in_cap
       + λ_norm         * L_norm   (anchor norm regulariser)
+      + λ_ce           * L_ce     (ranking / calibration term)
 """
 from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from geometry.lorentz import half_aperture, oxy_angle
 
@@ -59,6 +69,8 @@ class EntailmentConeLoss(nn.Module):
         lambda_img_in_cap: float = 0.0,
         lambda_norm: float = 0.0,
         target_norm: float = 0.0,
+        lambda_ce: float = 0.0,
+        ce_tau_init: float = 1.0,
     ):
         """
         lambda_cap_in_class > 0 and lambda_img_in_cap > 0 enable the hierarchical
@@ -67,6 +79,10 @@ class EntailmentConeLoss(nn.Module):
 
         lambda_norm, target_norm: anchor-norm regulariser.
           L_norm = mean_c max(0, target_norm - ‖t_c‖)²
+
+        lambda_ce > 0 adds the CE ranking term with a LEARNED temperature. The
+        parameter is created only in that case, so at lambda_ce=0 the module still
+        has no parameters at all and returns the same value it did before.
         """
         super().__init__()
         self.curv = curv
@@ -77,6 +93,11 @@ class EntailmentConeLoss(nn.Module):
         self.lambda_img_in_cap = lambda_img_in_cap
         self.lambda_norm = lambda_norm
         self.target_norm = target_norm
+        self.lambda_ce = lambda_ce
+        if lambda_ce > 0:
+            # τ = softplus(raw) keeps the temperature positive without a clamp.
+            raw = torch.tensor(float(ce_tau_init)).expm1().clamp(min=1e-6).log()
+            self.ce_tau_raw = nn.Parameter(raw)
 
     def _cone_term(
         self,
@@ -182,6 +203,16 @@ class EntailmentConeLoss(nn.Module):
             + self.lambda_img_in_cap   * L_img_in_cap
             + self.lambda_norm         * L_norm
         )
+
+        # ───── 5) CE ranking term (optional) ─────────────────────────────────
+        # -xi_ia is exactly the logit matrix the eval builds (test_hypclip.py:155),
+        # so this trains the quantity inference actually ranks.
+        if self.lambda_ce > 0:
+            tau = F.softplus(self.ce_tau_raw)
+            L_ce = F.cross_entropy(-xi_ia / tau, labels)
+            loss = loss + self.lambda_ce * L_ce
+            stats_extra["loss_ce"] = L_ce.detach()
+            stats_extra["ce_tau"]  = tau.detach()
 
         stats = {
             "loss_img_in_cls": L_img_in_class.detach(),

@@ -1,19 +1,23 @@
 #!/bin/bash
 # ============================================================================
-# CINECA Leonardo — Train the LINEAR PROBE on cached frozen-CLIP features
-# (Fase B). No CLIP here: it loads $WORK/hyp_fine_tuning/clip_features and trains a single
-# nn.Linear with class-balanced cross-entropy, then prints overall / balanced /
-# per-class accuracy + confusion — same metrics as the fine-tuned evals.
+# CINECA Leonardo — Phase B: train the LINEAR PROBE on cached features.
 #
-# Requires the cache from slurm_extract_features.sh to exist first.
+# No CLIP here: it loads one of the caches written by slurm_extract_features.sh
+# and trains a single nn.Linear with class-balanced cross-entropy, then prints
+# overall / balanced / per-class accuracy + confusion — the same metrics as the
+# fine-tuned evals, so the numbers line up directly against 0.993.
 #
-# It's tiny (operates on 768-d vectors), so 1 GPU + 30 min is plenty; you can
-# re-run with different --lr / --epochs / --no_class_weight cheaply.
+# Tiny (768-d vectors), so 1 GPU + 30 min is plenty; re-run with different
+# --lr / --epochs / --no_class_weight cheaply.
 #
-# Submit:  sbatch slurm/slurm_train_probe.sh
+# Submit:  sbatch --export=ALL,SOURCE=frozen     slurm/slurm_train_probe.sh
+#          sbatch --export=ALL,SOURCE=lora       slurm/slurm_train_probe.sh
+#          sbatch --export=ALL,SOURCE=projection slurm/slurm_train_probe.sh
 # ============================================================================
-#SBATCH --account=EUHPC_D26_009B
+
+#SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
+#SBATCH --qos=boost_qos_lprod
 #SBATCH --job-name=train_probe
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -30,17 +34,22 @@ module load cuda/12.6
 source $WORK/hyp_fine_tuning/bin/activate
 
 export TOKENIZERS_PARALLELISM=false
+export IAB_EXCLUDE_GENERATORS=dalle3
 
-cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
+REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
+SOURCE=${SOURCE:-frozen}
+FEAT=$WORK/hyp_fine_tuning/clip_features_${SOURCE}
+OUT=$WORK/hyp_fine_tuning/checkpoints
 
-mkdir -p $WORK/hyp_fine_tuning/checkpoints
+mkdir -p $OUT
+cd $REPO
 
 python train_linear_probe.py \
-    --features_dir $WORK/hyp_fine_tuning/clip_features \
-    --epochs       8 \
+    --features_dir $FEAT \
+    --epochs       30 \
     --lr           1e-3 \
     --weight_decay 1e-4 \
     --batch_size   4096 \
-    --output       $WORK/hyp_fine_tuning/checkpoints/linear_probe.pt
+    --output       $OUT/linear_probe_${SOURCE}.pt
 
-echo "Done: $WORK/hyp_fine_tuning/checkpoints/linear_probe.pt"
+echo "Done: $OUT/linear_probe_${SOURCE}.pt"
