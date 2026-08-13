@@ -35,6 +35,9 @@ REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
 DATA=$FAST/datasets/iab_dataset
 CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_22cls_base_vitl14.pt}
 LOGDIR=${LOGDIR:-$WORK/outputs/hypclip_fair_22cls}
+# PRE_RESIZE=512 -> control run: every test image squared first, so the native->224
+# resampling ratio stops being a per-class channel. Never a head-to-head number.
+PRE_RESIZE=${PRE_RESIZE:-0}
 
 mkdir -p $LOGDIR
 cd $REPO
@@ -50,6 +53,7 @@ CUDA_VISIBLE_DEVICES=0 python -m comparison.training.test_hypclip \
     --num_workers 8 \
     --level_start 0 \
     --level_end   7 \
+    --pre_resize $PRE_RESIZE \
     --log_dir    $LOGDIR
 
 echo "Done. Results in $LOGDIR/test_results_degraded_*.txt"

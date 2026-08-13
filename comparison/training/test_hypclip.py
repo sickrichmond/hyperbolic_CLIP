@@ -53,6 +53,16 @@ def parse_args():
     p.add_argument('--use_semantic_split', action='store_true', default=False)
     p.add_argument('--task_id', type=int, default=1)
     p.add_argument('--log_dir', type=str, default='./logs_test_hypclip')
+    p.add_argument('--pre_resize', type=int, default=0,
+                   help='CONTROL, off by default. Square every test image to NxN before '
+                        'the CLIP processor. Normally the processor resizes the shortest '
+                        'edge to 224, so the native->224 ratio differs per class — and '
+                        'tests/audit_shortcuts.py shows native resolution is strongly '
+                        'class-dependent, i.e. the resampling signature is a candidate '
+                        'shortcut. Pre-resizing makes that ratio the SAME for every image. '
+                        'A large accuracy drop means we were reading resolution; a small '
+                        'one means the fingerprints are real. Suggested: 512. Runs marked '
+                        'with it are a control, never a headline number.')
     return p.parse_args()
 
 
@@ -136,7 +146,12 @@ def main():
     K = x_anc.shape[0]
 
     os.makedirs(args.log_dir, exist_ok=True)
-    config = {'model_name': 'hypclip', 'clip_name': clip_name, 'num_classes': K}
+    config = {'model_name': 'hypclip', 'clip_name': clip_name, 'num_classes': K,
+              'pre_resize': args.pre_resize}
+    if args.pre_resize:
+        print(f"CONTROL RUN: every test image squared to {args.pre_resize}x"
+              f"{args.pre_resize} first — the native->224 resampling ratio is now "
+              f"constant across classes. Not a head-to-head number.")
 
     train_semantics = test_semantics = None
     if args.use_semantic_split:

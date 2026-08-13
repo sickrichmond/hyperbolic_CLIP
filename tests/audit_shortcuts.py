@@ -35,6 +35,12 @@ from comparison.dataset.ImageAttributionDataset.dataset import (
 FORMAT_FEATS = ["is_png", "is_jpeg", "png_bit_depth", "png_color_type", "png_interlace"]
 GEOM_FEATS = ["width", "height", "aspect", "area", "filesize", "bytes_per_pixel"]
 FEATS = GEOM_FEATS + FORMAT_FEATS
+# What actually SURVIVES CLIPImageProcessor (Resize shortest-edge 224 + CenterCrop 224):
+# not area, not filesize, not bytes_per_pixel — the model never sees a number. Only
+#   aspect       — decides how much of the frame the centre crop throws away;
+#   scale_to_224 — the native→224 ratio, whose resampling signature stays in the pixels.
+# A leak that scores high here is one the model could plausibly be reading.
+SURVIVING = ["aspect", "scale_to_224"]
 
 
 def parse_args():
@@ -68,9 +74,37 @@ def features(path):
     return {
         "width": w, "height": h, "aspect": w / max(h, 1), "area": w * h,
         "filesize": size, "bytes_per_pixel": size / max(w * h, 1),
+        # CLIPImageProcessor resizes the SHORTEST edge to 224, so this is the exact
+        # resampling ratio the pixels go through before the model ever sees them.
+        "scale_to_224": 224 / max(min(w, h), 1),
         "is_png": int(ext == ".png"), "is_jpeg": int(ext in (".jpg", ".jpeg")),
         "png_bit_depth": bd, "png_color_type": ct, "png_interlace": il,
     }
+
+
+def resolution_table(rows, labels):
+    """Per class: how many distinct native sizes, and the three most common.
+
+    This is what decides whether the geometry leak is a real confound. If a
+    generator emits at ONE resolution, its native→224 resampling ratio is a
+    constant, and the resampling signature becomes a per-class channel that
+    survives the preprocessing even though the numbers themselves do not.
+    """
+    per_cls = defaultdict(Counter)
+    for r, y in zip(rows, labels):
+        per_cls[y][(r["width"], r["height"])] += 1
+    print(f"\n--- native resolutions ---\n{'class':16s} {'#sizes':>7} {'top-1 share':>12}"
+          f"   most common")
+    for cls in sorted(per_cls):
+        c = per_cls[cls]
+        n = sum(c.values())
+        top = c.most_common(3)
+        share = top[0][1] / n
+        pretty = ", ".join(f"{w}x{h} ({100 * k / n:.0f}%)" for (w, h), k in top)
+        print(f"{cls:16s} {len(c):7d} {share:12.2f}   {pretty}")
+    fixed = [c for c in per_cls if per_cls[c].most_common(1)[0][1] / sum(per_cls[c].values()) > 0.95]
+    print(f"\n{len(fixed)}/{len(per_cls)} classes emit at essentially ONE resolution: "
+          f"{', '.join(sorted(fixed)) or '—'}")
 
 
 def collect(root, per_class, seed):
@@ -132,16 +166,28 @@ def main():
     print(f"real formats: {dict(real_ext)}  "
           f"({100 * (real_ext['.jpg'] + real_ext['.jpeg']) / total_real:.1f}% JPEG)")
 
-    for name, feats in (("ALL metadata", FEATS), ("GEOMETRY only", GEOM_FEATS)):
+    resolution_table(rows, labels)
+
+    for name, feats in (("ALL metadata", FEATS),
+                        ("GEOMETRY only", GEOM_FEATS),
+                        ("SURVIVES the CLIP preprocessing", SURVIVING),
+                        ("scale_to_224 ALONE", ["scale_to_224"])):
         fine, det, imp = tree_accuracy(rows, labels, feats, args.max_depth, args.seed)
         print(f"\n--- decision tree (depth {args.max_depth}) on {name} ---")
         print(f"  22-way balanced accuracy : {fine:.3f}   ({fine / chance:.1f}x chance)")
         print(f"  real-vs-fake balanced acc: {det:.3f}")
         print("  top features: " + ", ".join(f"{f}={v:.2f}" for f, v in imp[:5] if v > 0))
 
-    print("\nOur model is at 0.993 (22-way, clean). Compare the GEOMETRY-only line:\n"
-          "that is the part of the label that leaks with no pixels involved and no\n"
-          "known excuse.")
+    print("\nHow to read this. The model never sees a NUMBER: CLIPImageProcessor resizes\n"
+          "the shortest edge to 224 and centre-crops, so area / filesize / bytes_per_pixel\n"
+          "are gone by the time it looks. The first two blocks therefore measure how much\n"
+          "the BENCHMARK leaks, not how much we cheat.\n"
+          "The third and fourth are the ones that implicate the model: aspect survives as\n"
+          "crop framing, and scale_to_224 survives as a resampling signature in the pixels.\n"
+          "If scale_to_224 alone separates the classes, then resolution is confounded with\n"
+          "the label and part of our accuracy may be resampling statistics rather than\n"
+          "generator fingerprints. The control is a common-resolution eval — see the\n"
+          "`--pre_resize` note in comparison/training/test_hypclip.py.")
 
 
 if __name__ == "__main__":
