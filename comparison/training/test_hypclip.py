@@ -54,15 +54,17 @@ def parse_args():
     p.add_argument('--task_id', type=int, default=1)
     p.add_argument('--log_dir', type=str, default='./logs_test_hypclip')
     p.add_argument('--pre_resize', type=int, default=0,
-                   help='CONTROL, off by default. Square every test image to NxN before '
-                        'the CLIP processor. Normally the processor resizes the shortest '
-                        'edge to 224, so the native->224 ratio differs per class — and '
-                        'tests/audit_shortcuts.py shows native resolution is strongly '
-                        'class-dependent, i.e. the resampling signature is a candidate '
-                        'shortcut. Pre-resizing makes that ratio the SAME for every image. '
-                        'A large accuracy drop means we were reading resolution; a small '
-                        'one means the fingerprints are real. Suggested: 512. Runs marked '
-                        'with it are a control, never a headline number.')
+                   help='CONTROL, off by default. Resize every test image to a shortest '
+                        'edge of N (aspect preserved) before the CLIP processor. Normally '
+                        'the processor takes the shortest edge to 224, so the native->224 '
+                        'ratio differs per class — and tests/audit_shortcuts.py shows 20 of '
+                        'the 22 classes emit at ONE native resolution, so that ratio is a '
+                        'candidate shortcut. Pre-resizing makes it the SAME for every image. '
+                        'A large accuracy drop means we were reading resolution; a small one '
+                        'means the fingerprints are real. Suggested: 512 — FLUX and SD1_5 are '
+                        'natively 512, so for them the whole control is a no-op and their '
+                        'recall is the built-in null. Runs marked with it are a control, '
+                        'never a headline number.')
     return p.parse_args()
 
 

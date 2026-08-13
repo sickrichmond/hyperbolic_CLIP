@@ -111,6 +111,7 @@ def resolution_analysis(conf, names):
         print(f"| {label} | {len(idx)} | {sum(recs) / len(recs):.4f} |")
 
     inside = outside = 0
+    n_in = n_out = 0
     for i in range(k):
         for j in range(k):
             if i == j:
@@ -121,12 +122,20 @@ def resolution_analysis(conf, names):
                 continue
             if grp[i] == grp[j]:
                 inside += conf[i][j]
+                n_in += 1
             else:
                 outside += conf[i][j]
+                n_out += 1
     tot = inside + outside or 1
+    # The null: errors spread uniformly over the off-diagonal cells. With 14 of the 20
+    # fixed-resolution classes in the 1024 group, "same group" is already the majority
+    # of the cells, so the raw fraction means nothing without this number.
+    null = n_in / (n_in + n_out or 1)
     print(f"\nerrors between fixed-resolution classes: {inside / tot:.3f} inside the same "
-          f"group, {outside / tot:.3f} across groups  ({tot} errors)")
-    print("Across-group errors are ones the resolution channel would have prevented.")
+          f"group, {outside / tot:.3f} across groups  ({tot} errors; "
+          f"uniform-error null would be {null:.3f} inside)")
+    print("A model literally reading the resampling ratio could make NO across-group "
+          "errors. Anything well above 0 there rules the ratio out as the channel.")
 
 
 def routing(conf, real, family):

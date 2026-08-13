@@ -44,9 +44,16 @@ class HypclipDataset(ImageAttributionDataset):
         item = super().__getitem__(idx)
         image = item['image']
         if self.pre_resize:
-            # Squared, so aspect ratio is equalised too: both channels the audit
-            # flags as surviving the preprocessing die at once.
-            image = image.resize((self.pre_resize, self.pre_resize), Image.BICUBIC)
+            # SHORTEST EDGE to N, aspect preserved. The processor then takes every
+            # image N->224, so the resampling ratio is the same for all classes —
+            # which is the channel the audit implicates (scale_to_224 alone gives
+            # real-vs-fake 0.866; adding aspect only reaches 0.867, so aspect carries
+            # nothing). Squaring instead would also DISTORT non-square images (grok3,
+            # real, gemini) and their drop could no longer be attributed.
+            w, h = image.size
+            k = self.pre_resize / min(w, h)
+            image = image.resize((max(1, round(w * k)), max(1, round(h * k))),
+                                 Image.BICUBIC)
         pixel = self.processor(images=image, return_tensors='pt')['pixel_values'][0]
         item['image'] = pixel
         return item
