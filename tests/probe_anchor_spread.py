@@ -39,7 +39,11 @@ from geometry.lorentz import half_aperture
 
 
 def load_any(path, device):
-    """(anchor directions, ψ or None, one-line description) for either geometry."""
+    """(model, anchors, ψ or None, description, clip_name) for either geometry.
+
+    Shared with tests/probe_degradation_shift.py — the checkpoint-loading contract
+    (which model class, which load_anchors, the anchor permutation) lives here once.
+    """
     ckpt = torch.load(path, map_location=device, weights_only=False)
     geometry = ckpt.get("geometry", "hyperbolic")
 
@@ -58,7 +62,7 @@ def load_any(path, device):
         # The CE turns cosine gaps into logit gaps by this factor, so it is what says
         # whether tight packing is actually a problem for THIS model.
         scale = min(model.logit_scale.exp().item(), 100.0)
-        return x_anc, None, f"euclidean, logit_scale={scale:.1f}"
+        return model, x_anc, None, f"euclidean, logit_scale={scale:.1f}", ckpt["clip_name"]
 
     from comparison.training.test_hypclip import load_anchors
     from models.attribution_clip import AttributionCLIP
@@ -72,11 +76,13 @@ def load_any(path, device):
     model.eval()
     x_anc = load_anchors(ckpt, model, curv, device)
     psi = half_aperture(x_anc, curv=curv, min_radius=ckpt.get("min_radius", 0.1))
-    return x_anc, psi, f"hyperbolic, curv={curv:g}, target_norm≈{x_anc.norm(dim=-1).mean():.2f}"
+    return (model, x_anc, psi,
+            f"hyperbolic, curv={curv:g}, ‖x_anc‖≈{x_anc.norm(dim=-1).mean():.2f}",
+            ckpt["clip_name"])
 
 
 def report(path, device, names):
-    x_anc, psi, desc = load_any(path, device)
+    _, x_anc, psi, desc, _ = load_any(path, device)
     K = x_anc.shape[0]
     if K != len(names):
         raise ValueError(f"{os.path.basename(path)}: {K} anchors but the active label map has "
