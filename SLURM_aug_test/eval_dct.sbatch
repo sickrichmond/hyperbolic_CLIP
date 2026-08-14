@@ -6,7 +6,8 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=8
-#SBATCH --gpus-per-node=1
+#SBATCH --gpus-per-node=4
+#SBATCH --mem=32G
 #SBATCH --time=08:00:00
 #SBATCH --array=0-3
 #SBATCH --output=SLURM_aug_test/logs/%x_%A_%a.out

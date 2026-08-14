@@ -28,7 +28,9 @@ class PatchAttributor(AbstractAttributor):
         self.config = config or {}  
         self.config = ConfigToAttr(self.config)
         self.device = "cuda"
-        self.gpu_ids = [0]
+        # Follow torchrun's current device during distributed inference. The
+        # default remains CUDA 0 for existing single-process training/eval.
+        self.gpu_ids = [torch.cuda.current_device()]
 
         self.build_model(self.config)  
         self.build_loss(self.config)  
@@ -126,4 +128,4 @@ class PatchAttributor(AbstractAttributor):
 
         state_dict = torch.load(path, map_location='cpu')  
         self.load_state_dict(state_dict)  
-        print(f"Loaded parameters from {path}")  
+        print(f"Loaded parameters from {path}")

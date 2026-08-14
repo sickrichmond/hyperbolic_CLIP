@@ -31,9 +31,15 @@ OUTPUT_ROOT=${AUG_TEST_OUTPUT_ROOT:-/leonardo_work/EUHPC_D35_189/hyp_fine_tuning
 CHECKPOINT=${AUG_TEST_CHECKPOINT:-$DEFAULT_CHECKPOINT}
 BATCH_SIZE=${AUG_TEST_BATCH_SIZE:-$DEFAULT_BATCH}
 NUM_WORKERS=${AUG_TEST_NUM_WORKERS:-$DEFAULT_WORKERS}
+NUM_GPUS=${AUG_TEST_NUM_GPUS:-4}
 DATASET_ROOT=$DATA_ROOT/$DATASET_NAME
 OUTPUT_DIR=$OUTPUT_ROOT/$MODEL/$DATASET_NAME
 CONFIG=$REPO_ROOT/$CONFIG_REL
+
+if [[ ! $NUM_GPUS =~ ^[1-4]$ ]]; then
+    echo "ERROR: AUG_TEST_NUM_GPUS must be 1, 2, 3, or 4" >&2
+    exit 2
+fi
 
 for required in "$CONFIG" "$CHECKPOINT" "$DATASET_ROOT"; do
     if [[ ! -e $required ]]; then
@@ -86,5 +92,6 @@ fi
 mkdir -p "$OUTPUT_DIR"
 cd "$REPO_ROOT"
 echo "model=$MODEL dataset=$DATASET_NAME checkpoint=$CHECKPOINT"
-echo "batch_size=$BATCH_SIZE workers=$NUM_WORKERS output=$OUTPUT_DIR"
-python -m comparison.training.eval_aug_splits "${ARGS[@]}"
+echo "gpus=$NUM_GPUS batch_size_per_gpu=$BATCH_SIZE total_workers=$NUM_WORKERS output=$OUTPUT_DIR"
+python -m torch.distributed.run --standalone --nnodes=1 --nproc-per-node="$NUM_GPUS" \
+    -m comparison.training.eval_aug_splits "${ARGS[@]}"

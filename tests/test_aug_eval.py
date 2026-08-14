@@ -14,8 +14,10 @@ from comparison.training.eval_aug_splits import (
     count_candidate_files,
     count_valid_files,
     evaluate_protocols,
+    exact_shard_indices,
     image_level_batch_field,
     probabilities_from_output,
+    workers_for_rank,
 )
 
 
@@ -121,6 +123,21 @@ class AugmentedEvaluationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "positive"):
             balanced_subset_indices(labels, 0)
 
+    def test_distributed_shards_are_exact_without_padding(self):
+        total = 78_125
+        shards = [exact_shard_indices(total, rank, 4) for rank in range(4)]
+        flattened = [index for shard in shards for index in shard]
+        self.assertEqual(len(flattened), total)
+        self.assertEqual(len(set(flattened)), total)
+        self.assertEqual(set(flattened), set(range(total)))
+        self.assertEqual([len(shard) for shard in shards], [19532, 19531, 19531, 19531])
+        with self.assertRaisesRegex(ValueError, "between 1 and 4"):
+            exact_shard_indices(total, 0, 5)
+
+    def test_loader_workers_are_a_job_wide_budget(self):
+        self.assertEqual([workers_for_rank(8, rank, 4) for rank in range(4)], [2, 2, 2, 2])
+        self.assertEqual([workers_for_rank(2, rank, 4) for rank in range(4)], [1, 1, 0, 0])
+
     def test_inventory_accepts_images_without_training_filename_filters(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -165,7 +182,11 @@ class SlurmAugmentedEvaluationTests(unittest.TestCase):
         launchers = sorted(self.slurm_dir.glob("eval_*.sbatch"))
         self.assertEqual(len(launchers), 8)
         for launcher in launchers:
-            self.assertIn("#SBATCH --array=0-3", launcher.read_text())
+            contents = launcher.read_text()
+            self.assertIn("#SBATCH --array=0-3", contents)
+            self.assertIn("#SBATCH --nodes=1", contents)
+            self.assertIn("#SBATCH --gpus-per-node=4", contents)
+            self.assertIn("#SBATCH --mem=32G", contents)
 
         submit_script = (self.slurm_dir / "submit_all.sh").read_text()
         for launcher in launchers:

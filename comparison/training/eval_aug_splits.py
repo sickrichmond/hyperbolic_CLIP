@@ -22,6 +22,7 @@ from typing import Any, Iterable, Sequence
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import yaml
 from sklearn import metrics
 from torch.utils.data import DataLoader, Subset
@@ -237,6 +238,85 @@ def balanced_subset_indices(labels: Sequence[int], limit: int | None) -> list[in
         if not made_progress:
             break
     return selected
+
+
+def exact_shard_indices(total: int, rank: int, world_size: int) -> list[int]:
+    """Partition indices across ranks once, without sampler padding or drops."""
+    if total < 0:
+        raise ValueError("total must be non-negative")
+    if world_size < 1 or world_size > 4:
+        raise ValueError("distributed inference supports between 1 and 4 ranks")
+    if rank < 0 or rank >= world_size:
+        raise ValueError(f"rank {rank} is outside world size {world_size}")
+    return list(range(rank, total, world_size))
+
+
+def workers_for_rank(total_workers: int, rank: int, world_size: int) -> int:
+    """Distribute the job-wide loader-worker budget across local GPU ranks."""
+    if total_workers < 0:
+        raise ValueError("total_workers must be non-negative")
+    exact_shard_indices(0, rank, world_size)
+    quotient, remainder = divmod(total_workers, world_size)
+    return quotient + int(rank < remainder)
+
+
+def initialize_distributed() -> tuple[int, int, int, torch.device]:
+    """Initialize an optional torchrun process group on at most four local GPUs."""
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    exact_shard_indices(0, rank, world_size)
+    if local_rank < 0 or local_rank >= world_size:
+        raise ValueError(f"LOCAL_RANK {local_rank} is outside world size {world_size}")
+    if not torch.cuda.is_available():
+        raise RuntimeError("The registered baselines require a CUDA-enabled SLURM job")
+    if world_size > torch.cuda.device_count():
+        raise RuntimeError(
+            f"torchrun requested {world_size} ranks but only "
+            f"{torch.cuda.device_count()} CUDA devices are visible"
+        )
+    torch.cuda.set_device(local_rank)
+    if world_size > 1:
+        if not dist.is_available():
+            raise RuntimeError("torch.distributed is unavailable in this PyTorch build")
+        dist.init_process_group(backend="nccl", init_method="env://")
+    return rank, local_rank, world_size, torch.device("cuda", local_rank)
+
+
+def gather_rank_results(
+    probabilities: np.ndarray,
+    labels: np.ndarray,
+    semantics: np.ndarray,
+    rank: int,
+    world_size: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Gather variable-size, exactly sharded inference results onto rank zero."""
+    if world_size == 1:
+        return probabilities, labels, semantics
+    payload = {
+        "probabilities": probabilities,
+        "labels": labels,
+        "semantics": semantics,
+    }
+    gathered: list[dict[str, np.ndarray] | None] | None = (
+        [None] * world_size if rank == 0 else None
+    )
+    dist.gather_object(payload, gathered, dst=0)
+    if rank != 0:
+        return None
+    assert gathered is not None and all(item is not None for item in gathered)
+    complete = [item for item in gathered if item is not None]
+    return (
+        np.concatenate([item["probabilities"] for item in complete], axis=0),
+        np.concatenate([item["labels"] for item in complete], axis=0),
+        np.concatenate([item["semantics"] for item in complete], axis=0),
+    )
+
+
+def finish_distributed() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 def _auc_ap(
@@ -609,8 +689,7 @@ def main() -> None:
     # Drop optimizer/scheduler tensors before constructing memory-heavy models.
     del checkpoint
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("The registered baselines require a CUDA-enabled SLURM job")
+    rank, local_rank, world_size, device = initialize_distributed()
 
     clip_context = (
         defl_offline_clip_loader(state_dict)
@@ -663,7 +742,6 @@ def main() -> None:
     # Once strict loading succeeds the checkpoint-owned CPU weights are no
     # longer needed for inference.
     del state_dict
-    device = torch.device("cuda")
     model.to(device)
     model.device = device
     model.eval()
@@ -679,25 +757,35 @@ def main() -> None:
             name: model_class_to_label[name] for name in TARGET_CLASSES
         },
         "strict_checkpoint_load": True,
+        "distributed_world_size": world_size,
     }
-    print(json.dumps(validation, indent=2))
+    if rank == 0:
+        print(json.dumps(validation, indent=2))
     if args.validate_only:
+        finish_distributed()
         return
 
+    rank_indices = exact_shard_indices(len(eval_dataset), rank, world_size)
+    rank_dataset = Subset(eval_dataset, rank_indices) if world_size > 1 else eval_dataset
+    rank_workers = workers_for_rank(args.num_workers, rank, world_size)
     loader = DataLoader(
-        eval_dataset,
+        rank_dataset,
         batch_size=args.batch_size,
         shuffle=False,
-        num_workers=args.num_workers,
+        num_workers=rank_workers,
         pin_memory=True,
-        persistent_workers=args.num_workers > 0,
+        persistent_workers=rank_workers > 0,
         collate_fn=collate_fn,
     )
     all_probabilities: list[torch.Tensor] = []
     all_labels: list[torch.Tensor] = []
     all_semantics: list[torch.Tensor] = []
     with torch.inference_mode():
-        for batch in tqdm(loader, desc=f"{args.model}:{args.dataset_root.name}"):
+        for batch in tqdm(
+            loader,
+            desc=f"{args.model}:{args.dataset_root.name}:rank{rank}",
+            disable=rank != 0,
+        ):
             for key, value in batch.items():
                 if isinstance(value, torch.Tensor):
                     batch[key] = value.to(device, non_blocking=True)
@@ -720,9 +808,38 @@ def main() -> None:
             all_labels.append(batch_labels.cpu())
             all_semantics.append(batch_semantics.cpu())
 
-    probabilities_np = torch.cat(all_probabilities).numpy()
-    labels_np = torch.cat(all_labels).numpy()
-    semantics_np = torch.cat(all_semantics).numpy()
+    probabilities_np = (
+        torch.cat(all_probabilities).numpy()
+        if all_probabilities
+        else np.empty((0, EXPECTED_NUM_CLASSES), dtype=np.float32)
+    )
+    labels_np = (
+        torch.cat(all_labels).numpy()
+        if all_labels
+        else np.empty((0,), dtype=np.int64)
+    )
+    semantics_np = (
+        torch.cat(all_semantics).numpy()
+        if all_semantics
+        else np.empty((0,), dtype=np.int64)
+    )
+    gathered_results = gather_rank_results(
+        probabilities_np,
+        labels_np,
+        semantics_np,
+        rank,
+        world_size,
+    )
+    if rank != 0:
+        finish_distributed()
+        return
+    assert gathered_results is not None
+    probabilities_np, labels_np, semantics_np = gathered_results
+    if labels_np.size != len(eval_dataset):
+        raise RuntimeError(
+            f"distributed inference gathered {labels_np.size} predictions for "
+            f"{len(eval_dataset)} images"
+        )
     class_names = [
         name for name, _ in sorted(model_class_to_label.items(), key=lambda item: item[1])
     ]
@@ -765,15 +882,24 @@ def main() -> None:
             "git_dirty": _git_is_dirty(repo_root),
             "hostname": socket.gethostname(),
             "command": [
-                sys.executable,
+                "torchrun" if world_size > 1 else sys.executable,
                 "-m",
                 "comparison.training.eval_aug_splits",
                 *sys.argv[1:],
             ],
             "cuda_device": torch.cuda.get_device_name(device),
+            "cuda_devices": [
+                torch.cuda.get_device_name(index) for index in range(world_size)
+            ],
             "torch_version": torch.__version__,
-            "batch_size": args.batch_size,
-            "num_workers": args.num_workers,
+            "distributed_world_size": world_size,
+            "batch_size_per_gpu": args.batch_size,
+            "maximum_global_batch_size": args.batch_size * world_size,
+            "num_workers_total": args.num_workers,
+            "num_workers_per_rank": [
+                workers_for_rank(args.num_workers, index, world_size)
+                for index in range(world_size)
+            ],
             "defl_clip_initialization": defl_clip_initialization,
         },
         "metrics": protocol_metrics,
@@ -781,6 +907,7 @@ def main() -> None:
     _write_results(args.output_dir, report)
     print(f"Wrote {args.output_dir / 'metrics.json'}")
     print(f"Wrote {args.output_dir / 'summary.csv'}")
+    finish_distributed()
 
 
 if __name__ == "__main__":
