@@ -67,8 +67,6 @@ def parse_args():
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=8)
     p.add_argument("--selfcheck", action="store_true")
-    p.add_argument("--anchors_only", action="store_true",
-                   help="print the anchor geometry and stop — no images, ~30s")
     return p.parse_args()
 
 
@@ -147,21 +145,9 @@ def main():
             f"Set IAB_EXCLUDE_GENERATORS to include it (e.g. dalle3,{args.unknown}).")
     psi = half_aperture(x_anc, curv=curv, min_radius=ckpt.get("min_radius", 0.1))
     print(f"ψ: min={psi.min():.4f} max={psi.max():.4f} spread={psi.max() - psi.min():.4f}")
-
-    # Decisive for reading max_c cos(x, a_c) ≈ 1: it is only evidence of per-class
-    # collapse if the ANCHORS are spread apart. If the anchors are themselves mutually
-    # collinear, everything lives in one narrow ray bundle and the classifier separates
-    # on the 5th decimal — a very different, and much worse, picture.
     names = harness_class_names()
-    A = F.normalize(x_anc, dim=-1) @ F.normalize(x_anc, dim=-1).T
-    off = A[~torch.eye(len(names), dtype=torch.bool, device=A.device)]
-    print(f"anchor↔anchor cos (projected space): max={off.max():.4f} "
-          f"mean={off.mean():.4f} min={off.min():.4f}")
-    i, j = torch.triu_indices(len(names), len(names), offset=1)
-    for r in A[i, j].argsort(descending=True)[:3]:
-        print(f"    {A[i[r], j[r]]:.4f}  {names[i[r]]} ↔ {names[j[r]]}")
-    if args.anchors_only:
-        return
+    # How much of the sphere the anchors span — the context needed to read max_c cos
+    # below — is `python -m tests.probe_anchor_spread <ckpt>`, which also does euclidean.
 
     with open(args.manifest) as f:
         val_paths = set(json.load(f)["val"])
