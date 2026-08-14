@@ -47,12 +47,8 @@ from data.iab_clip_dataset import IABCLIPDataset
 from geometry.lorentz import half_aperture, oxy_angle
 from models.attribution_clip import AttributionCLIP
 
-KNOWN = ["real", "4o", "CogView3_PLUS", "FLUX", "KANDINSKY", "PIXART", "PLAYGROUND_2_5",
-         "SD1_5", "SD2_1", "SD3", "SD3_5", "SDXL", "gemini", "grok3", "hidream",
-         "hunyuan", "ideogram", "infinity", "janus-pro", "kling", "mid-5.2", "mid-6.0"]
 SEMANTICS = ["COCO", "cat", "dog", "wild", "FFHQ", "celebahq", "bedroom", "church",
              "classroom", "ImageNet-1k"]
-UNKNOWN = "dalle3"
 
 
 def parse_args():
@@ -64,6 +60,9 @@ def parse_args():
     p.add_argument("--manifest", default=os.environ.get("WORK", "") + "/hyp_fine_tuning/split_manifest_22cls.json",
                    help="known images are the manifest's VAL split — held out, and the "
                         "same images the linear probes were scored on")
+    p.add_argument("--unknown", default="dalle3",
+                   help="the held-out generator. Must NOT be in the checkpoint's label "
+                        "space, i.e. must be in IAB_EXCLUDE_GENERATORS.")
     p.add_argument("--n", type=int, default=8000, help="images per side")
     p.add_argument("--batch_size", type=int, default=64)
     p.add_argument("--num_workers", type=int, default=8)
@@ -142,7 +141,10 @@ def main():
     model.eval()
 
     x_anc = load_anchors(ckpt, model, curv, device)
-    assert len(harness_class_names()) == 22, "set IAB_EXCLUDE_GENERATORS=dalle3"
+    if args.unknown in harness_class_names():
+        raise ValueError(
+            f"'{args.unknown}' is in the label space, so it is not unknown to this model. "
+            f"Set IAB_EXCLUDE_GENERATORS to include it (e.g. dalle3,{args.unknown}).")
     psi = half_aperture(x_anc, curv=curv, min_radius=ckpt.get("min_radius", 0.1))
     print(f"ψ: min={psi.min():.4f} max={psi.max():.4f} spread={psi.max() - psi.min():.4f}")
 
@@ -166,10 +168,12 @@ def main():
     common = dict(root=args.dataset_path, captions_dir=args.captions_dir,
                   semantics=SEMANTICS, processor_name=ckpt["clip_name"], split="all",
                   require_caption=False, include_uncaptioned=True)
-    known_ds = IABCLIPDataset(**common, generators=KNOWN, include_paths=val_paths)
-    unknown_ds = IABCLIPDataset(**common, generators=[UNKNOWN], max_per_class=args.n)
-    print(f"known (manifest val): {len(known_ds)} → {min(len(known_ds), args.n)}   "
-          f"unknown ({UNKNOWN}): {len(unknown_ds)}")
+    # `names` is the model's own label space, so the known side is exactly the classes
+    # it was trained on — held out via the manifest's val split.
+    known_ds = IABCLIPDataset(**common, generators=names, include_paths=val_paths)
+    unknown_ds = IABCLIPDataset(**common, generators=[args.unknown], max_per_class=args.n)
+    print(f"known ({len(names)} classes, manifest val): {len(known_ds)} → "
+          f"{min(len(known_ds), args.n)}   unknown ({args.unknown}): {len(unknown_ds)}")
 
     def run(ds, desc):
         loader = DataLoader(subset(ds, args.n), batch_size=args.batch_size,
