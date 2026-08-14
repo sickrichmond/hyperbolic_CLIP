@@ -9,11 +9,13 @@ GPUs, and 32 GB of memory. Array indices map to the four dataset names in
 /leonardo_work/EUHPC_D35_189/hyp_fine_tuning/aug_test_results/<model>/<dataset>/
 ```
 
-The three complete datasets contain 80,000 valid images each. The
-photorealistic dataset contains 78,125. Temporary partial files are excluded
-and counted in the JSON provenance (`ignored_non_image_files`). The optional
-`real` symlink in the standard recap directory is excluded because this suite
-scores the four requested generators while preserving their 22-way labels.
+The valid, non-empty image counts are 79,997 for recap, 80,000 for cartoon,
+79,997 for clipart, and 78,124 for photorealistic. Seven zero-byte files across
+the source datasets are excluded explicitly and recorded by path in the JSON
+provenance (`zero_byte_image_files`). Temporary partial files are excluded and
+counted separately (`ignored_non_image_files`). The optional `real` symlink in
+the standard recap directory is excluded because this suite scores the four
+requested generators while preserving their 22-way labels.
 
 Run submission commands from the repository root. Submit all 32
 model/dataset evaluations with:

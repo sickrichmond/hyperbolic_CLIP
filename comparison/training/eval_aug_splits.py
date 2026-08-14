@@ -490,7 +490,11 @@ def enumerate_target_samples(
             if not directory.is_dir():
                 continue
             for path in sorted(directory.iterdir()):
-                if path.is_file() and path.suffix.lower() in _IMAGE_SUFFIXES:
+                if (
+                    path.is_file()
+                    and path.suffix.lower() in _IMAGE_SUFFIXES
+                    and path.stat().st_size > 0
+                ):
                     samples.append(
                         (
                             str(path),
@@ -502,28 +506,52 @@ def enumerate_target_samples(
     return samples
 
 
-def count_valid_files(dataset_root: Path, semantic_relpaths: dict[str, str]) -> int:
-    """Independently count images anywhere below the four target class roots."""
-    total = 0
+def inventory_target_files(dataset_root: Path) -> dict[str, Any]:
+    """Inventory target-root files in one recursive filesystem pass."""
+    candidate_count = 0
+    image_count = 0
+    empty_images: list[str] = []
     for generator in TARGET_CLASSES:
         generator_root = dataset_root / generator
         if not generator_root.is_dir():
             continue
         for directory, _, filenames in os.walk(generator_root):
-            total += sum(Path(name).suffix.lower() in _IMAGE_SUFFIXES for name in filenames)
-    return total
+            directory_path = Path(directory)
+            candidate_count += len(filenames)
+            for name in filenames:
+                path = directory_path / name
+                if path.suffix.lower() not in _IMAGE_SUFFIXES:
+                    continue
+                image_count += 1
+                if path.stat().st_size == 0:
+                    empty_images.append(str(path.resolve()))
+    empty_images.sort()
+    return {
+        "candidate_files": candidate_count,
+        "image_files": image_count,
+        "valid_images": image_count - len(empty_images),
+        "zero_byte_image_files": empty_images,
+    }
+
+
+def count_valid_files(dataset_root: Path, semantic_relpaths: dict[str, str]) -> int:
+    """Independently count non-empty images below the four target roots."""
+    return int(inventory_target_files(dataset_root)["valid_images"])
+
+
+def count_image_files(dataset_root: Path) -> int:
+    """Count image-suffixed files, including empty/corrupt source artifacts."""
+    return int(inventory_target_files(dataset_root)["image_files"])
+
+
+def zero_byte_image_files(dataset_root: Path) -> list[str]:
+    """Return deterministic absolute paths for empty image-suffixed artifacts."""
+    return list(inventory_target_files(dataset_root)["zero_byte_image_files"])
 
 
 def count_candidate_files(dataset_root: Path, semantic_relpaths: dict[str, str]) -> int:
     """Count every file below target roots, including non-image artifacts."""
-    total = 0
-    for generator in TARGET_CLASSES:
-        generator_root = dataset_root / generator
-        if not generator_root.is_dir():
-            continue
-        for _, _, filenames in os.walk(generator_root):
-            total += len(filenames)
-    return total
+    return int(inventory_target_files(dataset_root)["candidate_files"])
 
 
 def _checkpoint_provenance(path: Path, checkpoint: dict[str, Any]) -> dict[str, Any]:
@@ -717,8 +745,11 @@ def main() -> None:
     if hasattr(dataset, "N"):
         dataset.N = len(dataset.samples)
     dataset.set_test()
-    expected_count = count_valid_files(args.dataset_root, semantic_to_relpath)
-    candidate_count = count_candidate_files(args.dataset_root, semantic_to_relpath)
+    inventory = inventory_target_files(args.dataset_root)
+    expected_count = int(inventory["valid_images"])
+    image_count = int(inventory["image_files"])
+    empty_image_paths = list(inventory["zero_byte_image_files"])
+    candidate_count = int(inventory["candidate_files"])
     if len(dataset) != expected_count:
         raise RuntimeError(
             f"dataset adapter enumerated {len(dataset)} images in known semantic cells, "
@@ -869,8 +900,11 @@ def main() -> None:
             "root": str(args.dataset_root),
             "valid_images": len(dataset),
             "candidate_files": candidate_count,
-            "ignored_non_image_files": candidate_count - len(dataset),
-            "evaluated_images": len(eval_dataset),
+            "image_files": image_count,
+            "zero_byte_image_count": len(empty_image_paths),
+            "zero_byte_image_files": empty_image_paths,
+            "ignored_non_image_files": candidate_count - image_count,
+            "evaluated_images": int(labels_np.size),
             "max_images": args.max_images,
             "class_counts": dict(sorted(sample_counts.items())),
             "semantic_counts": dict(sorted(semantic_counts.items())),

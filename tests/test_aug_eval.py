@@ -12,12 +12,15 @@ from comparison.training.eval_aug_splits import (
     balanced_subset_indices,
     checkpoint_output_classes,
     count_candidate_files,
+    count_image_files,
     count_valid_files,
+    enumerate_target_samples,
     evaluate_protocols,
     exact_shard_indices,
     image_level_batch_field,
     probabilities_from_output,
     workers_for_rank,
+    zero_byte_image_files,
 )
 
 
@@ -143,22 +146,47 @@ class AugmentedEvaluationTests(unittest.TestCase):
             root = Path(directory)
             cell = root / "FLUX" / "AnimalFace" / "cat"
             cell.mkdir(parents=True)
-            (cell / "AnimalFace_cat_p1_i0.png").touch()
+            (cell / "AnimalFace_cat_p1_i0.png").write_bytes(b"image")
             (cell / ".AnimalFace_cat_p1_i0.png.partial").touch()
-            (cell / "AnimalFace_cat_p1000_i0.png").touch()
-            (cell / "AnimalFace_cat_p1_i2.png").touch()
-            (cell / "AnimalFace_cat_p2_i0.jpg").touch()
+            (cell / "AnimalFace_cat_p1000_i0.png").write_bytes(b"image")
+            (cell / "AnimalFace_cat_p1_i2.png").write_bytes(b"image")
+            (cell / "AnimalFace_cat_p2_i0.jpg").write_bytes(b"image")
             (cell / "notes.txt").touch()
             self.assertEqual(count_valid_files(root, {"cat": "AnimalFace/cat"}), 4)
+            self.assertEqual(count_image_files(root), 4)
             self.assertEqual(count_candidate_files(root, {"cat": "AnimalFace/cat"}), 6)
 
             # The inventory is recursive and independent from the semantic map,
             # so an image in an unexpected path cannot be silently skipped.
             unexpected = root / "FLUX" / "unexpected" / "extra.png"
             unexpected.parent.mkdir()
-            unexpected.touch()
+            unexpected.write_bytes(b"image")
             self.assertEqual(count_valid_files(root, {"cat": "AnimalFace/cat"}), 5)
+            self.assertEqual(count_image_files(root), 5)
             self.assertEqual(count_candidate_files(root, {"cat": "AnimalFace/cat"}), 7)
+
+            empty = root / "FLUX" / "unexpected" / "empty.png"
+            empty.touch()
+            self.assertEqual(count_valid_files(root, {"cat": "AnimalFace/cat"}), 5)
+            self.assertEqual(count_image_files(root), 6)
+            self.assertEqual(count_candidate_files(root, {"cat": "AnimalFace/cat"}), 8)
+            self.assertEqual(zero_byte_image_files(root), [str(empty.resolve())])
+
+    def test_dataset_enumeration_excludes_zero_byte_images(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            cell = root / "FLUX" / "AnimalFace" / "cat"
+            cell.mkdir(parents=True)
+            valid = cell / "valid.png"
+            valid.write_bytes(b"image")
+            (cell / "empty.png").touch()
+            samples = enumerate_target_samples(
+                root,
+                {"FLUX": 2, "SD3": 8, "SD3_5": 9, "SDXL": 10},
+                {"cat": "AnimalFace/cat"},
+                {"cat": 0},
+            )
+            self.assertEqual(samples, [(str(valid), 2, 0, "cat")])
 
 
 class SlurmAugmentedEvaluationTests(unittest.TestCase):
