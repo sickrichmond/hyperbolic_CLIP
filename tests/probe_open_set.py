@@ -83,6 +83,7 @@ def score_batch(x_img, x_anc, psi, curv):
         "neg_cos": -cos.max(1).values,
         "neg_norm": -x_img.norm(dim=-1),
         "margin": (xi - psi.unsqueeze(0)).min(1).values,
+        "pred": xi.argmin(1).float(),      # not a score — the diagnostic below
     }
 
 
@@ -184,7 +185,26 @@ def main():
     rej_k = (k["margin"] > 0).float().mean().item()
     rej_u = (u["margin"] > 0).float().mean().item()
     print(f"parameter-free rule ξ_c > ψ_c ∀c: rejects {rej_u:.1%} of unknown, "
-          f"{rej_k:.1%} of known")
+          f"{rej_k:.1%} of known   (ψ mean {psi.mean():.4f})")
+
+    # max cos prints as -1.0000 for both sides at 4 dp. If it really is saturated, every
+    # image sits on top of an anchor direction and there is no room left for a novelty
+    # score — so look at it with enough digits to tell saturation from a tie.
+    names = harness_class_names()
+    print("\nmax_c cos(x, a_c), quantiles:")
+    for lbl, d in (("known", k), ("unknown", u)):
+        q = torch.quantile(-d["neg_cos"], torch.tensor([0.01, 0.5, 0.99]))
+        print(f"  {lbl:8s} p01={q[0]:.6f}  median={q[1]:.6f}  p99={q[2]:.6f}")
+
+    # THE control on whether dalle3 is a fair unknown at all: if it lands overwhelmingly
+    # on one known class, it is a near-duplicate of that generator, not a novel one, and
+    # confident predictions are the correct behaviour rather than an OSR failure.
+    print("\nwhere argmin ξ sends them (top 5):")
+    for lbl, d in (("known", k), ("unknown", u)):
+        h = torch.bincount(d["pred"].long(), minlength=len(names))
+        top = h.argsort(descending=True)[:5]
+        print(f"  {lbl:8s} " + "  ".join(
+            f"{names[i]}={h[i] / len(d['pred']):.1%}" for i in top if h[i] > 0))
 
 
 if __name__ == "__main__":
