@@ -64,6 +64,12 @@ def parse_args():
     p.add_argument("--lr",             type=float, default=5e-5)
     p.add_argument("--weight_decay",   type=float, default=0.01)
     p.add_argument("--val_frac",       type=float, default=0.2)
+    p.add_argument("--split_manifest", default=None,
+                   help="Harness split JSON (train/val/test path lists), same flag as "
+                        "train_attribution.py. REQUIRED for the geometry ablation to be "
+                        "controlled: without it this trains on the caption-based split "
+                        "while the hyperbolic run trains on the manifest, so the "
+                        "comparison would carry two variables instead of one.")
     p.add_argument("--seed",           type=int,   default=42)
     p.add_argument("--max_per_class",  type=int,   default=None)
     p.add_argument("--num_workers",    type=int,   default=8)
@@ -116,31 +122,34 @@ def main():
         print(f"  [{i}] {c:8s} → \"{t}\"")
 
     # ── Datasets (identical splits to the hyperbolic run) ──────────────────────
-    print("\n=== Train split ===")
-    train_ds = IABCLIPDataset(
+    common = dict(
         root=args.dataset_path,
         captions_dir=args.captions_dir,
         generators=args.generators,
         semantics=args.semantics,
         processor_name=args.clip_name,
         max_per_class=args.max_per_class,
-        split="train",
-        val_frac=args.val_frac,
         seed=args.seed,
     )
-    print("\n=== Val split ===")
-    val_ds = IABCLIPDataset(
-        root=args.dataset_path,
-        captions_dir=args.captions_dir,
-        generators=args.generators,
-        semantics=args.semantics,
-        processor_name=args.clip_name,
-        max_per_class=args.max_per_class,
-        split="val",
-        val_frac=args.val_frac,
-        seed=args.seed,
-        include_uncaptioned=True,   # eval is image-only — use every available image
-    )
+    if args.split_manifest:
+        # Same two datasets train_attribution.py builds with a manifest, so the only
+        # thing that differs between the two runs is the geometry.
+        import json
+        with open(args.split_manifest) as f:
+            man = json.load(f)
+        print(f"Split manifest: {len(man['train'])} train + {len(man['val'])} val images")
+        print("\n=== Train split (harness train) ===")
+        train_ds = IABCLIPDataset(**common, split="all",
+                                  include_paths=set(man["train"]), require_caption=False)
+        print("\n=== Val split (harness val) ===")
+        val_ds = IABCLIPDataset(**common, split="all", include_paths=set(man["val"]),
+                                require_caption=False, include_uncaptioned=True)
+    else:
+        print("\n=== Train split ===")
+        train_ds = IABCLIPDataset(**common, split="train", val_frac=args.val_frac)
+        print("\n=== Val split ===")
+        val_ds = IABCLIPDataset(**common, split="val", val_frac=args.val_frac,
+                                include_uncaptioned=True)  # eval is image-only
 
     sampler = make_balanced_sampler(train_ds)
     train_loader = DataLoader(
