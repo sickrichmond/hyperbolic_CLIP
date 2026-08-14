@@ -1,7 +1,7 @@
 import torchvision.transforms as transforms 
 from .dataset import ImageAttributionDataset
 from comparison.dataset.ImageAttributionDataset import DATASET
-from comparison.training.utils.dna.transforms import MultiCropTransform, get_transforms
+from comparison.training.utils.dna.transforms import MultiCropTransform
 from PIL import Image, ImageFile
 import random
 import numpy as np
@@ -15,13 +15,17 @@ class DNADataset(ImageAttributionDataset):
         super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded)  
         config = self.config = kwargs.get("config", None)
         self.config = config = ConfigToAttr(config)
-        self.pretrain_transforms = get_transforms(config.crop_size)
-        self.class_num = self.pretrain_transforms.class_num
+        self.pretrain_transforms = None
+        self.class_num = config.get("class_num", 170)
         self.multi_size = config.multi_size
         self.resize_size = config.resize_size
         self.second_resize_size = config.get("second_resize_size", None)
 
         self.train_stage = config.train_stage
+        if self.train_stage == 1:
+            from comparison.training.utils.dna.transforms import get_transforms
+            self.pretrain_transforms = get_transforms(config.crop_size)
+            self.class_num = self.pretrain_transforms.class_num
 
 
 
@@ -82,4 +86,3 @@ class DNADataset(ImageAttributionDataset):
             item['image'] = img 
             item['crops'] = crops 
             return item
-

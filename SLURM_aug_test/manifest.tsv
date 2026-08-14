@@ -1,0 +1,9 @@
+# model<TAB>config-relative-to-repo<TAB>default-checkpoint<TAB>batch-size<TAB>workers
+resnet50	comparison/training/config/model/resnet50.yaml	/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/hyperbolic_CLIP_riccardo/comparison/training/logs/default_split/resnet50/_2026-07-19-18-53-50/ckpt_best.pth	32	8
+dct	comparison/training/config/model/dct.yaml	/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/hyperbolic_CLIP_riccardo/comparison/training/logs/default_split/dct/_2026-07-19-18-53-50/ckpt_best.pth	32	8
+hifi_net	comparison/training/config/model/hifi_net.yaml	/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/hyperbolic_CLIP_riccardo/comparison/training/logs/default_split/hifi_net/_2026-07-19-18-53-50/ckpt_best.pth	8	8
+defl	comparison/training/config/model/defl.yaml	/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/hyperbolic_CLIP_riccardo/comparison/training/logs/default_split/defl/_2026-07-21-01-11-04/ckpt_best.pth	8	2
+dna	comparison/training/config/model/dna_default.yaml	/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/hyperbolic_CLIP_riccardo/comparison/training/logs/default_split/dna/_2026-07-21-07-31-06/ckpt_best.pth	8	8
+repmix	comparison/training/config/model/repmix.yaml	/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/hyperbolic_CLIP_riccardo/comparison/training/logs/default_split/repmix/_2026-07-21-01-11-42/ckpt_best.pth	8	8
+patch	comparison/training/config/model/patch.yaml	/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/hyperbolic_CLIP_riccardo/comparison/training/logs/default_split/patch/_2026-07-21-01-11-42/ckpt_best.pth	8	8
+ucf	comparison/training/config/model/ucf.yaml	/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/hyperbolic_CLIP_riccardo/comparison/training/logs/default_split/ucf/_2026-07-21-01-11-42/ckpt_best.pth	8	8

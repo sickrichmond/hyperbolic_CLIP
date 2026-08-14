@@ -1,9 +1,12 @@
 import random
-import albumentations as A
 
 class get_transforms():
     random.seed(0)
     def __init__(self,img_size):
+        # Stage-2 attribution inference only needs MultiCropTransform below. Keep
+        # albumentations lazy so evaluating a trained DNA model does not require
+        # the stage-1-only augmentation dependency.
+        import albumentations as A
         self.augs = []
         
         qualitys=[i for i in range(30,100,3)]
@@ -61,6 +64,4 @@ class MultiCropTransform:
         self.transforms=transforms
     def __call__(self, x):
         return [T(x) for T in self.transforms]
-    
 
-    
