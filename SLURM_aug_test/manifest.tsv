@@ -7,3 +7,4 @@ dna	comparison/training/config/model/dna_default.yaml	/leonardo_work/EUHPC_D35_1
 repmix	comparison/training/config/model/repmix.yaml	/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/hyperbolic_CLIP_riccardo/comparison/training/logs/default_split/repmix/_2026-07-21-01-11-42/ckpt_best.pth	8	8
 patch	comparison/training/config/model/patch.yaml	/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/hyperbolic_CLIP_riccardo/comparison/training/logs/default_split/patch/_2026-07-21-01-11-42/ckpt_best.pth	8	8
 ucf	comparison/training/config/model/ucf.yaml	/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/hyperbolic_CLIP_riccardo/comparison/training/logs/default_split/ucf/_2026-07-21-01-11-42/ckpt_best.pth	8	8
+hypclip	comparison/training/config/model/hypclip.yaml	/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/checkpoints/attribution_22cls_optunawin_vitl14.pt	32	8

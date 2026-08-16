@@ -1,0 +1,5 @@
+model_name: hypclip
+
+# Architecture values are read from the native checkpoint and recorded in the
+# effective configuration. Keeping the checkpoint authoritative prevents a
+# launcher/config mismatch from silently changing the trained model.

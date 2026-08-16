@@ -1,4 +1,4 @@
-# Augmented-split baseline evaluation
+# Augmented-split method evaluation
 
 Each `eval_*.sbatch` file is a four-task array that reserves one node, four
 GPUs, and 32 GB of memory. Array indices map to the four dataset names in
@@ -17,7 +17,7 @@ counted separately (`ignored_non_image_files`). The optional `real` symlink in
 the standard recap directory is excluded because this suite scores the four
 requested generators while preserving their 22-way labels.
 
-Run submission commands from the repository root. Submit all 32
+Run submission commands from the repository root. Submit all 36
 model/dataset evaluations with:
 
 ```bash
@@ -66,3 +66,9 @@ merged metrics files.
 DeFL is also safe on offline compute nodes: its official RN50x16 preprocessing
 and model are reconstructed from the complete CLIP state embedded in the
 trained checkpoint, rather than attempting a network download.
+
+HypCLIP uses the canonical 22-class Optuna-winner ViT-L/14 checkpoint. Its
+native LoRA and projection states are loaded strictly, its text anchors are
+constructed in the harness label order, and negative Lorentz entailment-cone
+angles are converted to the same image-level 22-way probabilities consumed by
+the shared metrics.

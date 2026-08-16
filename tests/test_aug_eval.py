@@ -18,7 +18,9 @@ from comparison.training.eval_aug_splits import (
     evaluate_protocols,
     exact_shard_indices,
     image_level_batch_field,
+    hypclip_probabilities_from_embeddings,
     probabilities_from_output,
+    validate_hypclip_checkpoint,
     workers_for_rank,
     zero_byte_image_files,
 )
@@ -66,6 +68,34 @@ class AugmentedEvaluationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(KeyError, "output head"):
             checkpoint_output_classes("resnet50", {})
+
+    def test_native_hypclip_checkpoint_and_cone_probabilities(self):
+        checkpoint = {
+            "lora_state": {"weight": torch.zeros(1)},
+            "projection": {"weight": torch.zeros(1)},
+            "clip_name": "local/clip",
+            "lora_r": 8,
+            "lora_alpha": 16,
+            "hyperbolic_dim": 3,
+            "curv": 1.0,
+            "class_names": [f"class-{index}" for index in range(EXPECTED_NUM_CLASSES)],
+            "anchor_tangent": torch.zeros(EXPECTED_NUM_CLASSES, 3),
+        }
+        self.assertEqual(validate_hypclip_checkpoint(checkpoint), EXPECTED_NUM_CLASSES)
+        checkpoint["class_names"][-1] = checkpoint["class_names"][0]
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            validate_hypclip_checkpoint(checkpoint)
+
+        from geometry.lorentz import exp_map0
+
+        images = exp_map0(torch.tensor([[0.8, 0.2, 0.1], [0.1, 0.9, 0.2]]))
+        anchors = exp_map0(
+            torch.tensor([[0.8, 0.1, 0.2], [0.1, 0.8, 0.2], [0.2, 0.1, 0.8]])
+        )
+        probabilities = hypclip_probabilities_from_embeddings(images, anchors, 1.0)
+        self.assertEqual(tuple(probabilities.shape), (2, 3))
+        torch.testing.assert_close(probabilities.sum(dim=1), torch.ones(2))
+        self.assertTrue(torch.isfinite(probabilities).all())
 
     def test_full_and_restricted_protocols_keep_off_target_predictions(self):
         names = ["other", "FLUX", "SD3", "SD3_5", "SDXL"]
@@ -206,9 +236,9 @@ class SlurmAugmentedEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(len(datasets), len(set(datasets)))
 
-    def test_eight_launchers_each_define_four_tasks(self):
+    def test_nine_launchers_each_define_four_tasks(self):
         launchers = sorted(self.slurm_dir.glob("eval_*.sbatch"))
-        self.assertEqual(len(launchers), 8)
+        self.assertEqual(len(launchers), 9)
         for launcher in launchers:
             contents = launcher.read_text()
             self.assertIn("#SBATCH --array=0-3", contents)
@@ -219,7 +249,7 @@ class SlurmAugmentedEvaluationTests(unittest.TestCase):
         submit_script = (self.slurm_dir / "submit_all.sh").read_text()
         for launcher in launchers:
             self.assertEqual(submit_script.count(launcher.name), 1)
-        self.assertEqual(len(launchers) * 4, 32)
+        self.assertEqual(len(launchers) * 4, 36)
 
     def test_manifest_pins_all_canonical_runs(self):
         rows = {}
@@ -235,7 +265,17 @@ class SlurmAugmentedEvaluationTests(unittest.TestCase):
             }
         self.assertEqual(
             set(rows),
-            {"resnet50", "dct", "hifi_net", "defl", "dna", "repmix", "patch", "ucf"},
+            {
+                "resnet50",
+                "dct",
+                "hifi_net",
+                "defl",
+                "dna",
+                "repmix",
+                "patch",
+                "ucf",
+                "hypclip",
+            },
         )
         for model in ("resnet50", "dct", "hifi_net"):
             self.assertIn("_2026-07-19-18-53-50/ckpt_best.pth", rows[model]["checkpoint"])
@@ -243,6 +283,11 @@ class SlurmAugmentedEvaluationTests(unittest.TestCase):
         self.assertIn("_2026-07-21-07-31-06/ckpt_best.pth", rows["dna"]["checkpoint"])
         for model in ("repmix", "patch", "ucf"):
             self.assertIn("_2026-07-21-01-11-42/ckpt_best.pth", rows[model]["checkpoint"])
+        self.assertTrue(
+            rows["hypclip"]["checkpoint"].endswith(
+                "/attribution_22cls_optunawin_vitl14.pt"
+            )
+        )
         self.assertLess(rows["defl"]["workers"], rows["resnet50"]["workers"])
 
 

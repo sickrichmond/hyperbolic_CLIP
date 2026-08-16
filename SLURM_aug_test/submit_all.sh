@@ -12,6 +12,7 @@ LAUNCHERS=(
     eval_repmix.sbatch
     eval_patch.sbatch
     eval_ucf.sbatch
+    eval_hypclip.sbatch
 )
 
 cd "$REPO_ROOT"

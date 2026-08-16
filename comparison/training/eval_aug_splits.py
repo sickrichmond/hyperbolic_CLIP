@@ -40,6 +40,7 @@ VALID_MODELS = (
     "repmix",
     "patch",
     "ucf",
+    "hypclip",
 )
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg"}
 _CHECKPOINT_HEAD_KEYS = {
@@ -151,6 +152,79 @@ def checkpoint_output_classes(
     if not isinstance(weight, torch.Tensor) or weight.ndim < 2:
         raise ValueError(f"checkpoint output head {key!r} is not a weight tensor")
     return int(weight.shape[0])
+
+
+def validate_hypclip_checkpoint(checkpoint: dict[str, Any]) -> int:
+    """Validate the native HypCLIP artifact and return its class count.
+
+    HypCLIP predates the comparison harness checkpoint wrapper. Its trained
+    tensors live in ``lora_state`` and ``projection`` and its class space is
+    represented explicitly by ``class_names`` rather than a linear-head width.
+    """
+    required = {
+        "lora_state",
+        "projection",
+        "clip_name",
+        "lora_r",
+        "lora_alpha",
+        "hyperbolic_dim",
+        "curv",
+        "class_names",
+    }
+    missing = sorted(required - checkpoint.keys())
+    if missing:
+        raise KeyError(f"HypCLIP checkpoint is missing required fields: {missing}")
+    for key in ("lora_state", "projection"):
+        if not isinstance(checkpoint[key], dict) or not checkpoint[key]:
+            raise TypeError(f"HypCLIP checkpoint field {key!r} must be a non-empty mapping")
+    class_names = checkpoint["class_names"]
+    if not isinstance(class_names, (list, tuple)) or not all(
+        isinstance(name, str) for name in class_names
+    ):
+        raise TypeError("HypCLIP checkpoint class_names must be a sequence of strings")
+    if len(set(class_names)) != len(class_names):
+        raise ValueError("HypCLIP checkpoint class_names contains duplicates")
+    if len(class_names) != EXPECTED_NUM_CLASSES:
+        raise RuntimeError(
+            f"HypCLIP checkpoint has {len(class_names)} classes; "
+            f"expected {EXPECTED_NUM_CLASSES}"
+        )
+    tangent = checkpoint.get("anchor_tangent")
+    if tangent is not None and (
+        not isinstance(tangent, torch.Tensor)
+        or tangent.ndim != 2
+        or tangent.shape[0] != len(class_names)
+        or tangent.shape[1] != int(checkpoint["hyperbolic_dim"])
+    ):
+        raise ValueError(
+            "HypCLIP anchor_tangent must have shape "
+            f"({len(class_names)}, {int(checkpoint['hyperbolic_dim'])})"
+        )
+    return len(class_names)
+
+
+def hypclip_probabilities_from_embeddings(
+    image_embeddings: torch.Tensor,
+    anchors: torch.Tensor,
+    curv: float,
+) -> torch.Tensor:
+    """Apply HypCLIP's native cone-angle decision rule at image level."""
+    if image_embeddings.ndim != 2 or anchors.ndim != 2:
+        raise ValueError("HypCLIP image embeddings and anchors must both be rank two")
+    if image_embeddings.shape[1] != anchors.shape[1]:
+        raise ValueError("HypCLIP image embeddings and anchors have different dimensions")
+    from geometry.lorentz import oxy_angle
+
+    batch_size = image_embeddings.shape[0]
+    num_classes = anchors.shape[0]
+    anchor_grid = anchors.unsqueeze(0).expand(batch_size, num_classes, -1)
+    image_grid = image_embeddings.unsqueeze(1).expand(batch_size, num_classes, -1)
+    angles = oxy_angle(
+        anchor_grid.reshape(batch_size * num_classes, -1),
+        image_grid.reshape(batch_size * num_classes, -1),
+        curv=curv,
+    ).reshape(batch_size, num_classes)
+    return torch.softmax(-angles, dim=1)
 
 
 @contextmanager
@@ -560,6 +634,8 @@ def _checkpoint_provenance(path: Path, checkpoint: dict[str, Any]) -> dict[str, 
     validation_metric = (
         best_metrics.get("val_metric") if isinstance(best_metrics, dict) else None
     )
+    if validation_metric is None:
+        validation_metric = checkpoint.get("val_balanced")
     return {
         "path": str(path.resolve()),
         "size_bytes": stat.st_size,
@@ -676,7 +752,7 @@ def main() -> None:
             f"expected a {EXPECTED_NUM_CLASSES}-class label map, "
             f"found {len(model_class_to_label)}"
         )
-    if args.model not in ATTRIBUTOR.data:
+    if args.model != "hypclip" and args.model not in ATTRIBUTOR.data:
         raise RuntimeError(f"model {args.model!r} was not registered; check optional dependencies")
     if args.model not in DATASET.data:
         raise RuntimeError(f"dataset adapter {args.model!r} was not registered")
@@ -702,20 +778,47 @@ def main() -> None:
         config["pretrained"] = str(pretrained)
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    if not isinstance(checkpoint, dict) or "model_state_dict" not in checkpoint:
-        raise KeyError(f"checkpoint has no model_state_dict: {args.checkpoint}")
+    if not isinstance(checkpoint, dict):
+        raise TypeError(f"checkpoint is not a mapping: {args.checkpoint}")
     checkpoint_provenance = _checkpoint_provenance(args.checkpoint, checkpoint)
-    state_dict = checkpoint["model_state_dict"]
-    if not isinstance(state_dict, dict):
-        raise TypeError(f"checkpoint model_state_dict is not a mapping: {args.checkpoint}")
-    output_classes = checkpoint_output_classes(args.model, state_dict)
+    if args.model == "hypclip":
+        output_classes = validate_hypclip_checkpoint(checkpoint)
+        checkpoint_names = set(checkpoint["class_names"])
+        active_names = set(model_class_to_label)
+        if checkpoint_names != active_names:
+            raise RuntimeError(
+                "HypCLIP checkpoint and active harness class spaces differ: "
+                f"missing={sorted(active_names - checkpoint_names)}, "
+                f"extra={sorted(checkpoint_names - active_names)}"
+            )
+        config.update(
+            {
+                key: checkpoint[key]
+                for key in (
+                    "clip_name",
+                    "lora_r",
+                    "lora_alpha",
+                    "hyperbolic_dim",
+                    "curv",
+                )
+            }
+        )
+        config["min_radius"] = checkpoint.get("min_radius")
+        state_dict = None
+    else:
+        if "model_state_dict" not in checkpoint:
+            raise KeyError(f"checkpoint has no model_state_dict: {args.checkpoint}")
+        state_dict = checkpoint["model_state_dict"]
+        if not isinstance(state_dict, dict):
+            raise TypeError(
+                f"checkpoint model_state_dict is not a mapping: {args.checkpoint}"
+            )
+        output_classes = checkpoint_output_classes(args.model, state_dict)
     if output_classes != EXPECTED_NUM_CLASSES:
         raise RuntimeError(
             f"{args.model} checkpoint output head has {output_classes} classes; "
             f"expected {EXPECTED_NUM_CLASSES}"
         )
-    # Drop optimizer/scheduler tensors before constructing memory-heavy models.
-    del checkpoint
 
     rank, local_rank, world_size, device = initialize_distributed()
 
@@ -732,7 +835,18 @@ def main() -> None:
             degraded=0,
             config=config,
         )
-        model = ATTRIBUTOR[args.model](config)
+        if args.model == "hypclip":
+            from models.attribution_clip import AttributionCLIP
+
+            model = AttributionCLIP(
+                clip_name=checkpoint["clip_name"],
+                lora_r=checkpoint["lora_r"],
+                lora_alpha=checkpoint["lora_alpha"],
+                hyperbolic_dim=checkpoint["hyperbolic_dim"],
+                curv=checkpoint["curv"],
+            )
+        else:
+            model = ATTRIBUTOR[args.model](config)
     # The training dataset intentionally filters generated filenames by `_p/_i`
     # conventions and follows an optional `real` symlink. Augmented evaluation
     # instead uses every image in the four requested generator directories.
@@ -769,11 +883,36 @@ def main() -> None:
     eval_dataset = Subset(dataset, selected) if selected is not None else dataset
     collate_fn = getattr(dataset, "collate_fn", None)
 
-    model.load_state_dict(state_dict, strict=True)
-    # Once strict loading succeeds the checkpoint-owned CPU weights are no
-    # longer needed for inference.
-    del state_dict
-    model.to(device)
+    hypclip_anchors = None
+    hypclip_curv = None
+    if args.model == "hypclip":
+        model.clip.load_state_dict(checkpoint["lora_state"], strict=True)
+        model.projection.load_state_dict(checkpoint["projection"], strict=True)
+        model.to(device)
+        # Text-anchor encoding must be deterministic. In particular, the LoRA
+        # adapters carry dropout modules which must be disabled before anchors
+        # are constructed, exactly as in the native HypCLIP evaluator.
+        model.eval()
+        from comparison.training.test_hypclip import load_anchors
+
+        hypclip_curv = float(checkpoint["curv"])
+        hypclip_anchors = load_anchors(checkpoint, model, hypclip_curv, device)
+        if tuple(hypclip_anchors.shape) != (
+            EXPECTED_NUM_CLASSES,
+            int(checkpoint["hyperbolic_dim"]),
+        ):
+            raise RuntimeError(
+                "HypCLIP constructed invalid anchor matrix shape: "
+                f"{tuple(hypclip_anchors.shape)}"
+            )
+        del checkpoint
+    else:
+        assert state_dict is not None
+        model.load_state_dict(state_dict, strict=True)
+        # Once strict loading succeeds the checkpoint-owned CPU weights are no
+        # longer needed for inference.
+        del state_dict, checkpoint
+        model.to(device)
     model.device = device
     model.eval()
 
@@ -820,8 +959,17 @@ def main() -> None:
             for key, value in batch.items():
                 if isinstance(value, torch.Tensor):
                     batch[key] = value.to(device, non_blocking=True)
-            output = model(batch, inference=True)
-            probabilities = probabilities_from_output(args.model, output)
+            if args.model == "hypclip":
+                assert hypclip_anchors is not None and hypclip_curv is not None
+                image_embeddings, _ = model.encode_image(batch["image"])
+                probabilities = hypclip_probabilities_from_embeddings(
+                    image_embeddings,
+                    hypclip_anchors,
+                    hypclip_curv,
+                )
+            else:
+                output = model(batch, inference=True)
+                probabilities = probabilities_from_output(args.model, output)
             if probabilities.shape[1] != EXPECTED_NUM_CLASSES:
                 raise RuntimeError(
                     f"{args.model} produced {probabilities.shape[1]} classes instead of "
