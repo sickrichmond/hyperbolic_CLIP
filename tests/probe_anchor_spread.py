@@ -26,8 +26,10 @@ must select the same label space the checkpoint was trained on (e.g. `dalle3,inf
 for a held-out run), otherwise load_anchors says so and stops.
 """
 import argparse
+import json
 import math
 import os
+from pathlib import Path
 
 os.environ.setdefault("IAB_EXCLUDE_GENERATORS", "dalle3")
 
@@ -81,7 +83,7 @@ def load_any(path, device):
             ckpt["clip_name"])
 
 
-def report(path, device, names):
+def report(path, device, names, dump=None):
     _, x_anc, psi, desc, _ = load_any(path, device)
     K = x_anc.shape[0]
     if K != len(names):
@@ -103,6 +105,18 @@ def report(path, device, names):
               f"spread={psi.max() - psi.min():.4f}")
     for r in off.argsort(descending=True)[:3]:
         print(f"      {off[r]:.4f}  ({deg(off[r]):4.1f}°)  {names[i[r]]} ↔ {names[j[r]]}")
+
+    if dump:
+        # The full angle matrix is the second, independent source for
+        # comparison.training.scripts.extract_tree — which is pure stdlib and so
+        # cannot encode prompts itself.
+        out = Path(dump) / (Path(path).stem + ".json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({
+            "class_names": names,
+            "angles_deg": [[deg(c) for c in row] for row in A.tolist()],
+        }) + "\n")
+        print(f"  dumped angle matrix -> {out}")
     return deg(off.min()), deg(off.max())
 
 
@@ -110,6 +124,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("checkpoints", nargs="+")
+    p.add_argument("--dump", metavar="DIR",
+                   help="write <DIR>/<ckpt>.json with the full angle matrix, for extract_tree")
     args = p.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -119,7 +135,7 @@ def main():
 
     rows = []
     for path in args.checkpoints:
-        rows.append((os.path.basename(path), *report(path, device, names)))
+        rows.append((os.path.basename(path), *report(path, device, names, args.dump)))
 
     print(f"\n{'checkpoint':52s} {'widest':>8s} {'closest':>8s}")
     for name, widest, closest in rows:

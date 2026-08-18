@@ -32,6 +32,42 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
+from geometry.lorentz import exp_map0
+from losses.attribution_loss import _pairwise_xi
+
+
+class ConeHead(nn.Module):
+    """argmin ξ, but with the anchor NORMS free — the degree of freedom the trained
+    model does not have.
+
+    In the model a scalar --target_norm pins every ψ to the same value, and with
+    equal ψ `argmin ξ` IS `argmax cos` (exp_map0 is radial), which is why the two
+    rules agree at 0.9998. Letting each anchor find its own radius makes ψ vary and
+    the rule genuinely hyperbolic, on features that are otherwise identical. If this
+    still ties nn.Linear, the ceiling is in the REPRESENTATION and the cone loss —
+    not in the readout — and Phase B has to change the objective, not the head.
+
+    Only meaningful on the `projection` cache: those vectors already live in the
+    tangent space at the origin, which is what exp_map0 expects.
+    """
+
+    def __init__(self, init, curv=1.0, min_radius=0.5, tau_init=1.0):
+        super().__init__()
+        self.curv, self.min_radius = curv, min_radius
+        self.anchors = nn.Parameter(init.clone())
+        self.log_tau = nn.Parameter(torch.tensor(float(tau_init)).log())
+
+    def forward(self, x):
+        x_hyp = exp_map0(x, curv=self.curv)
+        a_hyp = exp_map0(self.anchors, curv=self.curv)
+        return -_pairwise_xi(a_hyp, x_hyp, curv=self.curv).T / self.log_tau.exp()
+
+
+def class_centroids(X, y, num_classes):
+    """Per-class mean of the cached features — the anchor init that is not degenerate."""
+    c = torch.zeros(num_classes, X.shape[1]).index_add_(0, y, X)
+    return c / torch.bincount(y, minlength=num_classes).clamp(min=1).unsqueeze(1)
+
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
@@ -44,6 +80,11 @@ def parse_args():
     p.add_argument("--batch_size",    type=int,   default=4096)
     p.add_argument("--no_class_weight", action="store_true",
                    help="Disable class-balanced CE (plain cross-entropy).")
+    p.add_argument("--head", choices=["linear", "cone"], default="linear",
+                   help="'cone' = softmax over -ξ with FREE anchor norms, on the same "
+                        "frozen features. Use with the `projection` cache.")
+    p.add_argument("--curv",       type=float, default=1.0)
+    p.add_argument("--min_radius", type=float, default=0.5, help="--head cone only")
     p.add_argument("--eval_every",    type=int,   default=5)
     p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--output",        default="linear_probe.pt")
@@ -110,7 +151,11 @@ def main():
         print(f"Class weighting: ON  (train counts min={int(counts.min())} "
               f"max={int(counts.max())})")
 
-    linear = nn.Linear(feat_dim, num_classes).to(device)
+    if args.head == "cone":
+        linear = ConeHead(class_centroids(X_train, y_train, num_classes),
+                          curv=args.curv, min_radius=args.min_radius).to(device)
+    else:
+        linear = nn.Linear(feat_dim, num_classes).to(device)
     opt = torch.optim.AdamW(linear.parameters(), lr=args.lr,
                             weight_decay=args.weight_decay)
     ce = nn.CrossEntropyLoss(weight=weight)
@@ -140,7 +185,7 @@ def main():
                 best_balanced = balanced
                 torch.save({"state_dict": linear.state_dict(), "classes": classes,
                             "feat_dim": feat_dim, "val_balanced": balanced,
-                            "epoch": epoch}, out_path)
+                            "head": args.head, "epoch": epoch}, out_path)
 
     # ── Final detailed report on the best checkpoint ─────────────────────────
     best = torch.load(out_path, weights_only=False)
@@ -148,8 +193,15 @@ def main():
     overall, balanced, recalls, conf = evaluate(linear, X_val, y_val, num_classes, device)
 
     print_report(classes, overall, balanced, recalls, conf, len(X_val),
-                 f"Linear probe on FROZEN CLIP — best epoch {best['epoch']}")
+                 f"{args.head} probe on cached features — best epoch {best['epoch']}")
     print(f"\nBest balanced val accuracy: {100 * best_balanced:.1f}%  ({out_path})")
+    if args.head == "cone":
+        psi = (2 * args.min_radius
+               / exp_map0(linear.anchors.detach().cpu(), curv=args.curv).norm(dim=-1)
+               ).clamp(max=1.0).asin()
+        print(f"ψ across the 22 anchors: min={psi.min():.4f} max={psi.max():.4f} rad "
+              f"(the model's are pinned inside ±4%; a wide spread here means the free "
+              f"radii were actually used)")
 
 
 if __name__ == "__main__":
