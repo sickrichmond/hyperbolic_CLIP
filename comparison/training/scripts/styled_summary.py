@@ -56,7 +56,13 @@ def recalls(blob, view="full_22_way"):
 
 
 def family_accuracy(blob, tree):
-    """(macro family accuracy, share of errors that stay inside the family).
+    """(macro family accuracy, share of errors inside the family, uniform-error null).
+
+    The in-family share means nothing on its own: with the SD family holding 5 of 22
+    classes, 4 of a wrong image's 21 alternatives are already in-family, so ~19% comes
+    free. The null is that number, weighted by where the errors actually are, and the
+    claim is the ratio to it — same logic as the uniform-error null in
+    detection_from_confmat.resolution_analysis.
 
     Read off the 22-way matrix, so predictions landing on the other 18 classes are
     scored honestly: an SD3 image called CogView3_PLUS is cross-family and counts as
@@ -80,9 +86,15 @@ def family_accuracy(blob, tree):
             else:
                 cross += n
     if not per_class:
-        return None, None
+        return None, None, None
+    k = len(labels)
+    sizes = {f: fam.count(f) for f in set(fam)}
+    expected = sum((sum(row) - row[i]) * (sizes[fam[i]] - 1) / (k - 1)
+                   for i, row in enumerate(matrix) if sum(row))
+    errors = same + cross
     return (100 * sum(per_class) / len(per_class),
-            100 * same / (same + cross) if same + cross else None)
+            100 * same / errors if errors else None,
+            100 * expected / errors if errors else None)
 
 
 def table(title, models, cell, note=""):
@@ -149,9 +161,12 @@ def main():
           "Compare against the 22-way table. A large gap is graceful degradation the model\n"
           "already performs but cannot report: it keeps the family and guesses the leaf.")
     table("share of errors that stay INSIDE the family (%)", models,
-          lambda b: family_accuracy(b, tree)[1],
-          "High = the mistakes are near misses a hierarchy could catch. Low = the\n"
-          "representation loses the family too, and a hierarchy would not help.")
+          lambda b: family_accuracy(b, tree)[1])
+    table("...over the uniform-error null (x)", models,
+          lambda b: (lambda f: f[1] / f[2] if f[2] else None)(family_accuracy(b, tree)),
+          "The null is what you get for free from family sizes alone (~5x/21 for an SD\n"
+          "image), so 1.0x is chance. High = the mistakes are near misses a hierarchy could\n"
+          "catch. At 1.0 the representation loses the family too and a hierarchy cannot help.")
 
     if args.model or args.verbose:
         for m, styles in models.items():
