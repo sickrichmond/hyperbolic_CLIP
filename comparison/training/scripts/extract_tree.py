@@ -5,25 +5,29 @@ models together because they are products, not because they share an architectur
 Before we make the cone loss enforce that tree, it is worth asking what tree the
 model's own errors and anchors imply — and whether the two agree.
 
-Two independent sources, neither of which costs a job:
+Three independent sources, none of which costs a job:
 
   --confmat   the 22x22 conf_matrix in every test_results_degraded_*.txt, read by
               nothing today. Distance = how often the model swaps the two classes.
-  --angles    the anchor-cosine matrix dumped by `probe_anchor_spread --dump`.
-              Distance = the angle between the two class directions, in degrees.
+              One source per --level.
+  --angles    the anchor angle matrix dumped by `probe_anchor_spread --dump`.
+              Weak by construction: all 22 anchors fit inside 9 degrees.
+  --centroids the per-class MEAN feature from a scripts.extract_clip_features cache.
+              The most direct: it owes nothing to what the model gets wrong.
 
-Average-linkage agglomerative clustering on either, cut at --cut clusters, then
-Adjusted Rand Index against the HiFi-Net level-3 partition. Agreement means the
-semantic taxonomy is confirmed by pixels; disagreement is the more interesting
-result and says which tree Phase B should enforce.
+Average-linkage agglomerative clustering on each, cut at --cut, then Adjusted Rand
+Index against the HiFi-Net partition chosen by --against, AND — the part that
+decides — between every pair of sources. A tree only exists if the sources agree
+with EACH OTHER; if they do not, there is nothing stable to enforce and Phase B
+should carry only the asserted taxonomy.
 
-The chosen partition is written with --out as {class: family} for `--hierarchy
-emergent`, with each family named after its most central member so it still has a
-usable text prompt.
+--out writes the FIRST source as {class: family} for `--hierarchy emergent`, each
+family named after its most central member so it still has a usable text prompt.
 
     python -m comparison.training.scripts.extract_tree --selfcheck
     IAB_EXCLUDE_GENERATORS=dalle3 python -m comparison.training.scripts.extract_tree \\
-        --confmat $WORK/outputs/hypclip_fair_22cls --cut 6 --out data/tree_emergent.json
+        --confmat $WORK/outputs/hypclip_fair_22cls --level 1 2 5 \\
+        --centroids $WORK/hyp_fine_tuning/clip_features_lora --cut 6
 
 Pure stdlib, login node. Run from the repo root.
 """
