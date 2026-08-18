@@ -133,7 +133,13 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--confmat", metavar="DIR",
-                   help="directory holding test_results_degraded_0.txt (clean)")
+                   help="directory holding test_results_degraded_<level>.txt")
+    p.add_argument("--level", type=int, default=0,
+                   help="which degradation level's confusion to cluster. 0 (clean) is "
+                        "usually USELESS here: a 99.3%% model leaves ~300 errors over 462 "
+                        "off-diagonal cells, so the distances are ~1 everywhere and the "
+                        "linkage chains into one blob. Try 2 (DS0.25) or 5 (Blur3), where "
+                        "the model errs enough for the error structure to carry a taxonomy.")
     p.add_argument("--angles", metavar="JSON",
                    help="anchor cosine matrix from `probe_anchor_spread --dump`")
     p.add_argument("--cut", type=int, default=6,
@@ -160,14 +166,22 @@ def main():
 
     chosen = None
     if args.confmat:
-        clean = Path(args.confmat) / "test_results_degraded_0.txt"
-        conf = parse_conf(clean)
+        src = Path(args.confmat) / f"test_results_degraded_{args.level}.txt"
+        conf = parse_conf(src)
         if conf is None:
-            sys.exit(f"{clean}: no conf_matrix in it")
+            sys.exit(f"{src}: no conf_matrix in it")
         if len(conf) != len(names):
             sys.exit(f"conf_matrix is {len(conf)}x{len(conf)} but the active label map has "
                      f"{len(names)} classes — check IAB_EXCLUDE_GENERATORS")
-        chosen, conf_labels = report("confusion matrix (clean)",
+        k = len(conf)
+        cells = [conf[i][j] for i in range(k) for j in range(k) if i != j]
+        filled = sum(1 for c in cells if c)
+        print(f"\nlevel {args.level}: {sum(cells)} errors in {filled}/{len(cells)} off-diagonal "
+              f"cells ({filled / len(cells):.0%} filled)")
+        if filled < len(cells) // 4:
+            print("  ⚠️  too sparse to carry a taxonomy — most distances are exactly 1 and the\n"
+                  "     linkage will chain. Re-run with --level 2 or --level 5.")
+        chosen, conf_labels = report(f"confusion matrix (level {args.level})",
                                      confusion_distance(conf), names, hifi_labels, args.cut)
 
     if args.angles:

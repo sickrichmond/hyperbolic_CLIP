@@ -26,6 +26,7 @@ must select the same label space the checkpoint was trained on (e.g. `dalle3,inf
 for a held-out run), otherwise load_anchors says so and stops.
 """
 import argparse
+import gc
 import json
 import math
 import os
@@ -84,7 +85,11 @@ def load_any(path, device):
 
 
 def report(path, device, names, dump=None):
-    _, x_anc, psi, desc, _ = load_any(path, device)
+    model, x_anc, psi, desc, _ = load_any(path, device)
+    # Detached and the model dropped before the next checkpoint: three ViT-L/14s alive
+    # at once is an OOM kill on a login node, and x_anc would otherwise keep the whole
+    # text-encoder graph reachable.
+    x_anc = x_anc.detach()
     K = x_anc.shape[0]
     if K != len(names):
         raise ValueError(f"{os.path.basename(path)}: {K} anchors but the active label map has "
@@ -123,6 +128,11 @@ def report(path, device, names, dump=None):
             "angles_deg": [[deg(c) for c in row] for row in A.tolist()],
         }) + "\n")
         print(f"  dumped angle matrix -> {out}")
+
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     return deg(off.min()), deg(off.max())
 
 
