@@ -138,6 +138,19 @@ def resolution_analysis(conf, names):
           "errors. Anything well above 0 there rules the ratio out as the channel.")
 
 
+def routing_null(names, family, real):
+    """In-family share of a UNIFORMLY wrong synthetic image — the anchor for `routing`.
+
+    Family sizes do most of the work by themselves: a commercial generator has 6 of its
+    21 alternatives in-family, an AR one has 1. Without this number the middle column
+    cannot be read, and comparing it across degradation levels is meaningless because
+    the error mass moves between classes.
+    """
+    share = [(family.count(family[i]) - 1) / (len(names) - 1)
+             for i in range(len(names)) if i != real]
+    return sum(share) / len(share)
+
+
 def routing(conf, real, family):
     """Where the errors on SYNTHETIC images go: ->real / in-family / cross-family."""
     k = len(conf)
@@ -206,13 +219,17 @@ def main(dirs):
                      for m in methods]
             print(f"| {name} | " + " | ".join(cells) + " |")
 
-    print("\n### error routing on synthetic images (→real / in-family / cross-family)\n")
+    null = routing_null(names, family, real)
+    print(f"\n### error routing on synthetic images (→real / in-family / cross-family)\n")
+    print(f"uniform-error null for the middle column: **{null:.3f}** — divide by it to compare\n"
+          f"methods. A ratio near 1 means the errors ignore the taxonomy entirely.\n")
     print("| degradation | " + " | ".join(methods) + " |")
     print("|---|" + "|".join([":--:"] * len(methods)) + "|")
     for lvl, name in LEVELS.items():
         if not any((m, lvl) in rows for m in methods):
             continue
-        cells = ["{:.2f}/{:.2f}/{:.2f}".format(*rows[(m, lvl)][1])
+        cells = ["{:.2f}/{:.2f}/{:.2f} ({:.1f}x)".format(*rows[(m, lvl)][1],
+                                                        rows[(m, lvl)][1][1] / null)
                  if (m, lvl) in rows else "—" for m in methods]
         print(f"| {name} | " + " | ".join(cells) + " |")
 
