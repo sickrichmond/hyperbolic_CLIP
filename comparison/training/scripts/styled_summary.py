@@ -14,6 +14,11 @@ Reports, per model and style:
     twin problem wearing a style costume.
   * where the off-target mass goes — under JPEG everything drifts to `real`, and this
     says whether a semantic shift does the same or something else.
+  * FAMILY-level accuracy from the same confusion matrix: a prediction counts as
+    correct if it lands anywhere in the true generator's family. This is the
+    "graceful degradation" claim measured on data already on disk — if a method keeps
+    the family while losing the leaf, a nested-cone readout would turn those errors
+    into correct coarser answers, and today it has no way to say so.
 
     python -m comparison.training.scripts.styled_summary $R
     python -m comparison.training.scripts.styled_summary $R --model hypclip --verbose
@@ -50,6 +55,36 @@ def recalls(blob, view="full_22_way"):
     return {c: v["recall"] for c, v in per.items() if v["support"]}
 
 
+def family_accuracy(blob, tree):
+    """(macro family accuracy, share of errors that stay inside the family).
+
+    Read off the 22-way matrix, so predictions landing on the other 18 classes are
+    scored honestly: an SD3 image called CogView3_PLUS is cross-family and counts as
+    a real error, not as a near miss.
+    """
+    cm = blob["metrics"]["full_22_way"]["confusion_matrix"]
+    labels, matrix = cm["labels"], cm["matrix"]
+    fam = [tree.get(l) for l in labels]
+    per_class, same, cross = [], 0, 0
+    for i, row in enumerate(matrix):
+        total = sum(row)
+        if not total:
+            continue
+        hit = sum(n for j, n in enumerate(row) if fam[j] == fam[i])
+        per_class.append(hit / total)
+        for j, n in enumerate(row):
+            if i == j:
+                continue
+            if fam[j] == fam[i]:
+                same += n
+            else:
+                cross += n
+    if not per_class:
+        return None, None
+    return (100 * sum(per_class) / len(per_class),
+            100 * same / (same + cross) if same + cross else None)
+
+
 def table(title, models, cell, note=""):
     print(f"\n### {title}\n")
     print("| model | " + " | ".join(ORDER) + " | mean |")
@@ -70,6 +105,8 @@ def main():
     p.add_argument("root", help="aug_test_results_styled_method_comparison_* directory")
     p.add_argument("--model", help="only this model, with the per-class detail")
     p.add_argument("--verbose", action="store_true", help="per-class recall for every model")
+    p.add_argument("--tree", metavar="JSON",
+                   help="{class: family} from extract_tree; default is _HIFI_HIERARCHY level 3")
     args = p.parse_args()
 
     models = load(args.root)
@@ -99,6 +136,22 @@ def main():
     table("the twins alone — mean recall over SD3 and SD3_5", models, twin_only)
     table("off-target rate (%)", models,
           lambda b: 100 * b["metrics"]["full_22_way"]["off_target_prediction_rate"])
+
+    if args.tree:
+        tree = json.loads(Path(args.tree).read_text())
+        which = args.tree
+    else:
+        from comparison.dataset.ImageAttributionDataset.dataset import _HIFI_HIERARCHY
+        tree = {k: v[2] for k, v in _HIFI_HIERARCHY.items()}
+        which = "_HIFI_HIERARCHY level 3"
+    table(f"FAMILY-level accuracy ({which}) — right family, leaf may be wrong", models,
+          lambda b: family_accuracy(b, tree)[0],
+          "Compare against the 22-way table. A large gap is graceful degradation the model\n"
+          "already performs but cannot report: it keeps the family and guesses the leaf.")
+    table("share of errors that stay INSIDE the family (%)", models,
+          lambda b: family_accuracy(b, tree)[1],
+          "High = the mistakes are near misses a hierarchy could catch. Low = the\n"
+          "representation loses the family too, and a hierarchy would not help.")
 
     if args.model or args.verbose:
         for m, styles in models.items():
