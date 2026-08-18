@@ -197,8 +197,12 @@ def main():
         chosen = chosen or angle_tree
 
     if args.out:
+        # Precedence is deliberate: the confusion matrix is a statement about pixels,
+        # the anchor angles are a statement about 22 prompts that the projection MLP
+        # has already squeezed into 9 degrees.
         Path(args.out).write_text(json.dumps(chosen, indent=2, sort_keys=True) + "\n")
-        print(f"\nwrote {args.out}")
+        print(f"\nwrote {args.out}  (source: "
+              f"{'confusion level ' + str(args.level) if args.confmat else 'anchor angles'})")
 
 
 if __name__ == "__main__":
