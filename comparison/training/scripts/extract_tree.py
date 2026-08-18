@@ -247,6 +247,12 @@ def main():
               "to enforce, and Phase B should run with --hierarchy hifi only.")
 
     if args.out and sources:
+        # Takes the FIRST source, so pass only the one you want. Measured 2026-08-18:
+        # that is --centroids. The confusion matrices turned out NOT to be a usable
+        # tree source — levels 1 and 2 chain into one blob, and level 5, the only
+        # well-conditioned one, agrees with nothing (ARI 0.027 against the taxonomy,
+        # 0.06-0.19 against the other sources). Centroids on the LoRA features score
+        # 0.253 and recover the five SD models exactly.
         Path(args.out).write_text(json.dumps(sources[0][1], indent=2, sort_keys=True) + "\n")
         print(f"\nwrote {args.out}  (source: {sources[0][0]})")
 
