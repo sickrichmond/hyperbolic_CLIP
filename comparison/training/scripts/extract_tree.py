@@ -90,6 +90,25 @@ def adjusted_rand(x, y):
     return (index - expected) / denom if denom else 1.0
 
 
+def centroid_distance(cache_dir, names):
+    """Angular distance between per-class MEAN features.
+
+    The third and most direct source: it asks "do these generators produce images CLIP
+    places near each other", with no reference to what the model gets wrong. Reordered
+    into the active label order via the cache's own `classes` field — extract_clip_features
+    builds y from `enumerate(args.generators)`, which is exactly that list.
+    """
+    import torch
+    blob = torch.load(Path(cache_dir) / "clip_features_train.pt", weights_only=False)
+    X, y = blob["X"].float(), blob["y"].long()
+    order = list(blob["classes"])
+    c = torch.zeros(len(order), X.shape[1]).index_add_(0, y, X)
+    c = c / torch.bincount(y, minlength=len(order)).clamp(min=1).unsqueeze(1)
+    c = c[[order.index(n) for n in names]]
+    c = c / c.norm(dim=-1, keepdim=True)
+    return (c @ c.T).clamp(-1, 1).arccos().rad2deg().tolist()
+
+
 def centre_of(cluster, dist):
     """The member with the smallest mean distance to the rest — the family's name."""
     return min(cluster, key=lambda i: sum(dist[i][j] for j in cluster))
@@ -134,24 +153,28 @@ def main():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--confmat", metavar="DIR",
                    help="directory holding test_results_degraded_<level>.txt")
-    p.add_argument("--level", type=int, default=0,
-                   help="which degradation level's confusion to cluster. 0 (clean) is "
-                        "usually USELESS here: a 99.3%% model leaves ~300 errors over 462 "
-                        "off-diagonal cells, so the distances are ~1 everywhere and the "
-                        "linkage chains into one blob. Try 2 (DS0.25) or 5 (Blur3), where "
-                        "the model errs enough for the error structure to carry a taxonomy.")
+    p.add_argument("--level", type=int, nargs="+", default=[0],
+                   help="which degradation levels to cluster; one source each. 0 (clean) is "
+                        "usually USELESS: a 99.3%% model leaves ~300 errors over 462 off-diagonal "
+                        "cells, so nearly every distance is exactly 1 and the linkage chains into "
+                        "one blob. 2 (DS0.25) and 5 (Blur3) have real error structure; the JPEG "
+                        "levels do not, their errors are the drift toward `real`.")
     p.add_argument("--angles", metavar="JSON",
-                   help="anchor cosine matrix from `probe_anchor_spread --dump`")
+                   help="anchor angle matrix from `probe_anchor_spread --dump`")
+    p.add_argument("--centroids", metavar="DIR",
+                   help="feature cache from scripts.extract_clip_features — clusters the "
+                        "per-class MEAN feature, which owes nothing to the model's errors")
     p.add_argument("--cut", type=int, default=6,
                    help="number of families (6 = HiFi-Net level 3)")
-    p.add_argument("--out", metavar="JSON", help="write {class: family} for --hierarchy emergent")
+    p.add_argument("--out", metavar="JSON",
+                   help="write {class: family} for --hierarchy emergent, from the FIRST source")
     p.add_argument("--selfcheck", action="store_true")
     args = p.parse_args()
 
     if args.selfcheck:
         return selfcheck()
-    if not (args.confmat or args.angles):
-        sys.exit("need --confmat and/or --angles")
+    if not (args.confmat or args.angles or args.centroids):
+        sys.exit("need at least one of --confmat / --angles / --centroids")
 
     from comparison.dataset.ImageAttributionDataset.dataset import (
         _HIFI_HIERARCHY, model_class_to_label)
@@ -164,45 +187,59 @@ def main():
         if members:
             print(f"  {fam:16s} <- " + ", ".join(sorted(members)))
 
-    chosen = None
+    sources = []          # (short name, tree, labels)
     if args.confmat:
-        src = Path(args.confmat) / f"test_results_degraded_{args.level}.txt"
-        conf = parse_conf(src)
-        if conf is None:
-            sys.exit(f"{src}: no conf_matrix in it")
-        if len(conf) != len(names):
-            sys.exit(f"conf_matrix is {len(conf)}x{len(conf)} but the active label map has "
-                     f"{len(names)} classes — check IAB_EXCLUDE_GENERATORS")
-        k = len(conf)
-        cells = [conf[i][j] for i in range(k) for j in range(k) if i != j]
-        filled = sum(1 for c in cells if c)
-        print(f"\nlevel {args.level}: {sum(cells)} errors in {filled}/{len(cells)} off-diagonal "
-              f"cells ({filled / len(cells):.0%} filled)")
-        if filled < len(cells) // 4:
-            print("  ⚠️  too sparse to carry a taxonomy — most distances are exactly 1 and the\n"
-                  "     linkage will chain. Re-run with --level 2 or --level 5.")
-        chosen, conf_labels = report(f"confusion matrix (level {args.level})",
-                                     confusion_distance(conf), names, hifi_labels, args.cut)
+        for level in args.level:
+            src = Path(args.confmat) / f"test_results_degraded_{level}.txt"
+            conf = parse_conf(src)
+            if conf is None:
+                sys.exit(f"{src}: no conf_matrix in it")
+            if len(conf) != len(names):
+                sys.exit(f"conf_matrix is {len(conf)}x{len(conf)} but the active label map has "
+                         f"{len(names)} classes — check IAB_EXCLUDE_GENERATORS")
+            k = len(conf)
+            cells = [conf[i][j] for i in range(k) for j in range(k) if i != j]
+            filled = sum(1 for c in cells if c)
+            print(f"\nlevel {level}: {sum(cells)} errors in {filled}/{len(cells)} off-diagonal "
+                  f"cells ({filled / len(cells):.0%} filled)")
+            if filled < len(cells) // 4:
+                print("  \u26a0\ufe0f  too sparse to carry a taxonomy — nearly every distance is "
+                      "exactly 1 and\n     the linkage will chain. Read the clusters below as "
+                      "an artifact, not a tree.")
+            sources.append((f"conf L{level}",
+                            *report(f"confusion matrix (level {level})",
+                                    confusion_distance(conf), names, hifi_labels, args.cut)))
 
     if args.angles:
         payload = json.loads(Path(args.angles).read_text())
-        order = payload["class_names"]
-        if order != names:
-            sys.exit(f"dump was made with a different label map: {order}")
-        dist = payload["angles_deg"]
-        angle_tree, angle_labels = report("anchor angles", dist, names, hifi_labels, args.cut)
-        if args.confmat:
-            print(f"\n  ARI confusion vs anchors: {adjusted_rand(conf_labels, angle_labels):.3f}"
-                  "  — the two sources must agree before either tree is trusted.")
-        chosen = chosen or angle_tree
+        if payload["class_names"] != names:
+            sys.exit(f"dump was made with a different label map: {payload['class_names']}")
+        sources.append(("anchors", *report("anchor angles", payload["angles_deg"],
+                                           names, hifi_labels, args.cut)))
 
-    if args.out:
-        # Precedence is deliberate: the confusion matrix is a statement about pixels,
-        # the anchor angles are a statement about 22 prompts that the projection MLP
-        # has already squeezed into 9 degrees.
-        Path(args.out).write_text(json.dumps(chosen, indent=2, sort_keys=True) + "\n")
-        print(f"\nwrote {args.out}  (source: "
-              f"{'confusion level ' + str(args.level) if args.confmat else 'anchor angles'})")
+    if args.centroids:
+        sources.append(("centroids", *report("class centroids in feature space",
+                                             centroid_distance(args.centroids, names),
+                                             names, hifi_labels, args.cut)))
+
+    # The decisive table: a tree only exists if the sources agree with EACH OTHER.
+    # Disagreement among them means there is nothing stable to enforce, whatever any
+    # single ARI against HiFi-Net happens to say.
+    labelling = [("HiFi-Net", hifi_labels)] + [(n, l) for n, _, l in sources]
+    if len(labelling) > 2:
+        width = max(len(n) for n, _ in labelling)
+        print("\n### ARI between every pair of sources\n")
+        print(" " * (width + 2) + "".join(f"{n:>12s}" for n, _ in labelling))
+        for a, la in labelling:
+            row = "".join(f"{adjusted_rand(la, lb):12.3f}" for _, lb in labelling)
+            print(f"  {a:{width}s}{row}")
+        print("\n1.0 = identical partitions, 0 = chance. If the off-diagonal is ~0 the sources\n"
+              "disagree with each other as much as with the taxonomy: there is no emergent tree\n"
+              "to enforce, and Phase B should run with --hierarchy hifi only.")
+
+    if args.out and sources:
+        Path(args.out).write_text(json.dumps(sources[0][1], indent=2, sort_keys=True) + "\n")
+        print(f"\nwrote {args.out}  (source: {sources[0][0]})")
 
 
 if __name__ == "__main__":
