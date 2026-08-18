@@ -103,6 +103,12 @@ def report(path, device, names, dump=None):
     if psi is not None:
         print(f"  ψ                 : mean={psi.mean():.4f} rad ({math.degrees(psi.mean()):.1f}°)  "
               f"spread={psi.max() - psi.min():.4f}")
+        # Entailment cones are disjoint only where the apexes are further apart than
+        # ψ_c + ψ_c'. The trainer checks this at init, but only for free anchors
+        # (train_attribution.py:494 gates the whole block on anchor_init != "text"),
+        # so no text-anchor run has ever printed it. Ratio > 1 = nominally overlapping.
+        print(f"  2ψ / closest pair : {2 * math.degrees(psi.mean()) / deg(off.max()):.1f}"
+              f"   (>1 means the cones overlap at the anchors' own depth)")
     for r in off.argsort(descending=True)[:3]:
         print(f"      {off[r]:.4f}  ({deg(off[r]):4.1f}°)  {names[i[r]]} ↔ {names[j[r]]}")
 
