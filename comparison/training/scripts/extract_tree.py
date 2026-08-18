@@ -128,7 +128,7 @@ def report(title, dist, names, hifi_labels, cut):
         print(f"  {family:16s} <- " + ", ".join(sorted(names[i] for i in members)))
         for i in members:
             tree[names[i]] = family
-    print(f"\n  ARI vs HiFi-Net level 3: {adjusted_rand(labels, hifi_labels):.3f}")
+    print(f"\n  ARI vs HiFi-Net: {adjusted_rand(labels, hifi_labels):.3f}")
     return tree, labels
 
 
@@ -166,6 +166,11 @@ def main():
                         "per-class MEAN feature, which owes nothing to the model's errors")
     p.add_argument("--cut", type=int, default=6,
                    help="number of families (6 = HiFi-Net level 3)")
+    p.add_argument("--against", type=int, choices=[1, 2, 3], default=3,
+                   help="which HiFi-Net level to score against: 1 = generated/real (2 groups), "
+                        "2 = commercial/open-source/real (3), 3 = the six families. The data may "
+                        "support a coarse split and not a fine one, and that decides how many "
+                        "levels the cone hierarchy should have. Pair with a matching --cut.")
     p.add_argument("--out", metavar="JSON",
                    help="write {class: family} for --hierarchy emergent, from the FIRST source")
     p.add_argument("--selfcheck", action="store_true")
@@ -180,12 +185,12 @@ def main():
         _HIFI_HIERARCHY, model_class_to_label)
     idx_to_name = {v: k for k, v in model_class_to_label.items()}
     names = [idx_to_name[i] for i in range(len(idx_to_name))]
-    hifi_labels = [_HIFI_HIERARCHY[n][2] for n in names]
-    print(f"{len(names)} classes. HiFi-Net level 3 for reference:")
-    for cid, fam in enumerate(L3_NAMES):
-        members = [n for n in names if _HIFI_HIERARCHY[n][2] == cid]
-        if members:
-            print(f"  {fam:16s} <- " + ", ".join(sorted(members)))
+    hifi_labels = [_HIFI_HIERARCHY[n][args.against - 1] for n in names]
+    print(f"{len(names)} classes, scoring against HiFi-Net level {args.against}:")
+    for cid in sorted(set(hifi_labels)):
+        members = [n for n, c in zip(names, hifi_labels) if c == cid]
+        fam = L3_NAMES[cid] if args.against == 3 else f"group {cid}"
+        print(f"  {fam:16s} <- " + ", ".join(sorted(members)))
 
     sources = []          # (short name, tree, labels)
     if args.confmat:
