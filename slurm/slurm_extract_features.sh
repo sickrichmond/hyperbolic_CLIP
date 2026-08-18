@@ -14,9 +14,16 @@
 # it the split is the legacy caption-based one (94,673 val images) and the numbers
 # are not comparable with anything.
 #
+# A euclidean CKPT works too (extract_clip_features branches on ckpt['geometry']) —
+# that is the control for whether the projection head or the saturating hinge is what
+# collapses the class geometry. Give it its own OUT_DIR or it overwrites the
+# hyperbolic cache of the same SOURCE.
+#
 # Submit:  sbatch --export=ALL,SOURCE=frozen slurm/slurm_extract_features.sh
 #          sbatch --export=ALL,SOURCE=lora,CKPT=$WORK/hyp_fine_tuning/checkpoints/attribution_22cls_sweepwin_vitl14.pt \
 #                 slurm/slurm_extract_features.sh
+#          sbatch --export=ALL,SOURCE=projection,CKPT=$CK/attribution_22cls_euclidean_d128_vitl14.pt,\
+# OUT_DIR=$WORK/hyp_fine_tuning/clip_features_projection_eucl slurm/slurm_extract_features.sh
 # ============================================================================
 
 #SBATCH --account=EUHPC_D35_189
@@ -71,6 +78,6 @@ python -m scripts.extract_clip_features \
     $EXTRA \
     --batch_size     256 \
     --num_workers    8 \
-    --out_dir        ${FEAT}_${SOURCE}
+    --out_dir        ${OUT_DIR:-${FEAT}_${SOURCE}}
 
-echo "Done. Cache in ${FEAT}_${SOURCE}/"
+echo "Done. Cache in ${OUT_DIR:-${FEAT}_${SOURCE}}/"

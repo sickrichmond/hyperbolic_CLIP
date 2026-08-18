@@ -68,8 +68,33 @@ def build_extractor(args, device):
                            num_classes=len(args.generators)).to(device).eval()
         return model._clip_image, f"frozen CLIP ({args.clip_name})"
 
-    from models.attribution_clip import AttributionCLIP
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
+
+    if ckpt.get("geometry") == "euclidean":
+        # The control for "who collapses the representation, the head or the loss?".
+        # Same 768->768->GELU->128 head and same init as the hyperbolic model, trained
+        # by a non-saturating CE instead of a hinge. Measured on the hyperbolic run:
+        # class centroids score ARI 0.253 against the taxonomy in LoRA space and
+        # -0.007 after this head. If the euclidean head keeps the structure, the head
+        # is fine and the saturating hinge is what lets it collapse.
+        from models.euclidean_attribution_clip import EuclideanAttributionCLIP
+        model = EuclideanAttributionCLIP(
+            clip_name=ckpt["clip_name"],
+            lora_r=ckpt.get("lora_r", 8),
+            lora_alpha=ckpt.get("lora_alpha", 16),
+            embed_dim=ckpt.get("embed_dim", 128),
+        ).to(device)
+        model.clip.load_state_dict(ckpt["lora_state"])
+        model.projection.load_state_dict(ckpt["projection"])
+        model.eval()
+        if args.features == "clip":
+            return model._clip_image, f"LoRA CLIP from {Path(args.checkpoint).name}"
+        # Pre-normalisation, to match the hyperbolic tap: that one returns the TANGENT
+        # vector, i.e. also before the (radial, information-preserving) lift.
+        return (lambda pixel: model.projection(model._clip_image(pixel)),
+                f"euclidean projection head from {Path(args.checkpoint).name}")
+
+    from models.attribution_clip import AttributionCLIP
     model = AttributionCLIP(
         clip_name=ckpt["clip_name"],
         lora_r=ckpt.get("lora_r", 8),
