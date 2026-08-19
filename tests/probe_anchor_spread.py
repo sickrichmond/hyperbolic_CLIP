@@ -112,7 +112,9 @@ def report(path, device, names, dump=None):
         # ψ_c + ψ_c'. The trainer checks this at init, but only for free anchors
         # (train_attribution.py:494 gates the whole block on anchor_init != "text"),
         # so no text-anchor run has ever printed it. Ratio > 1 = nominally overlapping.
-        print(f"  2ψ / closest pair : {2 * math.degrees(psi.mean()) / deg(off.max()):.1f}"
+        closest = deg(off.max())
+        ratio = f"{2 * math.degrees(psi.mean()) / closest:.1f}" if closest else "inf"
+        print(f"  2ψ / closest pair : {ratio}"
               f"   (>1 means the cones overlap at the anchors' own depth)")
     for r in off.argsort(descending=True)[:3]:
         print(f"      {off[r]:.4f}  ({deg(off[r]):4.1f}°)  {names[i[r]]} ↔ {names[j[r]]}")
