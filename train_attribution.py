@@ -175,6 +175,37 @@ def parse_args():
                    help="Weight of the anchor-norm regulariser (0 disables it).")
     p.add_argument("--target_norm",    type=float, default=0.0,
                    help="Target ‖t_anchor‖. With curv=1, ψ ≈ π/8 at ‖t‖≈2.6, π/16 at ‖t‖≈5.")
+    p.add_argument("--lambda_hinge",   type=float, default=1.0,
+                   help="Scale on the two-term hinge. Set to 0 together with --lambda_ce 1 "
+                        "to REPLACE it by cross-entropy rather than mix the two: pure CE "
+                        "gives well-conditioned anchors, CE grafted onto a hinge does not "
+                        "(Run C ends with pairs at 8.8° AND pairs at 179°).")
+    p.add_argument("--norm_mode", choices=["floor", "bilateral"], default="floor",
+                   help="'floor' (default, unchanged) penalises only norms BELOW "
+                        "--target_norm, so any depth above it is free — which is how Run C's "
+                        "anchors drifted to 8.18 with L_norm=0 while sweepwin's sat at 4.11. "
+                        "'bilateral' makes it a target, which is what per-level depth needs.")
+    p.add_argument("--target_norm_family", type=float, default=0.0,
+                   help="Anchor norm for the FAMILY level; must be smaller than --target_norm "
+                        "so family cones are wider. With min_radius 0.5: ‖x‖=1.5 → ψ=41.8°, "
+                        "‖x‖=5.0 → ψ=11.5°. Equal ψ is exactly why argmin ξ has never differed "
+                        "from argmax cos.")
+    p.add_argument("--lambda_sep",     type=float, default=0.0,
+                   help="Anchor separation on the PROJECTED anchors: at least ψ_c + ψ_c' apart "
+                        "(the cone-disjointness criterion, violated by 12-17× on every run "
+                        "measured) and at most --theta_max apart.")
+    p.add_argument("--theta_max",      type=float, default=150.0,
+                   help="Degrees. A guard against antipodal pairs, not a shaping term: the "
+                        "euclidean model's widest pair is 132.2°, so it stays inert on a "
+                        "healthy configuration and fires only on Run C's 179° pathology.")
+    p.add_argument("--hierarchy", choices=["none", "hifi", "emergent"], default="none",
+                   help="Family level for the nested cones. 'emergent' reads "
+                        "--hierarchy_json, written by extract_tree --centroids.")
+    p.add_argument("--hierarchy_json", default="data/tree_emergent.json")
+    p.add_argument("--lambda_family",  type=float, default=0.0,
+                   help="Weight of the two hierarchy terms: model anchor inside its family's "
+                        "cone (a hinge — a containment constraint that should stop once met), "
+                        "and image inside its family's cone (CE, deliberately NOT a hinge).")
     p.add_argument("--lambda_ce",      type=float, default=0.0,
                    help="Weight of a cross-entropy term on softmax(-ξ/τ) (0 disables it, and "
                         "the loss is then bit-identical to before). The cone hinge saturates: "
@@ -223,6 +254,43 @@ def make_balanced_sampler(dataset: IABCLIPDataset) -> WeightedRandomSampler:
     weights = [1.0 / counts[g] for _, g, _ in dataset.samples]
     print(f"Balanced sampler classes: {dict(counts)}")
     return WeightedRandomSampler(weights, num_samples=len(dataset), replacement=True)
+
+
+# HiFi-Net level 3, decoded (dataset.py:72-74). The same taxonomy HiFi-Net itself
+# uses, so the hierarchy claim is compared on equal terms.
+_L3_NAMES = ["commercial", "SD", "diffusers", "DiT", "AR", "real"]
+
+
+def build_family_anchors(class_names: list[str], hierarchy: str,
+                         hierarchy_json: str | None):
+    """(family names, family_of per class, one text anchor per family).
+
+    Two trees, both wanted. 'hifi' is the asserted taxonomy; 'emergent' is the one the
+    data shows, extracted by comparison.training.scripts.extract_tree from the class
+    centroids in LoRA feature space — the only one of three sources that carried signal
+    (ARI 0.253, against 0.097 for the projected anchors and 0.027 for the confusion
+    matrices).
+
+    Family anchors are text, through the same head as the class anchors, so nothing new
+    enters the model beyond the level itself.
+    """
+    if hierarchy == "hifi":
+        from comparison.dataset.ImageAttributionDataset.dataset import _HIFI_HIERARCHY
+        tree = {c: _L3_NAMES[_HIFI_HIERARCHY[c][2]] for c in class_names}
+    else:
+        import json
+        with open(hierarchy_json) as f:
+            tree = json.load(f)
+        missing = [c for c in class_names if c not in tree]
+        if missing:
+            raise ValueError(f"{hierarchy_json} has no family for {missing}")
+
+    names = sorted({tree[c] for c in class_names})
+    family_of = [names.index(tree[c]) for c in class_names]
+    texts = ["A real image" if n == "real"
+             else f"A synthetic image generated by a model of the {n} family"
+             for n in names]
+    return names, family_of, texts
 
 
 @torch.no_grad()
@@ -481,6 +549,21 @@ def main():
     anchor_ids  = anchor_tok["input_ids"].to(device)
     anchor_mask = anchor_tok["attention_mask"].to(device)
 
+    fam_ids = fam_mask = family_of = None
+    family_names: list[str] = []
+    if args.hierarchy != "none":
+        family_names, fam_idx, fam_texts = build_family_anchors(
+            class_names, args.hierarchy, args.hierarchy_json)
+        fam_tok = tokenizer(fam_texts, return_tensors="pt", padding="max_length",
+                            truncation=True, max_length=77)
+        fam_ids  = fam_tok["input_ids"].to(device)
+        fam_mask = fam_tok["attention_mask"].to(device)
+        family_of = torch.tensor(fam_idx, dtype=torch.long, device=device)
+        print(f"Hierarchy '{args.hierarchy}': {len(family_names)} families")
+        for f, name in enumerate(family_names):
+            members = [c for c, i in zip(class_names, fam_idx) if i == f]
+            print(f"  {name:16s} <- " + ", ".join(members))
+
     if args.anchor_init != "text":
         with torch.no_grad():
             if args.anchor_init == "image_centroid":
@@ -542,6 +625,10 @@ def main():
         lambda_img_in_cap=args.lambda_img_in_cap,
         lambda_norm=args.lambda_norm, target_norm=args.target_norm,
         lambda_ce=args.lambda_ce, ce_tau_init=args.ce_tau_init,
+        lambda_hinge=args.lambda_hinge, norm_mode=args.norm_mode,
+        target_norm_family=args.target_norm_family,
+        lambda_sep=args.lambda_sep, theta_max=args.theta_max,
+        lambda_family=args.lambda_family, family_of=family_of,
     ).to(device)
 
     trainable = core.trainable_parameters()
@@ -586,10 +673,15 @@ def main():
     cap_keys  = ["inside_cap", "inside_img_cap", "mean_psi_cap",
                  "mean_xi_cap_anc", "mean_xi_img_cap", "mean_cap_norm"]
     ce_keys   = ["loss_ce", "ce_tau"] if args.lambda_ce > 0 else []
+    sep_keys  = (["loss_sep", "sep_min_deg", "sep_max_deg", "sep_overlap"]
+                 if args.lambda_sep > 0 else [])
+    fam_keys  = (["loss_fam_anc", "loss_fam_img", "inside_family", "family_acc",
+                  "mean_psi_fam", "fam_tau"]
+                 if args.lambda_family > 0 and args.hierarchy != "none" else [])
 
     for epoch in range(1, args.num_epochs + 1):
         model.train()
-        sums = {"loss": 0.0, **{k: 0.0 for k in base_keys + ce_keys}}
+        sums = {"loss": 0.0, **{k: 0.0 for k in base_keys + ce_keys + sep_keys + fam_keys}}
         if use_caps:
             sums.update({k: 0.0 for k in cap_keys})
         bar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.num_epochs}")
@@ -623,6 +715,8 @@ def main():
                 t_anc = anchor_tangent_now()
                 if t_anc is None:
                     x_anc, _ = core.encode_text(anchor_ids, anchor_mask)
+                x_fam = (core.encode_text(fam_ids, fam_mask)[0]
+                         if fam_ids is not None else None)
             if t_anc is not None:
                 # fp32, outside autocast: the hyperbolic ops are unstable in fp16
                 # (same reason AttributionCLIP.to_hyperbolic disables autocast).
@@ -654,7 +748,7 @@ def main():
                 loss_b, _     = cone_loss(x_mix, x_anc, labels[perm])
                 loss = lam * loss_a + (1 - lam) * loss_b
             else:
-                loss, stats = cone_loss(x_img, x_anc, labels, x_cap=x_cap)
+                loss, stats = cone_loss(x_img, x_anc, labels, x_cap=x_cap, x_fam=x_fam)
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -665,7 +759,7 @@ def main():
             scheduler.step()
 
             sums["loss"] += loss.item()
-            for k in base_keys + ce_keys:
+            for k in base_keys + ce_keys + sep_keys + fam_keys:
                 sums[k] += stats[k].item()
             if use_caps:
                 for k in cap_keys:
@@ -693,6 +787,18 @@ def main():
         line1 += f"  L_norm={avg['loss_norm']:.4f}"
         if ce_keys:
             line1 += f"  L_ce={avg['loss_ce']:.4f}  τ={avg['ce_tau']:.3f}"
+        if sep_keys:
+            # min∠ must climb above 2ψ; today it sits 12-17x below it.
+            line1 += (f"  L_sep={avg['loss_sep']:.4f}"
+                      f"  min∠={avg['sep_min_deg']:.1f}°"
+                      f"  max∠={avg['sep_max_deg']:.1f}°"
+                      f"  overlap={100*avg['sep_overlap']:.0f}%")
+        if fam_keys:
+            line1 += (f"  L_famA={avg['loss_fam_anc']:.4f}"
+                      f"  L_famI={avg['loss_fam_img']:.4f}"
+                      f"  in_fam={100*avg['inside_family']:.0f}%"
+                      f"  fam_acc={100*avg['family_acc']:.1f}%"
+                      f"  ψf={avg['mean_psi_fam']:.3f}")
         if anchor_drift is not None:
             line1 += f"  drift_s={F.softplus(anchor_drift).item():.4f}"
         line1 += f"  lr={scheduler.get_last_lr()[0]:.2e}"
@@ -755,6 +861,24 @@ def main():
                     "lambda_ce":       args.lambda_ce,
                     "ce_tau":          (F.softplus(cone_loss.ce_tau_raw).item()
                                         if args.lambda_ce > 0 else None),
+                    "lambda_hinge":    args.lambda_hinge,
+                    "norm_mode":       args.norm_mode,
+                    "target_norm":     args.target_norm,
+                    "lambda_norm":     args.lambda_norm,
+                    "lambda_sep":      args.lambda_sep,
+                    "theta_max":       args.theta_max,
+                    # Everything the evaluator needs to rebuild the family readout
+                    # without re-reading the tree from disk: the names in anchor order,
+                    # the class->family index, and the depth the families were pinned
+                    # to (psi is a function of that norm alone).
+                    "hierarchy":         args.hierarchy,
+                    "family_names":      family_names,
+                    "family_of":         (family_of.cpu().tolist()
+                                          if family_of is not None else None),
+                    "target_norm_family": args.target_norm_family,
+                    "lambda_family":     args.lambda_family,
+                    "fam_tau":           (F.softplus(cone_loss.fam_tau_raw).item()
+                                          if args.lambda_family > 0 else None),
                     "train_augment":   args.train_augment,
                     "aug_policy":      args.aug_policy,
                     "mixup_alpha":     args.mixup_alpha,

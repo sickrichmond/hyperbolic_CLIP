@@ -32,14 +32,39 @@ carries λ_neg/(K-1). Neither optimises the ORDER of the ξ across classes, whic
 exactly what inference (argmin ξ) reads. Inference stays untouched — argmin is
 scale-invariant, so τ never leaves training.
 
+Phase B adds three things, all aimed at one measured failure: the projection head
+zeroes the class geometry the LoRA built (centroid ARI 0.253 -> -0.007 against the
+generator taxonomy), and it does so because a SATURATING hinge gives it permission —
+the same head trained with a plain CE keeps 0.119 of it.
+
+  lambda_hinge      scale on L_img_in_class, so the hinge can be turned OFF and
+                    replaced by the CE ranking term rather than mixed with it. Pure CE
+                    produces well-conditioned anchors; CE grafted onto a hinge does not
+                    (Run C: pairs at 8.8 deg AND pairs at 179 deg).
+  norm_mode         'bilateral' makes the anchor norm a TARGET instead of a floor. The
+                    floor is satisfied at any norm above it, which is how Run C drifted
+                    to 8.18 with L_norm=0 while sweepwin sat at 4.11.
+  lambda_sep        anchors must be at least psi_c + psi_c' apart (cones disjoint) and
+                    at most theta_max apart (no antipodal waste). Imposed on the
+                    PROJECTED anchors, i.e. downstream of the head, which is where the
+                    separation is destroyed.
+  lambda_family     family anchors, shallower and therefore wider, containing the model
+                    anchors. This is the only construction in which psi varies across
+                    anchors -- and with equal psi, argmin xi IS argmax cos, which is why
+                    the cone rule has never differed from a cosine.
+
 Total:
-  L = L_img_in_class
+  L = lambda_hinge * L_img_in_class
       + λ_cap_in_class * L_cap_in_class
       + λ_img_in_cap   * L_img_in_cap
       + λ_norm         * L_norm   (anchor norm regulariser)
       + λ_ce           * L_ce     (ranking / calibration term)
+      + λ_sep          * L_sep    (cone disjointness, floor and ceiling)
+      + λ_family       * L_family (model anchor in family cone + image in family cone)
 """
 from __future__ import annotations
+
+import math
 
 import torch
 import torch.nn as nn
@@ -71,6 +96,13 @@ class EntailmentConeLoss(nn.Module):
         target_norm: float = 0.0,
         lambda_ce: float = 0.0,
         ce_tau_init: float = 1.0,
+        lambda_hinge: float = 1.0,
+        norm_mode: str = "floor",
+        target_norm_family: float = 0.0,
+        lambda_sep: float = 0.0,
+        theta_max: float = 150.0,
+        lambda_family: float = 0.0,
+        family_of: torch.Tensor | None = None,
     ):
         """
         lambda_cap_in_class > 0 and lambda_img_in_cap > 0 enable the hierarchical
@@ -94,10 +126,22 @@ class EntailmentConeLoss(nn.Module):
         self.lambda_norm = lambda_norm
         self.target_norm = target_norm
         self.lambda_ce = lambda_ce
+        self.lambda_hinge = lambda_hinge
+        self.norm_mode = norm_mode
+        self.target_norm_family = target_norm_family
+        self.lambda_sep = lambda_sep
+        self.theta_max = math.radians(theta_max)
+        self.lambda_family = lambda_family
+        self.register_buffer("family_of", family_of)
         if lambda_ce > 0:
             # τ = softplus(raw) keeps the temperature positive without a clamp.
             raw = torch.tensor(float(ce_tau_init)).expm1().clamp(min=1e-6).log()
             self.ce_tau_raw = nn.Parameter(raw)
+        if lambda_family > 0:
+            # Its own temperature: family anchors sit closer to the origin, so their
+            # exterior angles live on a different scale than the model anchors'.
+            raw = torch.tensor(float(ce_tau_init)).expm1().clamp(min=1e-6).log()
+            self.fam_tau_raw = nn.Parameter(raw)
 
     def _cone_term(
         self,
@@ -115,12 +159,43 @@ class EntailmentConeLoss(nn.Module):
             L_neg = torch.tensor(0.0, device=xi_pos.device)
         return L_pos, L_neg
 
+    def _sep_term(self, x_anc: torch.Tensor, psi_anc: torch.Tensor):
+        """Cones disjoint, and no antipodal waste. Returns (loss, stats).
+
+        floor:   ∠(a_c, a_c') ≥ ψ_c + ψ_c'. This is the disjointness criterion the
+                 trainer already checks at init (train_attribution.py:517) — and every
+                 text-anchor run measured violates it by 12-17x, so no containment
+                 statement the cones make is worth anything today.
+        ceiling: ∠ ≤ theta_max. Run C reached CE-like spread but put one pair at 179°,
+                 which wastes the sphere with 22 anchors in 128 dimensions. The
+                 euclidean model — the one healthy configuration measured — has mean
+                 92.6° (the simplex ideal arccos(-1/21) is 92.7°) and its widest pair at
+                 132.2°, so a 150° ceiling is inert on a healthy set and fires only on
+                 that pathology.
+        """
+        K = x_anc.shape[0]
+        d = F.normalize(x_anc, dim=-1)
+        cos = (d @ d.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+        iu = torch.triu_indices(K, K, offset=1, device=x_anc.device)
+        ang = torch.arccos(cos[iu[0], iu[1]])
+        need = psi_anc[iu[0]] + psi_anc[iu[1]]
+        floor = torch.clamp(need - ang, min=0.0).pow(2).mean()
+        ceiling = torch.clamp(ang - self.theta_max, min=0.0).pow(2).mean()
+        with torch.no_grad():
+            stats = {
+                "sep_min_deg": torch.rad2deg(ang.min()).detach(),
+                "sep_max_deg": torch.rad2deg(ang.max()).detach(),
+                "sep_overlap": (ang < need).float().mean().detach(),
+            }
+        return floor + ceiling, stats
+
     def forward(
         self,
         x_img: torch.Tensor,                     # (B, D)
         x_anc: torch.Tensor,                     # (K, D)
         labels: torch.Tensor,                    # (B,) int in [0, K)
         x_cap: torch.Tensor | None = None,       # (B, D) augmented captions, optional
+        x_fam: torch.Tensor | None = None,       # (F, D) family anchors, optional
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         B, _ = x_img.shape
         K, _ = x_anc.shape
@@ -193,15 +268,58 @@ class EntailmentConeLoss(nn.Module):
         # ───── 4) Anchor-norm regulariser ────────────────────────────────────
         anc_norms = x_anc.norm(dim=-1)
         if self.lambda_norm > 0 and self.target_norm > 0:
-            L_norm = torch.clamp(self.target_norm - anc_norms, min=0.0).pow(2).mean()
+            if self.norm_mode == "bilateral":
+                L_norm = (anc_norms - self.target_norm).pow(2).mean()
+                if x_fam is not None and self.target_norm_family > 0:
+                    L_norm = L_norm + (
+                        x_fam.norm(dim=-1) - self.target_norm_family
+                    ).pow(2).mean()
+            else:
+                L_norm = torch.clamp(self.target_norm - anc_norms, min=0.0).pow(2).mean()
         else:
             L_norm = torch.tensor(0.0, device=device)
 
+        # ───── 6) Anchor separation ──────────────────────────────────────────
+        L_sep = torch.tensor(0.0, device=device)
+        if self.lambda_sep > 0:
+            L_sep, sep_stats = self._sep_term(x_anc, psi_anc)
+            stats_extra.update(sep_stats)
+
+        # ───── 7) Hierarchy: family cones containing the model cones ─────────
+        L_family = torch.tensor(0.0, device=device)
+        if self.lambda_family > 0 and x_fam is not None:
+            psi_fam = half_aperture(x_fam, curv=self.curv, min_radius=self.min_radius)
+            fam_of = self.family_of
+            fam_labels = fam_of[labels]
+            # (a) each model anchor inside its family's cone. A hinge is the right
+            #     shape HERE: it is a containment constraint on 22 anchors that should
+            #     be met and then stop pulling.
+            xi_mf = oxy_angle(x_fam[fam_of], x_anc, curv=self.curv)              # (K,)
+            L_mf = torch.clamp(xi_mf - psi_fam[fam_of], min=0.0).mean()
+            # (b) each image inside its family's cone. CE, NOT a hinge: the whole point
+            #     of turning the hinge off is that saturation lets the projection head
+            #     collapse the class geometry (centroid ARI 0.253 -> -0.007), and a
+            #     hinge here would reintroduce exactly that on the level that matters.
+            xi_if = _pairwise_xi(x_fam, x_img, curv=self.curv).T                 # (B, F)
+            L_if = F.cross_entropy(-xi_if / F.softplus(self.fam_tau_raw), fam_labels)
+            L_family = L_mf + L_if
+            with torch.no_grad():
+                stats_extra.update({
+                    "loss_fam_anc":  L_mf.detach(),
+                    "loss_fam_img":  L_if.detach(),
+                    "inside_family": (xi_mf < psi_fam[fam_of]).float().mean().detach(),
+                    "family_acc":    (xi_if.argmin(1) == fam_labels).float().mean().detach(),
+                    "mean_psi_fam":  psi_fam.mean().detach(),
+                    "fam_tau":       F.softplus(self.fam_tau_raw).detach(),
+                })
+
         loss = (
-            L_img_in_class
+            self.lambda_hinge          * L_img_in_class
             + self.lambda_cap_in_class * L_cap_in_class
             + self.lambda_img_in_cap   * L_img_in_cap
             + self.lambda_norm         * L_norm
+            + self.lambda_sep          * L_sep
+            + self.lambda_family       * L_family
         )
 
         # ───── 5) CE ranking term (optional) ─────────────────────────────────
@@ -219,6 +337,7 @@ class EntailmentConeLoss(nn.Module):
             "loss_cap_in_cls": L_cap_in_class.detach(),
             "loss_img_in_cap": L_img_in_cap.detach(),
             "loss_norm":       L_norm.detach(),
+            "loss_sep":        L_sep.detach(),
             "inside_img":      inside_img.detach(),
             "cone_acc":        cone_acc.detach(),
             "mean_psi_anc":    psi_anc.mean().detach(),
