@@ -57,7 +57,7 @@ def family_texts(names):
 
 
 def load_family(path, model, clip_name, names, device):
-    """(family anchors (F,D), psi_fam (F,), family_of in HARNESS order, family names)."""
+    """(family anchors (F,D), psi_fam (F,), family_of in HARNESS order, names, curv)."""
     from transformers import CLIPTokenizer
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     if ckpt.get("hierarchy", "none") == "none":
@@ -83,9 +83,9 @@ def load_family(path, model, clip_name, names, device):
     with torch.no_grad():
         x_fam, _ = model.encode_text(t["input_ids"].to(device),
                                      t["attention_mask"].to(device))
-    psi_fam = half_aperture(x_fam, curv=ckpt.get("curv", 1.0),
-                            min_radius=ckpt.get("min_radius", 0.1))
-    return x_fam.detach(), psi_fam.detach(), fam_of, fam_names
+    curv = float(ckpt.get("curv", 1.0))
+    psi_fam = half_aperture(x_fam, curv=curv, min_radius=ckpt.get("min_radius", 0.1))
+    return x_fam.detach(), psi_fam.detach(), fam_of, fam_names, curv
 
 
 def macro_recall(pred, true, k):
@@ -126,7 +126,7 @@ def main():
     names = harness_class_names()
     model, x_anc, psi_anc, desc, clip_name = load_any(args.checkpoint, device)
     x_anc, psi_anc = x_anc.detach(), psi_anc.detach()
-    x_fam, psi_fam, fam_of, fam_names = load_family(
+    x_fam, psi_fam, fam_of, fam_names, curv = load_family(
         args.checkpoint, model, clip_name, names, device)
     K, Fm = x_anc.shape[0], x_fam.shape[0]
     print(f"\n{os.path.basename(args.checkpoint)}   ({desc})")
@@ -141,8 +141,8 @@ def main():
         x = x.to(device)
         y = y.to(device)
 
-        xi_leaf = _pairwise_xi(x_anc, x).T                    # (N, K)
-        xi_fam = _pairwise_xi(x_fam, x).T                     # (N, F)
+        xi_leaf = _pairwise_xi(x_anc, x, curv).T              # (N, K)
+        xi_fam = _pairwise_xi(x_fam, x, curv).T               # (N, F)
         y_fam = fam_of[y]
 
         leaf_pred = xi_leaf.argmin(1)
