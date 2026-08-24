@@ -136,13 +136,22 @@ def test_axis_has_gradient_inside_the_cone():
     labels = torch.arange(K)
     dirs = torch.eye(K, D)
     x_anc = _ray(dirs, 3.0)
-    # Each image straight out along its own anchor's ray but deeper => xi is small,
-    # comfortably inside the cone.
-    x_img = _ray(dirs, 9.0)
-
     psi = half_aperture(x_anc, min_radius=0.5)
-    xi = oxy_angle(x_anc, x_img)
-    assert bool((xi < psi).all()), (xi, psi)          # precondition: all inside
+
+    # Deeper than its anchor and inside the cone, but TILTED off the axis. Exactly ON
+    # the axis is the wrong probe: xi = 0 is the minimum of xi^2, so zero gradient
+    # there is correct (and oxy_angle's acos clamp saturates anyway). The case that
+    # decides the change is strictly between the axis and the cone boundary.
+    # D >= 2K, so e_{K+i} is a direction orthogonal to every anchor.
+    for tilt in (0.5, 0.2, 0.1, 0.05, 0.02):
+        off = torch.zeros(K, D)
+        off[torch.arange(K), torch.arange(K) + K] = tilt
+        x_img = _ray(dirs + off, 9.0)
+        xi = oxy_angle(x_anc, x_img)
+        if bool(((xi > 1e-4) & (xi < psi)).all()):
+            break
+    else:
+        raise AssertionError(f"no tilt lands strictly inside: xi={xi}, psi={psi}")
 
     def grad(pos_mode):
         p = x_img.clone().requires_grad_(True)
@@ -154,7 +163,8 @@ def test_axis_has_gradient_inside_the_cone():
     g_hinge, g_axis = grad("hinge"), grad("axis")
     assert g_hinge == 0.0, g_hinge
     assert g_axis > 0.0, g_axis
-    print(f"6 ok  inside the cone: hinge grad {g_hinge:.1e}, axis grad {g_axis:.3e}")
+    print(f"6 ok  inside the cone (xi {xi.min():.3f}-{xi.max():.3f} < psi {psi.min():.3f}): "
+          f"hinge grad {g_hinge:.1e}, axis grad {g_axis:.3e}")
 
 
 def test_negative_subsample():
