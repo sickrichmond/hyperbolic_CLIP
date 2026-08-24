@@ -20,7 +20,10 @@ a dead anchor channel, and a decision rule that has quietly become a cosine.
   6. BOTH anchor gradient channels agree with a finite difference (a stray detach in the
      normalisation would silently freeze the radius, psi would go uniform, and we would
      be back to a cosine without any sign of it), and both have the right sign;
-  7. the norm clamp pulls the anchor radius back into range from both sides.
+  7. the norm clamp pulls the anchor radius back into range from both sides;
+  8. the aperture term's equilibrium is where the derivation says it is — the cone wall
+     lands exactly on the class's RMS angular radius. Without it the aperture has only a
+     one-way push and pins at the norm floor, uniform, which is a cosine again.
 """
 import math
 
@@ -123,10 +126,13 @@ def test_psi_spread_breaks_the_cosine_rule():
           f"cos {cos[0]:.3f} vs {cos[1]:.3f})")
 
 
-def _channels(a_val, x, labels, lambda_neg):
+def _channels(a_val, x, labels, lambda_neg, lambda_aperture=0.0):
     """(radial, tangential) autograd components of dL/da[0], and the same by finite
     difference. Any detach in the normalisation shows up as a mismatch."""
-    loss_fn = AxisConeLoss(min_radius=K_R, lambda_neg=lambda_neg)
+    # aperture off: this check isolates the two channels the SCORE produces. The
+    # aperture term adds a third radial force, tested on its own in check 8.
+    loss_fn = AxisConeLoss(min_radius=K_R, lambda_neg=lambda_neg,
+                           lambda_aperture=lambda_aperture)
     a = a_val.clone().requires_grad_(True)
     loss, _ = loss_fn(x, a, labels)
     loss.backward()
@@ -174,7 +180,7 @@ def test_both_anchor_channels_are_alive():
     for tag, lab, lam, want_closer in (("own class", 0, 0.0, True),
                                        ("intruder", 1, 1.0, False)):
         a = a_val.clone().requires_grad_(True)
-        AxisConeLoss(min_radius=K_R, lambda_neg=lam)(
+        AxisConeLoss(min_radius=K_R, lambda_neg=lam, lambda_aperture=0.0)(
             x, a, torch.full((1,), lab, dtype=torch.long))[0].backward()
         before = F.normalize(a_val[0], dim=-1) @ F.normalize(x[0], dim=-1)
         after = F.normalize(a_val[0] - 1e-3 * a.grad[0], dim=-1) @ F.normalize(x[0], dim=-1)
@@ -195,6 +201,34 @@ def test_norm_clamp():
           f"> 2K={2 * K_R} so sin ψ never saturates")
 
 
+def test_aperture_equilibrium():
+    """With every image of a class at the same angle theta from the axis, the derivation
+    says the wall settles at exactly theta (lambda_aperture = 1). Check the radial
+    gradient vanishes there, and points the right way on either side."""
+    theta = math.radians(22.0)
+    x = torch.cat([_at_angle(theta, off=1), _at_angle(theta, off=2),
+                   _at_angle(theta, off=3)])                      # 3 images, same angle
+    labels = torch.zeros(3, dtype=torch.long)
+
+    def radial(psi_deg):
+        psi = math.radians(psi_deg)
+        a = torch.zeros(1, D)
+        a[0, 0] = 2 * K_R / math.sin(psi)                         # ‖a‖ from the aperture
+        a = a.clone().requires_grad_(True)
+        AxisConeLoss(min_radius=K_R, lambda_neg=0.0, lambda_aperture=1.0)(
+            x, a, labels)[0].backward()
+        return (a.grad[0] @ F.normalize(a.detach()[0], dim=-1)).item()
+
+    at_eq = radial(22.0)
+    too_wide = radial(45.0)
+    too_narrow = radial(8.0)
+    assert abs(at_eq) < 1e-9, at_eq
+    assert too_wide < 0, too_wide      # descent grows ‖a‖ ⇒ narrows toward the spread
+    assert too_narrow > 0, too_narrow  # descent shrinks ‖a‖ ⇒ widens toward the spread
+    print(f"8 ok  aperture equilibrium at ψ = the class spread (22°): radial {at_eq:+.2e}; "
+          f"ψ=45° → {too_wide:+.3f} (narrows), ψ=8° → {too_narrow:+.3f} (widens)")
+
+
 if __name__ == "__main__":
     test_monotone_and_one_sided()
     test_q_is_one_on_the_wall()
@@ -203,4 +237,5 @@ if __name__ == "__main__":
     test_psi_spread_breaks_the_cosine_rule()
     test_both_anchor_channels_are_alive()
     test_norm_clamp()
+    test_aperture_equilibrium()
     print("\nall axis-cone invariants hold")

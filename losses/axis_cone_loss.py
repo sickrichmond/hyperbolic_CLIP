@@ -23,20 +23,37 @@ Write K = min_radius, a_k for the class anchor on the hyperboloid, x for an imag
   score       The squared distance from the axis, in units of the squared distance at
               the wall — a ratio of two distances, dimensionless:
 
-                            δ(x, axis_k)²      1 − cos θ
-                    q_ik =  ─────────────  =  ───────────
-                             δ_wall(k)²        1 − cos ψ_k
+                            δ(x, axis_k)²      1 − cos θ         c_ik
+                    q_ik =  ─────────────  =  ───────────  =  ─────────
+                             δ_wall(k)²        1 − cos ψ_k        W_k
 
               q = 0 on the axis · q = 1 exactly on the cone WALL · q > 1 outside.
 
 Loss:
-    L = mean_i [ q_{i,y_i} + λ_neg · mean_{k ∈ N_i} max(0, 1 − q_ik)² ]
+    L = mean_i [ q_{i,y_i} + λ_ap · log W_{y_i} + λ_neg · mean_{k ∈ N_i} max(0, 1 − q_ik)² ]
     subject to ‖u_k‖ ∈ [r_min, r_max]  (a hard projection in the trainer, not a penalty)
 
 The positive term is the squared normalised distance from the right axis: zero only ON
 the axis, gradient everywhere, never saturating. The negative term says "stay out of
-other people's cones" and needs NO margin hyper-parameter — the margin is the cone wall,
-which is now a real quantity.
+other people's cones" and needs NO margin hyper-parameter — the margin is the cone wall.
+
+The APERTURE term is what sets ψ, and it is not optional. Without it the only pressure on
+the aperture is one-way: q = c/W is lowered by growing W, so every anchor walks to the
+smallest radius the range allows and ψ ends up uniform — measured, ‖t_anc‖ pinned at the
+floor to the digit and ψ ∈ [28.0, 28.0]. The negative term cannot supply the counterforce:
+with anchors ~68° apart and cones ~28° wide, an image inside its own cone is 40° from
+every other axis, so max(0, 1 − q_neg) is exactly zero and stays there. With ψ uniform,
+argmin q IS argmax cos and the whole construction is a cosine again.
+
+log W restores the second direction and costs no hyper-parameter search, because its
+equilibrium is exact and readable:
+
+    ∂/∂W [ mean_i c_ik/W + λ_ap log W ] = 0   ⇒   W_k = mean_i(c_ik) / λ_ap
+
+i.e. at λ_ap = 1 the cone wall sits exactly on the RMS angular radius of its own class,
+and mean_i q_i,k = 1. Tight classes get narrow cones, diffuse ones get wide cones — so ψ
+varies across classes for a reason that comes from the data, which is the necessary
+condition for argmin q to differ from argmax cos at all.
 
 Three properties this form has and the obvious alternatives do not:
 
@@ -117,13 +134,16 @@ def predict_class(x_img: torch.Tensor, x_anc: torch.Tensor,
 
 class AxisConeLoss(nn.Module):
     def __init__(self, min_radius: float = 0.5, lambda_neg: float = 1.0,
-                 neg_samples: int = 0):
+                 neg_samples: int = 0, lambda_aperture: float = 1.0):
         """neg_samples = 0 uses all K-1 negatives; k > 0 keeps k at random per sample.
-        This module has no parameters — the anchors belong to the trainer."""
+        lambda_aperture = 0 removes the log-W term, which pins every aperture at the norm
+        range's floor — see the module docstring. This module has no parameters; the
+        anchors belong to the trainer."""
         super().__init__()
         self.min_radius = min_radius
         self.lambda_neg = lambda_neg
         self.neg_samples = neg_samples
+        self.lambda_aperture = lambda_aperture
 
     def forward(
         self,
@@ -139,6 +159,12 @@ class AxisConeLoss(nn.Module):
         q_pos = q.gather(1, pos_idx).squeeze(1)                      # (B,)
         L_pos = q_pos.mean()
 
+        # Aperture: log of the wall for each sample's OWN class, so every class balances
+        # against its own spread. Batch-frequency weighting cancels in the ratio, which
+        # is why the equilibrium mean_i q = lambda_aperture is exact per class.
+        wall2 = cone_wall_chord2(x_anc, self.min_radius)             # (K,)
+        L_ap = torch.log(wall2[labels] + 1e-12).mean()
+
         neg_mask = torch.ones(B, K, device=device, dtype=torch.bool)
         neg_mask.scatter_(1, pos_idx, False)
         neg_mask = _subsample(neg_mask, self.neg_samples)
@@ -150,7 +176,7 @@ class AxisConeLoss(nn.Module):
         else:
             L_neg = torch.zeros((), device=device)
 
-        loss = L_pos + self.lambda_neg * L_neg
+        loss = L_pos + self.lambda_aperture * L_ap + self.lambda_neg * L_neg
 
         with torch.no_grad():
             anc_norm = x_anc.norm(dim=-1)
@@ -168,6 +194,7 @@ class AxisConeLoss(nn.Module):
             stats = {
                 "loss_pos":     L_pos.detach(),
                 "loss_neg":     L_neg.detach(),
+                "loss_ap":      L_ap.detach(),
                 "q_pos":        q_pos.mean().detach(),
                 "inside_img":   (q_pos < 1.0).float().mean().detach(),
                 "cone_acc":     (q.argmin(dim=1) == labels).float().mean().detach(),

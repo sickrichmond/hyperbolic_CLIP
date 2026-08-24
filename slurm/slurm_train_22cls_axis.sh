@@ -16,8 +16,11 @@
 # formulations failed.
 #
 # The anchors are free parameters in tangent space, random directions, with the norm
-# hard-projected into [1.5, 3.5] after every step => ψ between 28.0° and 3.5°. The FLOOR
-# also keeps ‖a‖ = sinh‖u‖ above 2·min_radius so sin ψ never saturates at 1.
+# hard-projected into [0.95, 3.5] after every step => ψ between 79° and 3.5°. The floor is
+# only there to keep ‖a‖ = sinh‖u‖ above 2·min_radius so sin ψ never saturates at 1; the
+# aperture itself is set by the log-W term, whose equilibrium puts each cone's wall on the
+# RMS angular radius of its own class. Without that term ψ pins at the floor and goes
+# uniform, and a uniform ψ makes argmin q identical to argmax cos.
 #
 # LoRA is on the upper half of the vision encoder only (layers 12-23, 24 adapters instead
 # of 72) and nothing on the text side: with free anchors the text encoder is out of the
@@ -28,7 +31,7 @@
 #                  axis run cannot be told apart from an untuned SGD lr.
 #
 # Read out of the epoch line, in order of importance:
-#   ψ∈[min,max]  must OPEN UP. If the apertures stay equal then argmin q IS argmax cos,
+#   ψ∈[min,max]  must SPREAD. If the apertures stay equal then argmin q IS argmax cos,
 #                algebraically, however high the accuracy climbs — that is the 0.9985
 #                cone-cosine agreement that has pinned every run so far.
 #   q_pos        must fall, and `inside` rise.
@@ -104,7 +107,8 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --min_radius      0.5 \
     --anchor_init       random \
     --anchor_init_norm  2.0 \
-    --anchor_norm_range 1.5 3.5 \
+    --anchor_norm_range 0.95 3.5 \
+    --lambda_aperture 1.0 \
     --lambda_neg      1.0 \
     --neg_samples     8 \
     --momentum        0.9 \

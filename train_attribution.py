@@ -262,6 +262,15 @@ def parse_args():
                         "(centroid ARI 0.253 -> -0.007). 'axis': xi^2, an MSE from the cone "
                         "AXIS, gradient 2*xi everywhere and psi absent, so the loss cannot "
                         "be lowered by widening the cone.")
+    p.add_argument("--lambda_aperture", type=float, default=1.0,
+                   help="--loss axis only. Weight of the log-W aperture term, whose "
+                        "equilibrium is W_k = mean_i(c_ik)/λ: at 1.0 each cone's wall "
+                        "settles exactly on the RMS angular radius of its own class, so "
+                        "tight classes get narrow cones and ψ varies for a reason that "
+                        "comes from the data. Setting it to 0 removes the only downward "
+                        "pressure on the aperture — measured: every anchor pins at the "
+                        "norm floor and ψ goes uniform, which makes argmin q identical to "
+                        "argmax cos.")
     p.add_argument("--neg_samples",    type=int,   default=0,
                    help="Random negatives kept per sample (0 = all K-1, unchanged). This "
                         "does NOT save compute — xi is computed against every anchor anyway "
@@ -776,7 +785,7 @@ def main():
     if args.loss == "axis":
         cone_loss = AxisConeLoss(
             min_radius=args.min_radius, lambda_neg=args.lambda_neg,
-            neg_samples=args.neg_samples,
+            neg_samples=args.neg_samples, lambda_aperture=args.lambda_aperture,
         ).to(device)
         val_predict = lambda xi_, xa_: axis_cone_q(xi_, xa_, args.min_radius).argmin(1)
     else:
@@ -856,7 +865,7 @@ def main():
     # ── Training loop ─────────────────────────────────────────────────────────
     axis = args.loss == "axis"
     if axis:
-        base_keys = ["loss_pos", "loss_neg", "q_pos", "inside_img", "cone_acc",
+        base_keys = ["loss_pos", "loss_neg", "loss_ap", "q_pos", "inside_img", "cone_acc",
                      "psi_min_deg", "psi_deg", "psi_max_deg",
                      "sep_min_deg", "sep_mean_deg", "anc_norm"]
     else:
@@ -996,7 +1005,8 @@ def main():
         avg = {k: v / steps_per_epoch for k, v in sums.items()}
         if args.loss == "axis":
             print(f"\nEpoch {epoch}: train loss={avg['loss']:.4f}  "
-                  f"pos={avg['loss_pos']:.4f}  neg={avg['loss_neg']:.4f}  "
+                  f"pos={avg['loss_pos']:.4f}  ap={avg['loss_ap']:+.4f}  "
+                  f"neg={avg['loss_neg']:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
             # psi SPREAD is the line to read: if it stays a point, every class has the
             # same aperture and argmin q IS argmax cos, however high the accuracy goes.
@@ -1123,6 +1133,7 @@ def main():
                     # argmin q for 'axis'. Reading it wrong gives a plausible number,
                     # not an error.
                     "loss":            args.loss,
+                    "lambda_aperture": args.lambda_aperture,
                     "pos_mode":        args.pos_mode,
                     "neg_samples":     args.neg_samples,
                     "optimizer":       args.optimizer,
