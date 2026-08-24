@@ -57,12 +57,8 @@ def load_checkpoint(checkpoint_path: Path, device: torch.device):
     """
     ckpt = torch.load(checkpoint_path, map_location=device)
 
-    model = AttributionCLIP(
-        clip_name=ckpt["clip_name"],
-        lora_r=ckpt["lora_r"],
-        lora_alpha=ckpt["lora_alpha"],
-        hyperbolic_dim=ckpt["hyperbolic_dim"],
-        curv=ckpt["curv"],
+    model = AttributionCLIP.from_checkpoint(
+        ckpt,
         # Eager attention so vision_model can return attention maps for AGCAM/Guided.
         attn_implementation="eager",
     ).to(device)

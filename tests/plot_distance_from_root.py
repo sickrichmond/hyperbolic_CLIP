@@ -114,13 +114,7 @@ def main() -> None:
     print(f"Checkpoint: {args.checkpoint}")
     print(f"  curv={curv}  hyperbolic_dim={ckpt.get('hyperbolic_dim')}")
 
-    model = AttributionCLIP(
-        clip_name=clip_name,
-        lora_r=ckpt.get("lora_r", 8),
-        lora_alpha=ckpt.get("lora_alpha", 16),
-        hyperbolic_dim=ckpt.get("hyperbolic_dim", 128),
-        curv=curv,
-    ).to(device)
+    model = AttributionCLIP.from_checkpoint(ckpt).to(device)
     model.clip.load_state_dict(ckpt["lora_state"])
     model.projection.load_state_dict(ckpt["projection"])
     model.eval()

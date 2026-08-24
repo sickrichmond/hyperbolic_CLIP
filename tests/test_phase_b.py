@@ -11,14 +11,20 @@ Five invariants, each pinning down one thing that would otherwise fail silently:
   4. 'bilateral' penalises anchors that are too DEEP, 'floor' does not — the difference
      that let Run C's anchors drift to 8.18 with L_norm = 0;
   5. the family term is zero when a model anchor sits inside its family's cone and
-     positive when it does not.
+     positive when it does not;
+  6. pos_mode="axis" still has gradient where the hinge has exactly none — a point
+     already INSIDE its cone. That is the whole reason the term exists;
+  7. neg_samples keeps exactly k negatives per row, and all of them when k is larger
+     than the row;
+  8. the anchor norm clamp pulls a tangent back into range from BOTH sides, and the
+     Poincare<->Lorentz round trip the disk plot relies on is exact.
 """
 import math
 
 import torch
 
-from geometry.lorentz import exp_map0, half_aperture
-from losses.attribution_loss import EntailmentConeLoss
+from geometry.lorentz import exp_map0, half_aperture, oxy_angle
+from losses.attribution_loss import EntailmentConeLoss, _subsample
 
 D, K, B = 8, 4, 6
 
@@ -124,10 +130,75 @@ def test_family_containment():
     print(f"5 ok  family: aligned inside, orthogonal {st['loss_fam_anc'].item():.3f}")
 
 
+def test_axis_has_gradient_inside_the_cone():
+    """The point of the whole change: a sample already inside its cone must still
+    pull. The hinge gives it exactly zero gradient, xi^2 gives it 2*xi."""
+    labels = torch.arange(K)
+    dirs = torch.eye(K, D)
+    x_anc = _ray(dirs, 3.0)
+    # Each image straight out along its own anchor's ray but deeper => xi is small,
+    # comfortably inside the cone.
+    x_img = _ray(dirs, 9.0)
+
+    psi = half_aperture(x_anc, min_radius=0.5)
+    xi = oxy_angle(x_anc, x_img)
+    assert bool((xi < psi).all()), (xi, psi)          # precondition: all inside
+
+    def grad(pos_mode):
+        p = x_img.clone().requires_grad_(True)
+        loss_fn = EntailmentConeLoss(min_radius=0.5, lambda_neg=0.0, pos_mode=pos_mode)
+        loss, _ = loss_fn(p, x_anc, labels)
+        loss.backward()
+        return p.grad.abs().max().item()
+
+    g_hinge, g_axis = grad("hinge"), grad("axis")
+    assert g_hinge == 0.0, g_hinge
+    assert g_axis > 0.0, g_axis
+    print(f"6 ok  inside the cone: hinge grad {g_hinge:.1e}, axis grad {g_axis:.3e}")
+
+
+def test_negative_subsample():
+    mask = torch.ones(5, 22, dtype=torch.bool)
+    mask.scatter_(1, torch.arange(5).unsqueeze(1), False)      # 21 negatives per row
+    assert mask.sum(1).tolist() == [21] * 5
+
+    kept = _subsample(mask, 8)
+    assert kept.sum(1).tolist() == [8] * 5, kept.sum(1)
+    assert bool((kept & ~mask).sum() == 0), "kept a non-negative"
+    assert bool((_subsample(mask, 0) == mask).all())           # 0 disables
+    assert bool((_subsample(mask, 99) == mask).all())          # k >= row keeps all
+
+    small = torch.zeros(3, 22, dtype=torch.bool)
+    small[:, :3] = True
+    assert _subsample(small, 8).sum(1).tolist() == [3] * 3      # fewer than k
+    print("7 ok  subsample: exactly k per row, never a positive, degrades gracefully")
+
+
+def test_anchor_clamp_and_poincare_round_trip():
+    lo, hi = 1.0, 3.0
+    t = torch.stack([torch.tensor([0.1] + [0.0] * (D - 1)),     # too short
+                     torch.tensor([9.0] + [0.0] * (D - 1))])    # too long
+    n = t.norm(dim=-1, keepdim=True)
+    t = t * (n.clamp(lo, hi) / n.clamp_min(1e-8))
+    assert torch.allclose(t.norm(dim=-1), torch.tensor([lo, hi])), t.norm(dim=-1)
+
+    # The disk plot lifts mesh points back with x = 2p / (1 - ||p||^2); it has to be
+    # the exact inverse of lorentz_to_poincare or the cones land in the wrong place.
+    x = exp_map0(torch.randn(7, D, generator=torch.Generator().manual_seed(3)))
+    x_time = torch.sqrt(1.0 + (x ** 2).sum(-1, keepdim=True))
+    p = x / (x_time + 1.0)
+    back = 2 * p / (1 - (p ** 2).sum(-1, keepdim=True))
+    assert torch.allclose(back, x, atol=1e-5), (back - x).abs().max()
+    print("8 ok  norm clamp bilateral, Poincare round trip exact")
+
+
 if __name__ == "__main__":
     test_defaults_are_inert()
     test_separation_floor()
     test_separation_ceiling()
     test_norm_mode()
     test_family_containment()
+    test_axis_has_gradient_inside_the_cone()
+    test_negative_subsample()
+    test_anchor_clamp_and_poincare_round_trip()
     print("\nall Phase B invariants hold")

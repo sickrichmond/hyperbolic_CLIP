@@ -32,6 +32,7 @@ from tqdm import tqdm
 warnings.filterwarnings("ignore", category=UserWarning, module="PIL")
 
 from models.attribution_clip import AttributionCLIP
+from geometry.lorentz import exp_map0
 from data.iab_clip_dataset import IABCLIPDataset
 
 
@@ -71,13 +72,7 @@ def main():
     print(f"  classes: {class_names}")
     print(f"  curv:    {curv}  hyperbolic_dim={ckpt.get('hyperbolic_dim')}")
 
-    model = AttributionCLIP(
-        clip_name=clip_name,
-        lora_r=ckpt.get("lora_r", 8),
-        lora_alpha=ckpt.get("lora_alpha", 16),
-        hyperbolic_dim=ckpt.get("hyperbolic_dim", 128),
-        curv=curv,
-    ).to(device)
+    model = AttributionCLIP.from_checkpoint(ckpt).to(device)
     model.clip.load_state_dict(ckpt["lora_state"])
     model.projection.load_state_dict(ckpt["projection"])
     model.eval()
@@ -99,11 +94,17 @@ def main():
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.num_workers, pin_memory=True)
 
-    # Anchors
-    tok = tokenizer(anchor_texts, return_tensors="pt", padding="max_length",
-                    truncation=True, max_length=77)
-    x_anc, _ = model.encode_text(tok["input_ids"].to(device),
-                                 tok["attention_mask"].to(device))
+    # Anchors — same contract as comparison/training/test_hypclip.py:load_anchors.
+    # Free anchors (image_centroid / text_free / random) are in 'anchor_tangent';
+    # re-encoding the texts for those runs would dump anchors the model never had.
+    tangent = ckpt.get("anchor_tangent")
+    if tangent is not None:
+        x_anc = exp_map0(tangent.float().to(device), curv=curv)
+    else:
+        tok = tokenizer(anchor_texts, return_tensors="pt", padding="max_length",
+                        truncation=True, max_length=77)
+        x_anc, _ = model.encode_text(tok["input_ids"].to(device),
+                                     tok["attention_mask"].to(device))
     anchors = x_anc.detach().cpu().numpy()                # (K, D)
 
     # Image embeddings

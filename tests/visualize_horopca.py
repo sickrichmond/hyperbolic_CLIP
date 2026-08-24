@@ -58,7 +58,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="PIL")
 
 from models.attribution_clip import AttributionCLIP
 from data.iab_clip_dataset import IABCLIPDataset
-from geometry.lorentz import half_aperture
+from geometry.lorentz import exp_map0, half_aperture
 
 
 def parse_args():
@@ -157,8 +157,12 @@ def _load_horopca():
 
 
 def run_horopca_2d(fit_pts: np.ndarray, project_pts: np.ndarray,
-                   lr: float = 5e-2, max_steps: int = 500) -> np.ndarray:
-    """Fit HoroPCA on `fit_pts`, project ALL of `project_pts`. Returns (N, 2).
+                   lr: float = 5e-2, max_steps: int = 500, pca=None):
+    """Fit HoroPCA on `fit_pts`, project ALL of `project_pts`. Returns ((N, 2), pca).
+
+    Pass a previously returned `pca` to SKIP the fit and only project. Two reasons:
+    a fresh fit each time gives a different basis (rotations and reflections), so a
+    sequence of frames is not comparable — and the fit is the expensive half.
 
     Uses the default pairwise-variance objective (more stable for direct
     high-dim → 2-D than the Fréchet variant, which collapses to a single
@@ -167,15 +171,16 @@ def run_horopca_2d(fit_pts: np.ndarray, project_pts: np.ndarray,
     paper's reference hyperparameters are lr=5e-2 with ~2000 steps; 500 is
     a good compromise that converges in a few minutes on one A100.
     """
-    HoroPCA = _load_horopca()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    X_fit = torch.as_tensor(fit_pts,     dtype=torch.float64, device=device)
     X_all = torch.as_tensor(project_pts, dtype=torch.float64, device=device)
-    pca = HoroPCA(dim=fit_pts.shape[1], n_components=2,
-                  lr=lr, max_steps=max_steps).double().to(device)
-    pca.fit(X_fit, iterative=False, optim=True)
+    if pca is None:
+        HoroPCA = _load_horopca()
+        X_fit = torch.as_tensor(fit_pts, dtype=torch.float64, device=device)
+        pca = HoroPCA(dim=fit_pts.shape[1], n_components=2,
+                      lr=lr, max_steps=max_steps).double().to(device)
+        pca.fit(X_fit, iterative=False, optim=True)
     with torch.no_grad():
-        return pca.map_to_ball(X_all).cpu().numpy()
+        return pca.map_to_ball(X_all).cpu().numpy(), pca
 
 
 # ────────────────────────── Poincaré centering ───────────────────────────────
@@ -254,12 +259,23 @@ def _class_colors(classes):
     return {c: cmap(i % cmap.N) for i, c in enumerate(classes)}
 
 
-def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0):
+def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0,
+                       psi=None, origin_2d=None, title=None):
     """2-D HoroPCA scatter inside the unit disk.
 
     `zoom`: axis half-width. 0 ⇒ auto-frame to the data extent so the cloud fills
     the figure (the embeddings rarely reach the unit boundary, so the default
     full-disk view would show a tiny central blob even when correctly centred).
+
+    `psi`: (K,) half-apertures in radians. When given, each anchor's entailment cone
+    is shaded. `origin_2d` is where the MODEL's origin landed in this frame — ξ is an
+    angle measured from the origin, and the Fréchet centering moves the origin away
+    from the middle of the disk, so the cone axis is the direction anchor - origin,
+    not the direction anchor - (0,0). Defaults to the centre if not given.
+
+    psi is the TRUE high-dimensional aperture, not one recomputed from the projected
+    radius: it is the aperture the model actually has, and watching it evolve is the
+    point of the diagnostic.
     """
     _, ax = plt.subplots(figsize=(11, 11))
     ax.add_patch(Circle((0, 0), 1.0, fill=False, color="black", linewidth=1.2))
@@ -268,6 +284,28 @@ def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0):
     lim = zoom if zoom > 0 else min(1.08, max(0.1, 1.15 * max_r))
 
     colors = _class_colors(classes)
+
+    if psi is not None:
+        # ponytail: euclidean wedge, exact only near the centre of the disk (geodesics
+        # there are near-straight). If the anchors drift toward the boundary, replace
+        # with the geodesic contour of oxy_angle == psi.
+        o = np.zeros(2) if origin_2d is None else np.asarray(origin_2d).reshape(2)
+        L = 3.0 * lim
+        for i, c in enumerate(classes):
+            radial = ancs_2d[i] - o
+            if not np.any(radial):
+                continue
+            th = np.arctan2(radial[1], radial[0])
+            edge = [ancs_2d[i] + L * np.array([np.cos(th + sgn * psi[i]),
+                                               np.sin(th + sgn * psi[i])])
+                    for sgn in (+1.0, -1.0)]
+            ax.fill([ancs_2d[i, 0], edge[0][0], edge[1][0]],
+                    [ancs_2d[i, 1], edge[0][1], edge[1][1]],
+                    color=colors[c], alpha=0.08, lw=0, zorder=1)
+            for e in edge:
+                ax.plot([ancs_2d[i, 0], e[0]], [ancs_2d[i, 1], e[1]],
+                        color=colors[c], lw=0.8, alpha=0.55, zorder=2)
+
     for c in classes:
         m = np.array([g == c for g in gt])
         if m.any():
@@ -285,13 +323,60 @@ def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0):
     ax.set_aspect("equal")
     ax.set_xticks([]); ax.set_yticks([])
     zoom_note = "" if lim >= 0.98 else f"  —  zoomed to max radius {max_r:.2f} of unit disk"
-    ax.set_title("Poincaré disk projection (Lorentz → Poincaré ball → 2-D HoroPCA)"
-                 + zoom_note)
+    head = "Poincaré disk projection (Lorentz → Poincaré ball → 2-D HoroPCA)"
+    if title:
+        head = f"{head}  —  {title}"
+    if psi is not None:
+        head += f"\ncones at the true 128-d ψ: {np.degrees(psi).min():.1f}°–{np.degrees(psi).max():.1f}°"
+    ax.set_title(head + zoom_note)
     ax.legend(loc="lower right", fontsize=8, framealpha=0.85)
     plt.tight_layout()
     plt.savefig(out_path, dpi=140, bbox_inches="tight")
     plt.close()
     print(f"  saved → {out_path}")
+
+
+def plot_epoch_snapshot(x_img, labels, x_anc, class_names, out_png, curv=1.0,
+                        min_radius=0.1, state=None, seed=42, max_points=1500,
+                        title=None):
+    """One Poincaré-disk frame per training epoch, cones included.
+
+    `x_img` (N, D) Lorentz space-components, `labels` their integer class indices,
+    `x_anc` (K, D) the anchors under the current weights.
+
+    `state` is (pca, mu) returned by the previous call. Pass it back and the HoroPCA
+    basis and the Fréchet-mean isometry are reused, which is what makes consecutive
+    frames comparable — and skips the expensive half (the fit is O(N²·D) in fp64).
+    Returns the state for the next epoch.
+    """
+    x_anc_c = x_anc.detach().float().cpu()
+    psi = half_aperture(x_anc_c, curv=curv, min_radius=min_radius).numpy()
+
+    p_imgs = lorentz_to_poincare(np.asarray(x_img), curv=curv)
+    p_ancs = lorentz_to_poincare(x_anc_c.numpy(), curv=curv)
+    # The model's origin rides along: xi is an angle measured from it, and the
+    # centering isometry below moves it off the middle of the disk.
+    p_orig = lorentz_to_poincare(np.zeros((1, p_imgs.shape[1])), curv=curv)
+
+    pca, mu = state if state is not None else (None, None)
+    if mu is None:
+        mu = poincare_frechet_mean(p_imgs)
+    p_imgs, p_ancs, p_orig = (center_poincare(a, mu) for a in (p_imgs, p_ancs, p_orig))
+
+    rng = np.random.default_rng(seed)
+    fit_idx = rng.choice(len(p_imgs), size=min(max_points, len(p_imgs)), replace=False)
+    coords, pca = run_horopca_2d(
+        np.concatenate([p_imgs[fit_idx], p_ancs], axis=0),
+        np.concatenate([p_imgs, p_ancs, p_orig], axis=0),
+        pca=pca,
+    )
+    n_i, n_a = len(p_imgs), len(p_ancs)
+    imgs_2d, ancs_2d, orig_2d = coords[:n_i], coords[n_i:n_i + n_a], coords[n_i + n_a]
+
+    plot_poincare_disk(imgs_2d, ancs_2d, [class_names[i] for i in labels],
+                       class_names, out_png,
+                       psi=psi, origin_2d=orig_2d, title=title)
+    return pca, mu
 
 
 def compute_umap_3d(x_imgs: np.ndarray) -> np.ndarray:
@@ -367,13 +452,7 @@ def main():
     print(f"  classes: {class_names}")
     print(f"  curv={curv}  min_radius={min_radius}")
 
-    model = AttributionCLIP(
-        clip_name=clip_name,
-        lora_r=ckpt.get("lora_r", 8),
-        lora_alpha=ckpt.get("lora_alpha", 16),
-        hyperbolic_dim=ckpt.get("hyperbolic_dim", 128),
-        curv=curv,
-    ).to(device)
+    model = AttributionCLIP.from_checkpoint(ckpt).to(device)
     model.clip.load_state_dict(ckpt["lora_state"])
     model.projection.load_state_dict(ckpt["projection"])
     model.eval()
@@ -395,11 +474,22 @@ def main():
                         num_workers=args.num_workers, pin_memory=True)
 
     # ── Anchor embeddings ────────────────────────────────────────────────────
-    tok = tokenizer(anchor_texts, return_tensors="pt", padding="max_length",
-                    truncation=True, max_length=77)
-    with torch.no_grad():
-        x_ancs_t, _ = model.encode_text(tok["input_ids"].to(device),
-                                        tok["attention_mask"].to(device))
+    # Same contract as comparison/training/test_hypclip.py:load_anchors — free
+    # anchors (image_centroid / text_free / random) live in 'anchor_tangent' and are
+    # lifted with exp_map0; only text runs get re-encoded. Re-encoding a free-anchor
+    # checkpoint would plot anchors the model never had.
+    tangent = ckpt.get("anchor_tangent")
+    if tangent is not None:
+        print(f"  anchors: learned '{ckpt.get('anchor_init', 'free')}' (anchor_tangent)")
+        with torch.no_grad():
+            x_ancs_t = exp_map0(tangent.float().to(device), curv=curv)
+    else:
+        print(f"  anchors: re-encoded from the checkpoint's own anchor_texts")
+        tok = tokenizer(anchor_texts, return_tensors="pt", padding="max_length",
+                        truncation=True, max_length=77)
+        with torch.no_grad():
+            x_ancs_t, _ = model.encode_text(tok["input_ids"].to(device),
+                                            tok["attention_mask"].to(device))
     x_ancs = x_ancs_t.cpu().numpy()
 
     # ── Image embeddings ─────────────────────────────────────────────────────
@@ -434,9 +524,9 @@ def main():
     print(f"Running HoroPCA → 2-D: fit on {len(fit_pts)} points "
           f"({args.horopca_steps} steps, lr={args.horopca_lr}), "
           f"projecting {len(project_pts)}…")
-    coords_2d = run_horopca_2d(fit_pts, project_pts,
-                               lr=args.horopca_lr,
-                               max_steps=args.horopca_steps)
+    coords_2d, _ = run_horopca_2d(fit_pts, project_pts,
+                                  lr=args.horopca_lr,
+                                  max_steps=args.horopca_steps)
     imgs_2d = coords_2d[:len(p_imgs)]
     ancs_2d = coords_2d[len(p_imgs):]
     _report_norms("2-D projection ", imgs_2d)

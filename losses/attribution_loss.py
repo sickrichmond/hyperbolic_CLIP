@@ -20,9 +20,23 @@ Loss terms (all use the same cone-violation primitive):
                    (which differ in content and/or class).
 
 For each term:
-  L_pos = max(0, ξ_pos - ψ_pos)
+  L_pos = max(0, ξ_pos - ψ_pos)          pos_mode="hinge"  (default)
+  L_pos = ξ_pos²                          pos_mode="axis"
   L_neg = max(0, ψ_neg + margin - ξ_neg)
 where ξ = oxy_angle(apex, point) and ψ = half_aperture(apex).
+
+pos_mode="axis" is an MSE from the cone AXIS rather than from its boundary. The
+hinge goes to zero gradient the moment the point is inside the cone, which is the
+measured reason the projection head is free to collapse the class geometry the
+LoRA built (centroid ARI 0.253 -> -0.007); ξ² keeps pulling with gradient 2ξ
+everywhere and vanishes only on the axis itself. ψ does not appear in it, so the
+loss cannot be lowered by widening the cone — the aperture survives only in L_neg
+and L_sep, where it is a constraint rather than a target.
+
+neg_samples > 0 keeps a random subset of that many negatives per row instead of
+all K-1. Note this does NOT save compute: xi is computed against every anchor
+anyway (cone_acc and the CE term read the full row). It changes the OBJECTIVE —
+dropout on the negative term.
 
 Optional ranking term (λ_ce > 0):
   L_ce = CE(softmax(-ξ_img_anc / τ), y),  τ = softplus(param), LEARNED.
@@ -83,6 +97,15 @@ def _pairwise_xi(apex: torch.Tensor, point: torch.Tensor, curv: float) -> torch.
     return oxy_angle(apex_t, point_t, curv=curv).reshape(A, P)
 
 
+def _subsample(mask: torch.Tensor, k: int) -> torch.Tensor:
+    """Keep k random True entries per row (all of them if the row has fewer)."""
+    if k <= 0 or k >= mask.shape[1]:
+        return mask
+    noise = torch.rand(mask.shape, device=mask.device).masked_fill(~mask, -1.0)
+    keep = noise.topk(k, dim=1).indices
+    return torch.zeros_like(mask).scatter_(1, keep, True) & mask
+
+
 class EntailmentConeLoss(nn.Module):
     def __init__(
         self,
@@ -103,6 +126,8 @@ class EntailmentConeLoss(nn.Module):
         theta_max: float = 150.0,
         lambda_family: float = 0.0,
         family_of: torch.Tensor | None = None,
+        pos_mode: str = "hinge",
+        neg_samples: int = 0,
     ):
         """
         lambda_cap_in_class > 0 and lambda_img_in_cap > 0 enable the hierarchical
@@ -115,6 +140,10 @@ class EntailmentConeLoss(nn.Module):
         lambda_ce > 0 adds the CE ranking term with a LEARNED temperature. The
         parameter is created only in that case, so at lambda_ce=0 the module still
         has no parameters at all and returns the same value it did before.
+
+        pos_mode: "hinge" (default, unchanged) or "axis" (L_pos = ξ²).
+        neg_samples: 0 (default, all K-1 negatives) or k random negatives per row.
+        Both defaults are inert — every earlier run reproduces bit for bit.
         """
         super().__init__()
         self.curv = curv
@@ -132,6 +161,8 @@ class EntailmentConeLoss(nn.Module):
         self.lambda_sep = lambda_sep
         self.theta_max = math.radians(theta_max)
         self.lambda_family = lambda_family
+        self.pos_mode = pos_mode
+        self.neg_samples = neg_samples
         self.register_buffer("family_of", family_of)
         if lambda_ce > 0:
             # τ = softplus(raw) keeps the temperature positive without a clamp.
@@ -152,7 +183,13 @@ class EntailmentConeLoss(nn.Module):
         neg_mask: torch.Tensor,    # (B, M) bool only true where the apex is a negative
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (L_pos, L_neg) — both scalars."""
-        L_pos = torch.clamp(xi_pos - psi_pos, min=0.0).mean()
+        if self.pos_mode == "axis":
+            # MSE from the axis: gradient 2ξ everywhere, zero only ON the axis.
+            # psi is absent, so the cone cannot be widened to lower the loss.
+            L_pos = xi_pos.pow(2).mean()
+        else:
+            L_pos = torch.clamp(xi_pos - psi_pos, min=0.0).mean()
+        neg_mask = _subsample(neg_mask, self.neg_samples)
         if neg_mask.any():
             L_neg = torch.clamp(psi_neg_b + self.margin - xi_neg, min=0.0)[neg_mask].mean()
         else:
@@ -334,6 +371,10 @@ class EntailmentConeLoss(nn.Module):
 
         stats = {
             "loss_img_in_cls": L_img_in_class.detach(),
+            # Split out: with pos_mode="axis" the two halves live on different
+            # scales and the sum alone is unreadable.
+            "loss_pos":        L_imgcls_pos.detach(),
+            "loss_neg":        L_imgcls_neg.detach(),
             "loss_cap_in_cls": L_cap_in_class.detach(),
             "loss_img_in_cap": L_img_in_cap.detach(),
             "loss_norm":       L_norm.detach(),

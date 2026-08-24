@@ -95,13 +95,7 @@ def build_extractor(args, device):
                 f"euclidean projection head from {Path(args.checkpoint).name}")
 
     from models.attribution_clip import AttributionCLIP
-    model = AttributionCLIP(
-        clip_name=ckpt["clip_name"],
-        lora_r=ckpt.get("lora_r", 8),
-        lora_alpha=ckpt.get("lora_alpha", 16),
-        hyperbolic_dim=ckpt.get("hyperbolic_dim", 128),
-        curv=ckpt.get("curv", 1.0),
-    ).to(device)
+    model = AttributionCLIP.from_checkpoint(ckpt).to(device)
     model.clip.load_state_dict(ckpt["lora_state"])
     model.projection.load_state_dict(ckpt["projection"])
     model.eval()

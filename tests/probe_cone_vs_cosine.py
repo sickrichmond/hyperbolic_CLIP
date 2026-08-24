@@ -42,13 +42,7 @@ def main(ckpt_path):
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     curv = ckpt.get('curv', 1.0)
 
-    model = AttributionCLIP(
-        clip_name=ckpt['clip_name'],
-        lora_r=ckpt.get('lora_r', 8),
-        lora_alpha=ckpt.get('lora_alpha', 16),
-        hyperbolic_dim=ckpt.get('hyperbolic_dim', 128),
-        curv=curv,
-    ).to(device)
+    model = AttributionCLIP.from_checkpoint(ckpt).to(device)
     model.clip.load_state_dict(ckpt['lora_state'])
     model.projection.load_state_dict(ckpt['projection'])
     model.eval()

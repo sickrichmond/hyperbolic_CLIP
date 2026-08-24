@@ -29,6 +29,7 @@ class AttributionCLIP(nn.Module):
         curv: float = 1.0,
         init_scale: float = 0.1,
         attn_implementation: str | None = None,
+        lora_target: str | None = None,
     ):
         super().__init__()
         self.curv = curv
@@ -44,10 +45,16 @@ class AttributionCLIP(nn.Module):
         for p in self.clip.parameters():
             p.requires_grad = False
 
+        # lora_target: a REGEX (peft re.fullmatch's it against the base model's
+        # module names), so one string picks both the encoder and the layer range.
+        # None keeps the historical behaviour: q/v of every block in BOTH encoders,
+        # 72 adapters on ViT-L/14. Restricting to the upper vision blocks looks like
+        #   r"vision_model\.encoder\.layers\.(1[2-9]|2[0-3])\.self_attn\.(q|v)_proj"
+        # and leaves the lower blocks — where CLIP's word knowledge lives — untouched.
         lora_cfg = LoraConfig(
             r=lora_r,
             lora_alpha=lora_alpha,
-            target_modules=["q_proj", "v_proj"],
+            target_modules=lora_target or ["q_proj", "v_proj"],
             lora_dropout=lora_dropout,
             bias="none",
         )
@@ -132,8 +139,31 @@ class AttributionCLIP(nn.Module):
 
     # ── Convenience ───────────────────────────────────────────────────────────
 
+    @classmethod
+    def from_checkpoint(cls, ckpt: dict, **overrides) -> "AttributionCLIP":
+        """Rebuild the architecture a checkpoint was trained with (weights NOT loaded).
+
+        'lora_target' is absent from pre-2026-08 checkpoints, where .get() yields
+        None and the full 72-adapter configuration comes back — which is what those
+        checkpoints' strict load_state_dict needs.
+        """
+        return cls(
+            clip_name=ckpt["clip_name"],
+            lora_r=ckpt.get("lora_r", 8),
+            lora_alpha=ckpt.get("lora_alpha", 16),
+            hyperbolic_dim=ckpt.get("hyperbolic_dim", 128),
+            curv=ckpt.get("curv", 1.0),
+            lora_target=ckpt.get("lora_target"),
+            **overrides,
+        )
+
     def trainable_parameters(self) -> list[nn.Parameter]:
         return [p for p in self.parameters() if p.requires_grad]
+
+    def n_lora_adapters(self) -> int:
+        """How many modules actually got an adapter. 72 for the full config on
+        ViT-L/14 (24 vision + 12 text blocks, q and v each), 24 for vision 12-23."""
+        return sum(1 for n, _ in self.clip.named_modules() if n.endswith("lora_A"))
 
     def print_trainable_summary(self) -> None:
         total = sum(p.numel() for p in self.parameters())
@@ -141,5 +171,6 @@ class AttributionCLIP(nn.Module):
         print(
             f"AttributionCLIP: {trainable:,} / {total:,} params trainable "
             f"({100 * trainable / total:.2f}%)  "
+            f"{self.n_lora_adapters()} lora adapters  "
             f"hyperbolic_dim={self.hyperbolic_dim}, curv={self.curv}"
         )

@@ -88,6 +88,13 @@ def parse_args():
     p.add_argument("--clip_name",      default="openai/clip-vit-base-patch32")
     p.add_argument("--lora_r",         type=int,   default=8)
     p.add_argument("--lora_alpha",     type=int,   default=16)
+    p.add_argument("--lora_target",    type=str,   default=None,
+                   help="Regex peft matches (fullmatch) against the base model's module "
+                        "names. Default None = q/v of every block in BOTH encoders (72 "
+                        "adapters on ViT-L/14). Upper vision blocks only: "
+                        r"'vision_model\.encoder\.layers\.(1[2-9]|2[0-3])\.self_attn\.(q|v)_proj' "
+                        "(24 adapters), which leaves the lower blocks — where CLIP's word "
+                        "knowledge lives — as pretrained.")
     p.add_argument("--hyperbolic_dim", type=int,   default=128)
     p.add_argument("--curv",           type=float, default=1.0)
     p.add_argument("--min_radius",     type=float, default=0.1)
@@ -106,7 +113,8 @@ def parse_args():
                    help="Force training on the captioned-images subset even when the "
                         "caption loss terms are off. Lets the caption on/off ablation run "
                         "on the SAME subset (only the loss varies, not the data).")
-    p.add_argument("--anchor_init", choices=["text", "image_centroid", "text_free"],
+    p.add_argument("--anchor_init",
+                   choices=["text", "image_centroid", "text_free", "random"],
                    default="text",
                    help="'text' (default): anchors are the class text prompts encoded by "
                         "CLIP at every step (they still move, through the text-encoder LoRA). "
@@ -115,7 +123,18 @@ def parse_args():
                         "(one forward pass before training) — no text dependency. "
                         "'text_free': free parameters too, but initialised at the encoded "
                         "PROMPTS and allowed to drift only by a learned amount (see "
-                        "--anchor_drift_init); at step 0 it is identical to 'text'.")
+                        "--anchor_drift_init); at step 0 it is identical to 'text'. "
+                        "'random': free parameters from random directions, rescaled to "
+                        "--anchor_init_norm. No text encoder, no centroid pre-pass — the "
+                        "data decide where the anchors go, from nothing.")
+    p.add_argument("--anchor_norm_range", type=float, nargs=2, default=None,
+                   metavar=("MIN", "MAX"),
+                   help="Hard clamp on the TANGENT norm of the free anchors, applied "
+                        "after every optimizer step. psi = asin(2*min_radius/sinh(‖t‖)), "
+                        "so the LOWER bound is what keeps the cones from degenerating "
+                        "into halfspaces: with min_radius 0.5, ‖t‖=1.0 gives psi 58.3 deg "
+                        "and ‖t‖=3.0 gives 5.7 deg. Replaces --lambda_norm (same quantity, "
+                        "imposed exactly instead of as a penalty).")
     p.add_argument("--anchor_prompts", type=str, default=None,
                    help="JSON map {class_name: sentence} replacing the two default templates "
                         "(e.g. data/anchor_prompts_structural.json). Used by both 'text' and "
@@ -206,6 +225,17 @@ def parse_args():
                    help="Weight of the two hierarchy terms: model anchor inside its family's "
                         "cone (a hinge — a containment constraint that should stop once met), "
                         "and image inside its family's cone (CE, deliberately NOT a hinge).")
+    p.add_argument("--pos_mode", choices=["hinge", "axis"], default="hinge",
+                   help="Shape of the positive cone term. 'hinge': max(0, xi-psi), zero "
+                        "gradient the moment the point is inside its cone — the measured "
+                        "reason the projection head is free to collapse the class geometry "
+                        "(centroid ARI 0.253 -> -0.007). 'axis': xi^2, an MSE from the cone "
+                        "AXIS, gradient 2*xi everywhere and psi absent, so the loss cannot "
+                        "be lowered by widening the cone.")
+    p.add_argument("--neg_samples",    type=int,   default=0,
+                   help="Random negatives kept per sample (0 = all K-1, unchanged). This "
+                        "does NOT save compute — xi is computed against every anchor anyway "
+                        "— it is dropout on the negative term.")
     p.add_argument("--lambda_ce",      type=float, default=0.0,
                    help="Weight of a cross-entropy term on softmax(-ξ/τ) (0 disables it, and "
                         "the loss is then bit-identical to before). The cone hinge saturates: "
@@ -225,6 +255,14 @@ def parse_args():
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
     p.add_argument("--weight_decay",   type=float, default=0.01)
+    p.add_argument("--optimizer", choices=["adamw", "sgd"], default="adamw",
+                   help="Default adamw: every checkpoint in the method comparison was "
+                        "trained with it, and flipping the default would silently make "
+                        "them unreproducible. NOTE --lr does not transfer between the two: "
+                        "Adam normalises by the second moment, SGD does not, so an Adam lr "
+                        "of 3e-4 barely moves under SGD (start around 1e-2 and re-tune).")
+    p.add_argument("--momentum",       type=float, default=0.9,
+                   help="SGD momentum (nesterov when > 0). Ignored by adamw.")
     p.add_argument("--val_frac",       type=float, default=0.2)
     p.add_argument("--split_scheme",   choices=["caption", "stratified"], default="caption",
                    help="'stratified' mirrors the comparison baselines' 80/10/10 label split "
@@ -240,6 +278,11 @@ def parse_args():
     p.add_argument("--seed",           type=int,   default=42)
     p.add_argument("--max_per_class",  type=int,   default=None)
     p.add_argument("--num_workers",    type=int,   default=8)
+    p.add_argument("--diag_plot_dir",  type=str,   default=None,
+                   help="Write one Poincare-disk snapshot per epoch here (HoroPCA to 2-D, "
+                        "anchors as stars with their cones drawn). Needs the HoroPCA repo — "
+                        "see tests/visualize_horopca.py. Reuses the embeddings validation "
+                        "already computes, so it costs no extra forward pass.")
     return p.parse_args()
 
 
@@ -370,16 +413,25 @@ def class_centroids(core, dataset, class_names, args, device,
 
 
 @torch.no_grad()
-def run_validation(model_inner, val_loader, x_anc, class_names, device, curv) -> dict:
+def run_validation(model_inner, val_loader, x_anc, class_names, device, curv,
+                   collect: int = 0) -> dict:
+    """collect > 0 also returns up to that many val embeddings (and their labels).
+    They are already computed here and thrown away; the per-epoch Poincare snapshot
+    reads them so it costs no extra forward pass."""
     model_inner.eval()
 
     per_class_correct = {c: 0 for c in class_names}
     per_class_total   = {c: 0 for c in class_names}
+    idx_of = {c: i for i, c in enumerate(class_names)}
+    emb, emb_lab = [], []
 
     for batch in tqdm(val_loader, desc="val", leave=False):
         pixel = batch["pixel_values"].to(device)
         with autocast("cuda"):
             x_img, _ = model_inner.encode_image(pixel)
+        if collect and sum(len(e) for e in emb) < collect:
+            emb.append(x_img.float().cpu())
+            emb_lab.extend(idx_of[g] for g in batch["generator"])
         pred_idx = predict_class(x_img, x_anc, curv=curv)
         pred_names = [class_names[i] for i in pred_idx.tolist()]
         for pred, gt in zip(pred_names, batch["generator"]):
@@ -398,6 +450,8 @@ def run_validation(model_inner, val_loader, x_anc, class_names, device, curv) ->
         "balanced_acc":  balanced,
         "per_class_acc": per_class_acc,
         "total":         total,
+        "emb":           torch.cat(emb)[:collect].numpy() if emb else None,
+        "emb_labels":    emb_lab[:collect],
     }
 
 
@@ -524,6 +578,7 @@ def main():
         lora_alpha=args.lora_alpha,
         hyperbolic_dim=args.hyperbolic_dim,
         curv=args.curv,
+        lora_target=args.lora_target,
     ).to(device)
 
     # ── Anchors ───────────────────────────────────────────────────────────────
@@ -534,6 +589,8 @@ def main():
     #   image_centroid — t0 = per-class mean of the training image embeddings, from
     #                    one pre-pass over the train split (single GPU, before the
     #                    DataParallel wrap). No text at all.
+    #   random         — t0 = random directions. The anchors carry no prior at all;
+    #                    where they end up is entirely what the loss put there.
     #   text_free      — t0 = the encoded class PROMPTS. Same starting point as plain
     #                    'text' mode up to the common rescale, but from there the
     #                    anchors may drift by t = t0 + softplus(s)·δ, with δ init 0
@@ -566,7 +623,14 @@ def main():
 
     if args.anchor_init != "text":
         with torch.no_grad():
-            if args.anchor_init == "image_centroid":
+            if args.anchor_init == "random":
+                # Directions from nothing: no text encoder, no centroid pre-pass.
+                # In 128 dimensions random directions are near-orthogonal, so the
+                # spread check below should report mean angle ~90 deg.
+                g = torch.Generator().manual_seed(args.seed)
+                t0 = torch.randn(len(class_names), args.hyperbolic_dim,
+                                 generator=g).to(device)
+            elif args.anchor_init == "image_centroid":
                 t0 = model.projection(
                     class_centroids(model, train_ds, class_names, args, device).to(device))
             else:
@@ -575,7 +639,7 @@ def main():
                 t0 = F.normalize(t0, dim=-1) * args.anchor_init_norm
             t0 = t0.detach().float()
 
-        if args.anchor_init == "image_centroid":
+        if args.anchor_init in ("image_centroid", "random"):
             anchor_tangent = nn.Parameter(t0)
         else:
             anchor_t0 = t0                                        # fixed reference
@@ -629,6 +693,7 @@ def main():
         target_norm_family=args.target_norm_family,
         lambda_sep=args.lambda_sep, theta_max=args.theta_max,
         lambda_family=args.lambda_family, family_of=family_of,
+        pos_mode=args.pos_mode, neg_samples=args.neg_samples,
     ).to(device)
 
     trainable = core.trainable_parameters()
@@ -636,11 +701,23 @@ def main():
         if extra is not None:
             trainable = trainable + [extra]
     trainable = trainable + list(cone_loss.parameters())
-    optimizer = torch.optim.AdamW(
-        trainable,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
-    )
+    if args.optimizer == "sgd":
+        optimizer = torch.optim.SGD(
+            trainable,
+            lr=args.lr,
+            momentum=args.momentum,
+            nesterov=args.momentum > 0,
+            weight_decay=args.weight_decay,
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            trainable,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+        )
+    print(f"Optimizer: {args.optimizer}"
+          + (f" (momentum {args.momentum}, nesterov)" if args.optimizer == "sgd" else "")
+          + f"  lr={args.lr}  weight_decay={args.weight_decay}")
     steps_per_epoch = len(train_loader)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.num_epochs * steps_per_epoch, eta_min=1e-6
@@ -662,12 +739,24 @@ def main():
         print(f"Mixup: α={args.mixup_alpha} at '{args.mixup_at}'")
     mix_at_clip = args.mixup_alpha > 0 and args.mixup_at == "clip"
 
+    # Resolved here, not inside the loop: a missing HoroPCA clone should kill the job
+    # in the first second, not after the first epoch of training. The import alone is
+    # not enough — HoroPCA is located lazily, so probe it now.
+    plot_epoch_snapshot = None
+    diag_state = None
+    if args.diag_plot_dir:
+        from tests.visualize_horopca import plot_epoch_snapshot, _load_horopca
+        _load_horopca()
+        Path(args.diag_plot_dir).mkdir(parents=True, exist_ok=True)
+        print(f"Per-epoch Poincare snapshots → {args.diag_plot_dir}")
+
     best_balanced = -1.0
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Training loop ─────────────────────────────────────────────────────────
-    base_keys = ["loss_img_in_cls", "loss_cap_in_cls", "loss_img_in_cap", "loss_norm",
+    base_keys = ["loss_img_in_cls", "loss_pos", "loss_neg",
+                 "loss_cap_in_cls", "loss_img_in_cap", "loss_norm",
                  "cone_acc", "inside_img", "mean_psi_anc", "mean_xi_img_anc",
                  "mean_anc_norm"]
     cap_keys  = ["inside_cap", "inside_img_cap", "mean_psi_cap",
@@ -757,6 +846,15 @@ def main():
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
+            if args.anchor_norm_range and anchor_tangent is not None:
+                # Projection onto the norm range, not a penalty: psi is a function of
+                # ‖t‖ alone, so this pins the aperture band exactly. Below the lower
+                # bound every cone degenerates into a halfspace and argmin xi is a
+                # cosine again.
+                lo, hi = args.anchor_norm_range
+                with torch.no_grad():
+                    n = anchor_tangent.norm(dim=-1, keepdim=True)
+                    anchor_tangent.mul_(n.clamp(lo, hi) / n.clamp_min(1e-8))
 
             sums["loss"] += loss.item()
             for k in base_keys + ce_keys + sep_keys + fam_keys:
@@ -780,7 +878,8 @@ def main():
 
         avg = {k: v / steps_per_epoch for k, v in sums.items()}
         line1 = (f"\nEpoch {epoch}: train loss={avg['loss']:.4f}  "
-                 f"L_img_cls={avg['loss_img_in_cls']:.4f}")
+                 f"L_img_cls={avg['loss_img_in_cls']:.4f}"
+                 f"  (pos={avg['loss_pos']:.4f} neg={avg['loss_neg']:.4f})")
         if use_caps:
             line1 += (f"  L_cap_cls={avg['loss_cap_in_cls']:.4f}"
                       f"  L_img_cap={avg['loss_img_in_cap']:.4f}")
@@ -807,7 +906,9 @@ def main():
               f"inside_img={100*avg['inside_img']:.1f}%  "
               f"ψ_anc={avg['mean_psi_anc']:.3f}  "
               f"ξ_img→anc={avg['mean_xi_img_anc']:.3f}  "
-              f"‖t̄_anc‖={avg['mean_anc_norm']:.2f}")
+              f"‖x_anc‖={avg['mean_anc_norm']:.2f}"
+              + (f"  ‖t_anc‖={anchor_tangent.norm(dim=-1).mean().item():.2f}"
+                 if anchor_tangent is not None else ""))
         if use_caps:
             print(f"           inside_cap={100*avg['inside_cap']:.1f}%  "
                   f"inside_img_in_cap={100*avg['inside_img_cap']:.1f}%  "
@@ -827,11 +928,22 @@ def main():
                 x_anc_val, _ = core.encode_text(anchor_ids, anchor_mask)
             else:
                 x_anc_val = exp_map0(t_anc_val.float(), curv=args.curv)
-        val = run_validation(core, val_loader, x_anc_val, class_names, device, args.curv)
+        val = run_validation(core, val_loader, x_anc_val, class_names, device, args.curv,
+                             collect=4000 if plot_epoch_snapshot else 0)
         print(f"  val: overall={100*val['overall_acc']:.1f}%  "
               f"balanced={100*val['balanced_acc']:.1f}%  ({val['total']} samples)")
         for c, a in val["per_class_acc"].items():
             print(f"    {c:10s}: {100*a:5.1f}%")
+
+        if plot_epoch_snapshot is not None:
+            # diag_state carries the HoroPCA fit and the Frechet-mean isometry from
+            # the first epoch, so every frame is in the SAME 2-D frame — otherwise the
+            # basis rotates each epoch and "how the anchors moved" is unreadable.
+            diag_state = plot_epoch_snapshot(
+                val["emb"], val["emb_labels"], x_anc_val, class_names,
+                Path(args.diag_plot_dir) / f"epoch_{epoch:02d}.png",
+                curv=args.curv, min_radius=args.min_radius,
+                state=diag_state, seed=args.seed, title=f"epoch {epoch}")
 
         # ── Save best checkpoint by balanced val accuracy ────────────────────
         if val["balanced_acc"] > best_balanced:
@@ -843,6 +955,9 @@ def main():
                     "clip_name":       args.clip_name,
                     "lora_r":          args.lora_r,
                     "lora_alpha":      args.lora_alpha,
+                    # Which modules got adapters: the key set of lora_state depends
+                    # on it, and every loader does a STRICT load_state_dict.
+                    "lora_target":     args.lora_target,
                     "hyperbolic_dim":  args.hyperbolic_dim,
                     "curv":            args.curv,
                     "min_radius":      args.min_radius,
@@ -850,6 +965,7 @@ def main():
                     "anchor_texts":    anchor_texts,
                     "anchor_init":     args.anchor_init,
                     "anchor_prompts":  args.anchor_prompts,
+                    "anchor_norm_range": args.anchor_norm_range,
                     # Free-anchor modes only (image_centroid / text_free): the learned
                     # anchors in tangent space, in class_names order. Inference lifts
                     # them with exp_map0. None in 'text' mode, where the eval re-encodes
@@ -862,6 +978,11 @@ def main():
                     "ce_tau":          (F.softplus(cone_loss.ce_tau_raw).item()
                                         if args.lambda_ce > 0 else None),
                     "lambda_hinge":    args.lambda_hinge,
+                    "pos_mode":        args.pos_mode,
+                    "neg_samples":     args.neg_samples,
+                    "optimizer":       args.optimizer,
+                    "momentum":        args.momentum,
+                    "lr":              args.lr,
                     "norm_mode":       args.norm_mode,
                     "target_norm":     args.target_norm,
                     "lambda_norm":     args.lambda_norm,
