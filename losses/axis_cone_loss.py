@@ -155,10 +155,16 @@ class AxisConeLoss(nn.Module):
         with torch.no_grad():
             anc_norm = x_anc.norm(dim=-1)
             psi = torch.arcsin((2.0 * self.min_radius / anc_norm).clamp(max=1.0))
-            d = F.normalize(x_anc, dim=-1)
-            cos = (d @ d.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
-            iu = torch.triu_indices(K, K, offset=1, device=device)
-            ang = torch.arccos(cos[iu[0], iu[1]])
+            if K > 1:
+                d = F.normalize(x_anc, dim=-1)
+                cos = (d @ d.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+                iu = torch.triu_indices(K, K, offset=1, device=device)
+                ang = torch.arccos(cos[iu[0], iu[1]])
+                sep_min, sep_mean = ang.min(), ang.mean()
+            else:
+                # No pairs to separate. NaN rather than a made-up angle, so a run with
+                # one class shows up as unreadable instead of quietly plausible.
+                sep_min = sep_mean = torch.full((), float("nan"), device=device)
             stats = {
                 "loss_pos":     L_pos.detach(),
                 "loss_neg":     L_neg.detach(),
@@ -170,8 +176,8 @@ class AxisConeLoss(nn.Module):
                 "psi_min_deg":  torch.rad2deg(psi.min()).detach(),
                 "psi_deg":      torch.rad2deg(psi.mean()).detach(),
                 "psi_max_deg":  torch.rad2deg(psi.max()).detach(),
-                "sep_min_deg":  torch.rad2deg(ang.min()).detach(),
-                "sep_mean_deg": torch.rad2deg(ang.mean()).detach(),
+                "sep_min_deg":  torch.rad2deg(sep_min).detach(),
+                "sep_mean_deg": torch.rad2deg(sep_mean).detach(),
                 "anc_norm":     anc_norm.mean().detach(),
             }
         return loss, stats
