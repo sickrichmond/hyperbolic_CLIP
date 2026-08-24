@@ -258,6 +258,11 @@ class EntailmentConeLoss(nn.Module):
         with torch.no_grad():
             inside_img = (xi_ia_pos < psi_anc_pos).float().mean()
             cone_acc   = (xi_ia.argmin(dim=1) == labels).float().mean()
+            # Fraction of the xi matrix sitting at oxy_angle's acos clamp. xi = pi means
+            # the image is SHALLOWER than the anchor — the far side of the cone — and the
+            # clamp makes the gradient there exactly zero, not merely small. Anything
+            # above a few percent and the run is not learning, whatever the lr says.
+            xi_sat = (xi_ia > math.pi - 5e-3).float().mean()
 
         # ───── 2 & 3) hierarchical caption-based terms (optional) ────────────
         L_cap_in_class = torch.tensor(0.0, device=device)
@@ -373,6 +378,7 @@ class EntailmentConeLoss(nn.Module):
             "loss_img_in_cls": L_img_in_class.detach(),
             # Split out: with pos_mode="axis" the two halves live on different
             # scales and the sum alone is unreadable.
+            "xi_sat":          xi_sat.detach(),
             "loss_pos":        L_imgcls_pos.detach(),
             "loss_neg":        L_imgcls_neg.detach(),
             "loss_cap_in_cls": L_cap_in_class.detach(),

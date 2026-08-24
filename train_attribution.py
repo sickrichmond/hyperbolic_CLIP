@@ -20,6 +20,7 @@ Usage:
         --output        $WORK/hyp_fine_tuning/checkpoints/attribution_FLUX_vitl14.pt
 """
 import argparse
+import math
 import os
 from pathlib import Path
 
@@ -34,7 +35,7 @@ from transformers import CLIPTokenizer
 from data.iab_clip_dataset import IABCLIPDataset
 from geometry.lorentz import exp_map0, half_aperture, log_map0
 from models.attribution_clip import AttributionCLIP
-from losses.attribution_loss import EntailmentConeLoss, predict_class
+from losses.attribution_loss import EntailmentConeLoss, _pairwise_xi, predict_class
 
 
 # Class-anchor text templates. Order matters: this defines the integer labels.
@@ -96,6 +97,22 @@ def parse_args():
                         "(24 adapters), which leaves the lower blocks — where CLIP's word "
                         "knowledge lives — as pretrained.")
     p.add_argument("--hyperbolic_dim", type=int,   default=128)
+    p.add_argument("--init_depth",     type=float, default=0.0,
+                   help="Target median ‖t_img‖ at init (0 = off, keep --init_scale as is). "
+                        "The head is exactly linear in its last layer's weight, so this is "
+                        "measured on one batch and applied as a rescale — no guessing at "
+                        "--init_scale, whose useful value spans two orders of magnitude "
+                        "depending on the backbone. Set it ABOVE the anchors' tangent norm "
+                        "(--anchor_init_norm): a cone contains what is deeper than its apex.")
+    p.add_argument("--init_scale",     type=float, default=0.1,
+                   help="Scale on the projection head's last layer, i.e. how DEEP the "
+                        "images start. It is not cosmetic with free anchors: an entailment "
+                        "cone contains points FARTHER from the origin than its apex, so "
+                        "‖x_img‖ must exceed ‖x_anc‖ or every image sits at xi = pi, where "
+                        "oxy_angle's acos clamp makes the gradient exactly zero. In 'text' "
+                        "mode anchors come out of this same head and the two scales track "
+                        "each other; a free anchor rescaled to --anchor_init_norm does not. "
+                        "The line 'Image depth at init' printed below reports the ordering.")
     p.add_argument("--curv",           type=float, default=1.0)
     p.add_argument("--min_radius",     type=float, default=0.1)
     p.add_argument("--margin",         type=float, default=0.1)
@@ -579,6 +596,7 @@ def main():
         hyperbolic_dim=args.hyperbolic_dim,
         curv=args.curv,
         lora_target=args.lora_target,
+        init_scale=args.init_scale,
     ).to(device)
 
     # ── Anchors ───────────────────────────────────────────────────────────────
@@ -673,6 +691,44 @@ def main():
             return anchor_t0 + F.softplus(anchor_drift) * anchor_delta
         return anchor_tangent
 
+    # ── Depth ordering at init ───────────────────────────────────────────────
+    # An entailment cone contains the points FARTHER from the origin than its apex, so
+    # the images have to be deeper than the anchors. If they are not, every xi sits at
+    # pi and oxy_angle's acos clamp makes the gradient exactly zero — the run reports a
+    # perfectly constant loss and chance accuracy at every learning rate.
+    model.eval()
+    with torch.no_grad():
+        probe = next(iter(train_loader))["pixel_values"][:64].to(device)
+        if args.init_depth > 0:
+            # t = W2·GELU(W1·x) + b2 is exactly linear in (W2, b2), so one measurement
+            # gives the exact rescale. In 'text' mode this moves the anchors too — they
+            # come out of the same head — which is the point: the two scales must track.
+            cur = model.encode_image(probe)[1].norm(dim=-1).median().item()
+            k = args.init_depth / max(cur, 1e-12)
+            model.projection[-1].weight.mul_(k)
+            model.projection[-1].bias.mul_(k)
+            print(f"Head calibrated for --init_depth: ‖t_img‖ {cur:.4f} → "
+                  f"{args.init_depth:.2f} (last layer ×{k:.1f})")
+        x_probe, t_probe = model.encode_image(probe)
+        t_now = anchor_tangent_now()
+        x_anc0 = (exp_map0(t_now.float(), curv=args.curv) if t_now is not None
+                  else model.encode_text(anchor_ids, anchor_mask)[0])
+        xi0 = _pairwise_xi(x_anc0, x_probe, curv=args.curv)
+        pinned = (xi0 > math.pi - 5e-3).float().mean().item()
+    model.train()
+    t_img = t_probe.norm(dim=-1).median().item()
+    x_img = x_probe.norm(dim=-1).median().item()
+    x_anc_n = x_anc0.norm(dim=-1).median().item()
+    print(f"Image depth at init: ‖t_img‖={t_img:.3f} ‖x_img‖={x_img:.3f}  vs  "
+          f"‖x_anc‖={x_anc_n:.3f}  (images must be DEEPER)")
+    print(f"  ξ(anchor→image) median {xi0.median().item():.3f} rad "
+          f"({math.degrees(xi0.median().item()):.1f}°)  ψ={half_aperture(x_anc0, curv=args.curv, min_radius=args.min_radius).median().item():.3f}  "
+          f"{100 * pinned:.0f}% pinned at π")
+    if pinned > 0.05:
+        print(f"  ⚠️  containment INVERTED — the acos clamp zeroes the gradient and no lr "
+              f"will move it.\n      Try --init_depth {1.5 * math.asinh(x_anc_n):.2f} "
+              f"(1.5× the anchors' tangent norm).")
+
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
@@ -755,7 +811,7 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Training loop ─────────────────────────────────────────────────────────
-    base_keys = ["loss_img_in_cls", "loss_pos", "loss_neg",
+    base_keys = ["loss_img_in_cls", "loss_pos", "loss_neg", "xi_sat",
                  "loss_cap_in_cls", "loss_img_in_cap", "loss_norm",
                  "cone_acc", "inside_img", "mean_psi_anc", "mean_xi_img_anc",
                  "mean_anc_norm"]
@@ -906,6 +962,7 @@ def main():
               f"inside_img={100*avg['inside_img']:.1f}%  "
               f"ψ_anc={avg['mean_psi_anc']:.3f}  "
               f"ξ_img→anc={avg['mean_xi_img_anc']:.3f}  "
+              f"ξ_sat={100*avg['xi_sat']:.0f}%  "
               f"‖x_anc‖={avg['mean_anc_norm']:.2f}"
               + (f"  ‖t_anc‖={anchor_tangent.norm(dim=-1).mean().item():.2f}"
                  if anchor_tangent is not None else ""))
@@ -959,6 +1016,8 @@ def main():
                     # on it, and every loader does a STRICT load_state_dict.
                     "lora_target":     args.lora_target,
                     "hyperbolic_dim":  args.hyperbolic_dim,
+                    "init_scale":      args.init_scale,
+                    "init_depth":      args.init_depth,
                     "curv":            args.curv,
                     "min_radius":      args.min_radius,
                     "class_names":     class_names,
