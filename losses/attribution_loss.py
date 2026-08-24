@@ -388,6 +388,11 @@ class EntailmentConeLoss(nn.Module):
             "inside_img":      inside_img.detach(),
             "cone_acc":        cone_acc.detach(),
             "mean_psi_anc":    psi_anc.mean().detach(),
+            # psi SPREAD, not just its mean: with every leaf at the same depth psi is
+            # uniform and argmin xi IS argmax cos algebraically. A spread is the
+            # necessary condition for the cone rule to differ from a cosine at all.
+            "psi_min_deg":     torch.rad2deg(psi_anc.min()).detach(),
+            "psi_max_deg":     torch.rad2deg(psi_anc.max()).detach(),
             "mean_xi_img_anc": xi_ia_pos.mean().detach(),
             "mean_anc_norm":   anc_norms.mean().detach(),
             **stats_extra,

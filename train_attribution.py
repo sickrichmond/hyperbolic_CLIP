@@ -36,6 +36,7 @@ from data.iab_clip_dataset import IABCLIPDataset
 from geometry.lorentz import exp_map0, half_aperture, log_map0
 from models.attribution_clip import AttributionCLIP
 from losses.attribution_loss import EntailmentConeLoss, _pairwise_xi, predict_class
+from losses.axis_cone_loss import AxisConeLoss, axis_cone_q
 
 
 # Class-anchor text templates. Order matters: this defines the integer labels.
@@ -242,6 +243,18 @@ def parse_args():
                    help="Weight of the two hierarchy terms: model anchor inside its family's "
                         "cone (a hinge — a containment constraint that should stop once met), "
                         "and image inside its family's cone (CE, deliberately NOT a hinge).")
+    p.add_argument("--loss", choices=["cone", "axis"], default="cone",
+                   help="'cone' (default): the entailment-cone hinge in "
+                        "losses/attribution_loss.py, untouched — every checkpoint in the "
+                        "method comparison was trained with it. 'axis': the axis-distance "
+                        "loss in losses/axis_cone_loss.py — q = ‖x̂ − û_k‖²/‖wall_k‖² = "
+                        "(1−cos θ)/(1−cos ψ_k), the squared distance from the cone's axis "
+                        "in units of the distance to its wall, so q=1 IS the wall. "
+                        "With 'axis' the flags "
+                        "--lambda_sep/--lambda_norm/--target_norm/--lambda_ce/"
+                        "--lambda_hinge/--pos_mode/--hierarchy/--init_depth are all "
+                        "ignored: that loss has none of those terms and q is invariant "
+                        "to the image depth.")
     p.add_argument("--pos_mode", choices=["hinge", "axis"], default="hinge",
                    help="Shape of the positive cone term. 'hinge': max(0, xi-psi), zero "
                         "gradient the moment the point is inside its cone — the measured "
@@ -431,8 +444,12 @@ def class_centroids(core, dataset, class_names, args, device,
 
 @torch.no_grad()
 def run_validation(model_inner, val_loader, x_anc, class_names, device, curv,
-                   collect: int = 0) -> dict:
-    """collect > 0 also returns up to that many val embeddings (and their labels).
+                   collect: int = 0, predict=None) -> dict:
+    """`predict(x_img, x_anc) -> (B,)` is the decision rule; defaults to argmin xi. The
+    axis loss reads a different quantity, and evaluating a model with the wrong rule is
+    a failure that shows up as a plausible-looking accuracy, not as an error.
+
+    collect > 0 also returns up to that many val embeddings (and their labels).
     They are already computed here and thrown away; the per-epoch Poincare snapshot
     reads them so it costs no extra forward pass."""
     model_inner.eval()
@@ -449,7 +466,8 @@ def run_validation(model_inner, val_loader, x_anc, class_names, device, curv,
         if collect and sum(len(e) for e in emb) < collect:
             emb.append(x_img.float().cpu())
             emb_lab.extend(idx_of[g] for g in batch["generator"])
-        pred_idx = predict_class(x_img, x_anc, curv=curv)
+        pred_idx = (predict(x_img, x_anc) if predict is not None
+                    else predict_class(x_img, x_anc, curv=curv))
         pred_names = [class_names[i] for i in pred_idx.tolist()]
         for pred, gt in zip(pred_names, batch["generator"]):
             per_class_total[gt] += 1
@@ -510,6 +528,10 @@ def main():
     # train set) and no data loss. require_caption follows whether any caption term
     # is active. Without a manifest: legacy caption-based split.
     use_caps = (args.lambda_cap_in_class > 0 or args.lambda_img_in_cap > 0)
+    if args.loss == "axis" and use_caps:
+        raise ValueError("--loss axis has no caption terms; it scores images against "
+                         "class cones only. Drop --lambda_cap_in_class/--lambda_img_in_cap "
+                         "or use --loss cone.")
     # Training set membership: captioned-only if any caption term is active OR if
     # --require_caption forces it (caption on/off ablation on the same subset).
     # Decoupled from use_caps so caption-OFF can share the captioned subset.
@@ -713,21 +735,34 @@ def main():
         t_now = anchor_tangent_now()
         x_anc0 = (exp_map0(t_now.float(), curv=args.curv) if t_now is not None
                   else model.encode_text(anchor_ids, anchor_mask)[0])
-        xi0 = _pairwise_xi(x_anc0, x_probe, curv=args.curv)
-        pinned = (xi0 > math.pi - 5e-3).float().mean().item()
+        psi0 = half_aperture(x_anc0, curv=args.curv, min_radius=args.min_radius)
+        if args.loss == "axis":
+            q0 = axis_cone_q(x_probe, x_anc0, args.min_radius)
+        else:
+            xi0 = _pairwise_xi(x_anc0, x_probe, curv=args.curv)
+            pinned = (xi0 > math.pi - 5e-3).float().mean().item()
     model.train()
     t_img = t_probe.norm(dim=-1).median().item()
     x_img = x_probe.norm(dim=-1).median().item()
     x_anc_n = x_anc0.norm(dim=-1).median().item()
     print(f"Image depth at init: ‖t_img‖={t_img:.3f} ‖x_img‖={x_img:.3f}  vs  "
-          f"‖x_anc‖={x_anc_n:.3f}  (images must be DEEPER)")
-    print(f"  ξ(anchor→image) median {xi0.median().item():.3f} rad "
-          f"({math.degrees(xi0.median().item()):.1f}°)  ψ={half_aperture(x_anc0, curv=args.curv, min_radius=args.min_radius).median().item():.3f}  "
-          f"{100 * pinned:.0f}% pinned at π")
-    if pinned > 0.05:
-        print(f"  ⚠️  containment INVERTED — the acos clamp zeroes the gradient and no lr "
-              f"will move it.\n      Try --init_depth {1.5 * math.asinh(x_anc_n):.2f} "
-              f"(1.5× the anchors' tangent norm).")
+          f"‖x_anc‖={x_anc_n:.3f}")
+    if args.loss == "axis":
+        # q is invariant to the image depth, so there is no ordering to get wrong here;
+        # what matters is that psi is non-degenerate and q starts well above 1 (outside
+        # every cone) rather than at 0 (already collapsed).
+        print(f"  q(image, cone) median {q0.median().item():.3f}  "
+              f"min {q0.min().item():.3f}  "
+              f"ψ∈[{math.degrees(psi0.min()):.1f},{math.degrees(psi0.max()):.1f}]°  "
+              f"(q=1 is the cone wall)")
+    else:
+        print(f"  ξ(anchor→image) median {xi0.median().item():.3f} rad "
+              f"({math.degrees(xi0.median().item()):.1f}°)  ψ={psi0.median().item():.3f}  "
+              f"{100 * pinned:.0f}% pinned at π   (images must be DEEPER than anchors)")
+        if pinned > 0.05:
+            print(f"  ⚠️  containment INVERTED — the acos clamp zeroes the gradient and no "
+                  f"lr will move it.\n      Try --init_depth "
+                  f"{1.5 * math.asinh(x_anc_n):.2f} (1.5× the anchors' tangent norm).")
 
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs")
@@ -738,19 +773,27 @@ def main():
 
     # Built before the optimizer: with --lambda_ce it owns a learned temperature that
     # has to be in the parameter list.
-    cone_loss = EntailmentConeLoss(
-        curv=args.curv, min_radius=args.min_radius,
-        margin=args.margin, lambda_neg=args.lambda_neg,
-        lambda_cap_in_class=args.lambda_cap_in_class,
-        lambda_img_in_cap=args.lambda_img_in_cap,
-        lambda_norm=args.lambda_norm, target_norm=args.target_norm,
-        lambda_ce=args.lambda_ce, ce_tau_init=args.ce_tau_init,
-        lambda_hinge=args.lambda_hinge, norm_mode=args.norm_mode,
-        target_norm_family=args.target_norm_family,
-        lambda_sep=args.lambda_sep, theta_max=args.theta_max,
-        lambda_family=args.lambda_family, family_of=family_of,
-        pos_mode=args.pos_mode, neg_samples=args.neg_samples,
-    ).to(device)
+    if args.loss == "axis":
+        cone_loss = AxisConeLoss(
+            min_radius=args.min_radius, lambda_neg=args.lambda_neg,
+            neg_samples=args.neg_samples,
+        ).to(device)
+        val_predict = lambda xi_, xa_: axis_cone_q(xi_, xa_, args.min_radius).argmin(1)
+    else:
+        val_predict = None
+        cone_loss = EntailmentConeLoss(
+            curv=args.curv, min_radius=args.min_radius,
+            margin=args.margin, lambda_neg=args.lambda_neg,
+            lambda_cap_in_class=args.lambda_cap_in_class,
+            lambda_img_in_cap=args.lambda_img_in_cap,
+            lambda_norm=args.lambda_norm, target_norm=args.target_norm,
+            lambda_ce=args.lambda_ce, ce_tau_init=args.ce_tau_init,
+            lambda_hinge=args.lambda_hinge, norm_mode=args.norm_mode,
+            target_norm_family=args.target_norm_family,
+            lambda_sep=args.lambda_sep, theta_max=args.theta_max,
+            lambda_family=args.lambda_family, family_of=family_of,
+            pos_mode=args.pos_mode, neg_samples=args.neg_samples,
+        ).to(device)
 
     trainable = core.trainable_parameters()
     for extra in (anchor_tangent, anchor_delta, anchor_drift):
@@ -811,18 +854,26 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Training loop ─────────────────────────────────────────────────────────
-    base_keys = ["loss_img_in_cls", "loss_pos", "loss_neg", "xi_sat",
-                 "loss_cap_in_cls", "loss_img_in_cap", "loss_norm",
-                 "cone_acc", "inside_img", "mean_psi_anc", "mean_xi_img_anc",
-                 "mean_anc_norm"]
+    axis = args.loss == "axis"
+    if axis:
+        base_keys = ["loss_pos", "loss_neg", "q_pos", "inside_img", "cone_acc",
+                     "psi_min_deg", "psi_deg", "psi_max_deg",
+                     "sep_min_deg", "sep_mean_deg", "anc_norm"]
+    else:
+        base_keys = ["loss_img_in_cls", "loss_pos", "loss_neg", "xi_sat",
+                     "psi_min_deg", "psi_max_deg",
+                     "loss_cap_in_cls", "loss_img_in_cap", "loss_norm",
+                     "cone_acc", "inside_img", "mean_psi_anc", "mean_xi_img_anc",
+                     "mean_anc_norm"]
     cap_keys  = ["inside_cap", "inside_img_cap", "mean_psi_cap",
                  "mean_xi_cap_anc", "mean_xi_img_cap", "mean_cap_norm"]
-    ce_keys   = ["loss_ce", "ce_tau"] if args.lambda_ce > 0 else []
+    ce_keys   = ["loss_ce", "ce_tau"] if args.lambda_ce > 0 and not axis else []
     sep_keys  = (["loss_sep", "sep_min_deg", "sep_max_deg", "sep_overlap"]
-                 if args.lambda_sep > 0 else [])
+                 if args.lambda_sep > 0 and not axis else [])
     fam_keys  = (["loss_fam_anc", "loss_fam_img", "inside_family", "family_acc",
                   "mean_psi_fam", "fam_tau"]
-                 if args.lambda_family > 0 and args.hierarchy != "none" else [])
+                 if args.lambda_family > 0 and args.hierarchy != "none" and not axis
+                 else [])
 
     for epoch in range(1, args.num_epochs + 1):
         model.train()
@@ -893,7 +944,9 @@ def main():
                 loss_b, _     = cone_loss(x_mix, x_anc, labels[perm])
                 loss = lam * loss_a + (1 - lam) * loss_b
             else:
-                loss, stats = cone_loss(x_img, x_anc, labels, x_cap=x_cap, x_fam=x_fam)
+                loss, stats = (cone_loss(x_img, x_anc, labels) if axis
+                               else cone_loss(x_img, x_anc, labels,
+                                              x_cap=x_cap, x_fam=x_fam))
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -920,12 +973,20 @@ def main():
                     sums[k] += stats[k].item()
 
             if step % 25 == 0 or step == steps_per_epoch:
-                post = {
-                    "loss": f"{sums['loss']/step:.3f}",
-                    "ic":   f"{sums['loss_img_in_cls']/step:.3f}",
-                    "acc":  f"{sums['cone_acc']/step:.3f}",
-                    "ψa":   f"{sums['mean_psi_anc']/step:.3f}",
-                }
+                if axis:
+                    post = {
+                        "loss": f"{sums['loss']/step:.3f}",
+                        "q":    f"{sums['q_pos']/step:.3f}",
+                        "acc":  f"{sums['cone_acc']/step:.3f}",
+                        "ψ":    f"{sums['psi_deg']/step:.1f}°",
+                    }
+                else:
+                    post = {
+                        "loss": f"{sums['loss']/step:.3f}",
+                        "ic":   f"{sums['loss_img_in_cls']/step:.3f}",
+                        "acc":  f"{sums['cone_acc']/step:.3f}",
+                        "ψa":   f"{sums['mean_psi_anc']/step:.3f}",
+                    }
                 if use_caps:
                     post["cc"] = f"{sums['loss_cap_in_cls']/step:.3f}"
                     post["ip"] = f"{sums['loss_img_in_cap']/step:.3f}"
@@ -933,47 +994,67 @@ def main():
                 bar.set_postfix(**post)
 
         avg = {k: v / steps_per_epoch for k, v in sums.items()}
-        line1 = (f"\nEpoch {epoch}: train loss={avg['loss']:.4f}  "
-                 f"L_img_cls={avg['loss_img_in_cls']:.4f}"
-                 f"  (pos={avg['loss_pos']:.4f} neg={avg['loss_neg']:.4f})")
-        if use_caps:
-            line1 += (f"  L_cap_cls={avg['loss_cap_in_cls']:.4f}"
-                      f"  L_img_cap={avg['loss_img_in_cap']:.4f}")
-        line1 += f"  L_norm={avg['loss_norm']:.4f}"
-        if ce_keys:
-            line1 += f"  L_ce={avg['loss_ce']:.4f}  τ={avg['ce_tau']:.3f}"
-        if sep_keys:
-            # min∠ must climb above 2ψ; today it sits 12-17x below it.
-            line1 += (f"  L_sep={avg['loss_sep']:.4f}"
-                      f"  min∠={avg['sep_min_deg']:.1f}°"
-                      f"  max∠={avg['sep_max_deg']:.1f}°"
-                      f"  overlap={100*avg['sep_overlap']:.0f}%")
-        if fam_keys:
-            line1 += (f"  L_famA={avg['loss_fam_anc']:.4f}"
-                      f"  L_famI={avg['loss_fam_img']:.4f}"
-                      f"  in_fam={100*avg['inside_family']:.0f}%"
-                      f"  fam_acc={100*avg['family_acc']:.1f}%"
-                      f"  ψf={avg['mean_psi_fam']:.3f}")
-        if anchor_drift is not None:
-            line1 += f"  drift_s={F.softplus(anchor_drift).item():.4f}"
-        line1 += f"  lr={scheduler.get_last_lr()[0]:.2e}"
-        print(line1)
-        print(f"           cone_acc={100*avg['cone_acc']:.1f}%  "
-              f"inside_img={100*avg['inside_img']:.1f}%  "
-              f"ψ_anc={avg['mean_psi_anc']:.3f}  "
-              f"ξ_img→anc={avg['mean_xi_img_anc']:.3f}  "
-              f"ξ_sat={100*avg['xi_sat']:.0f}%  "
-              f"‖x_anc‖={avg['mean_anc_norm']:.2f}"
-              + (f"  ‖t_anc‖={anchor_tangent.norm(dim=-1).mean().item():.2f}"
-                 if anchor_tangent is not None else ""))
-        if use_caps:
-            print(f"           inside_cap={100*avg['inside_cap']:.1f}%  "
-                  f"inside_img_in_cap={100*avg['inside_img_cap']:.1f}%  "
-                  f"ψ_cap={avg['mean_psi_cap']:.3f}  "
-                  f"ξ_cap→anc={avg['mean_xi_cap_anc']:.3f}  "
-                  f"ξ_img→cap={avg['mean_xi_img_cap']:.3f}  "
-                  f"‖t̄_cap‖={avg['mean_cap_norm']:.2f}")
-
+        if args.loss == "axis":
+            print(f"\nEpoch {epoch}: train loss={avg['loss']:.4f}  "
+                  f"pos={avg['loss_pos']:.4f}  neg={avg['loss_neg']:.4f}  "
+                  f"lr={scheduler.get_last_lr()[0]:.2e}")
+            # psi SPREAD is the line to read: if it stays a point, every class has the
+            # same aperture and argmin q IS argmax cos, however high the accuracy goes.
+            print(f"           acc={100*avg['cone_acc']:.1f}%  "
+                  f"inside={100*avg['inside_img']:.1f}%  "
+                  f"q_pos={avg['q_pos']:.3f}  "
+                  f"ψ∈[{avg['psi_min_deg']:.1f},{avg['psi_max_deg']:.1f}]°"
+                  f" (μ{avg['psi_deg']:.1f}°)  "
+                  f"min∠={avg['sep_min_deg']:.1f}°  mean∠={avg['sep_mean_deg']:.1f}°  "
+                  f"‖a_anc‖={avg['anc_norm']:.2f}"
+                  + (f"  ‖t_anc‖={anchor_tangent.norm(dim=-1).mean().item():.2f}"
+                     if anchor_tangent is not None else ""))
+        else:
+            line1 = (f"\nEpoch {epoch}: train loss={avg['loss']:.4f}  "
+                     f"L_img_cls={avg['loss_img_in_cls']:.4f}"
+                     f"  (pos={avg['loss_pos']:.4f} neg={avg['loss_neg']:.4f})")
+            if use_caps:
+                line1 += (f"  L_cap_cls={avg['loss_cap_in_cls']:.4f}"
+                          f"  L_img_cap={avg['loss_img_in_cap']:.4f}")
+            line1 += f"  L_norm={avg['loss_norm']:.4f}"
+            if ce_keys:
+                line1 += f"  L_ce={avg['loss_ce']:.4f}  τ={avg['ce_tau']:.3f}"
+            if sep_keys:
+                # min∠ must climb above 2ψ; today it sits 12-17x below it.
+                # 2psi/min-angle is stop criterion 1a (must fall below 1; sweepwin sits
+                # at 12.8, Phase B's `flat` reached 1.2). Printed here so it is readable
+                # per epoch instead of only post-hoc from probe_anchor_spread.
+                line1 += (f"  L_sep={avg['loss_sep']:.4f}"
+                          f"  min∠={avg['sep_min_deg']:.1f}°"
+                          f"  max∠={avg['sep_max_deg']:.1f}°"
+                          f"  overlap={100*avg['sep_overlap']:.0f}%"
+                          f"  2ψ/min∠={2*math.degrees(avg['mean_psi_anc'])/max(avg['sep_min_deg'], 1e-6):.1f}")
+            if fam_keys:
+                line1 += (f"  L_famA={avg['loss_fam_anc']:.4f}"
+                          f"  L_famI={avg['loss_fam_img']:.4f}"
+                          f"  in_fam={100*avg['inside_family']:.0f}%"
+                          f"  fam_acc={100*avg['family_acc']:.1f}%"
+                          f"  ψf={avg['mean_psi_fam']:.3f}")
+            if anchor_drift is not None:
+                line1 += f"  drift_s={F.softplus(anchor_drift).item():.4f}"
+            line1 += f"  lr={scheduler.get_last_lr()[0]:.2e}"
+            print(line1)
+            print(f"           cone_acc={100*avg['cone_acc']:.1f}%  "
+                  f"inside_img={100*avg['inside_img']:.1f}%  "
+                  f"ψ_anc={avg['mean_psi_anc']:.3f}"
+                  f"∈[{avg['psi_min_deg']:.1f},{avg['psi_max_deg']:.1f}]°  "
+                  f"ξ_img→anc={avg['mean_xi_img_anc']:.3f}  "
+                  f"ξ_sat={100*avg['xi_sat']:.0f}%  "
+                  f"‖x_anc‖={avg['mean_anc_norm']:.2f}"
+                  + (f"  ‖t_anc‖={anchor_tangent.norm(dim=-1).mean().item():.2f}"
+                     if anchor_tangent is not None else ""))
+            if use_caps:
+                print(f"           inside_cap={100*avg['inside_cap']:.1f}%  "
+                      f"inside_img_in_cap={100*avg['inside_img_cap']:.1f}%  "
+                      f"ψ_cap={avg['mean_psi_cap']:.3f}  "
+                      f"ξ_cap→anc={avg['mean_xi_cap_anc']:.3f}  "
+                      f"ξ_img→cap={avg['mean_xi_img_cap']:.3f}  "
+                      f"‖t̄_cap‖={avg['mean_cap_norm']:.2f}")
         # ── Validation ───────────────────────────────────────────────────────
         # Anchors under the CURRENT weights: text ones must be re-encoded, the free
         # ones come out of anchor_tangent_now(). eval() first — the text anchors must
@@ -986,7 +1067,8 @@ def main():
             else:
                 x_anc_val = exp_map0(t_anc_val.float(), curv=args.curv)
         val = run_validation(core, val_loader, x_anc_val, class_names, device, args.curv,
-                             collect=4000 if plot_epoch_snapshot else 0)
+                             collect=4000 if plot_epoch_snapshot else 0,
+                             predict=val_predict)
         print(f"  val: overall={100*val['overall_acc']:.1f}%  "
               f"balanced={100*val['balanced_acc']:.1f}%  ({val['total']} samples)")
         for c, a in val["per_class_acc"].items():
@@ -1037,6 +1119,10 @@ def main():
                     "ce_tau":          (F.softplus(cone_loss.ce_tau_raw).item()
                                         if args.lambda_ce > 0 else None),
                     "lambda_hinge":    args.lambda_hinge,
+                    # Which decision rule the eval must use: argmin xi for 'cone',
+                    # argmin q for 'axis'. Reading it wrong gives a plausible number,
+                    # not an error.
+                    "loss":            args.loss,
                     "pos_mode":        args.pos_mode,
                     "neg_samples":     args.neg_samples,
                     "optimizer":       args.optimizer,

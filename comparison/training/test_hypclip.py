@@ -36,6 +36,7 @@ from comparison.training.metrics.base_metrics_class import calculate_metrics_for
 
 from models.attribution_clip import AttributionCLIP
 from geometry.lorentz import exp_map0, oxy_angle
+from losses.axis_cone_loss import axis_cone_q
 from data.degradations import LEVEL_LABELS
 from transformers import CLIPTokenizer
 
@@ -141,6 +142,13 @@ def main():
     x_anc = load_anchors(ckpt, model, curv, device)                    # (K, D)
     K = x_anc.shape[0]
 
+    # The decision rule has to match the loss the checkpoint was trained with, or the
+    # eval silently reports a plausible number for the wrong quantity.
+    loss_kind = ckpt.get('loss', 'cone')
+    min_radius = ckpt.get('min_radius', 0.1)
+    print(f"Decision rule: {'argmin q (axis cone)' if loss_kind == 'axis' else 'argmin xi'}"
+          + (f", min_radius={min_radius}" if loss_kind == 'axis' else ""))
+
     os.makedirs(args.log_dir, exist_ok=True)
     config = {'model_name': 'hypclip', 'clip_name': clip_name, 'num_classes': K,
               'pre_resize': args.pre_resize}
@@ -175,10 +183,13 @@ def main():
             pixel = batch['image'].to(device)
             x_img, _ = model.encode_image(pixel)                        # (B, D)
             B = x_img.shape[0]
-            x_anc_t = x_anc.unsqueeze(0).expand(B, K, -1).reshape(B * K, -1)
-            x_img_t = x_img.unsqueeze(1).expand(B, K, -1).reshape(B * K, -1)
-            xi = oxy_angle(x_anc_t, x_img_t, curv=curv).reshape(B, K)   # (B, 23)
-            all_logits.append((-xi).cpu())
+            if loss_kind == 'axis':
+                score = axis_cone_q(x_img, x_anc, min_radius)           # (B, K)
+            else:
+                x_anc_t = x_anc.unsqueeze(0).expand(B, K, -1).reshape(B * K, -1)
+                x_img_t = x_img.unsqueeze(1).expand(B, K, -1).reshape(B * K, -1)
+                score = oxy_angle(x_anc_t, x_img_t, curv=curv).reshape(B, K)
+            all_logits.append((-score).cpu())
             all_labels.append(batch['label'].cpu())
             all_sem.append(batch['semantic_label'].cpu())
 

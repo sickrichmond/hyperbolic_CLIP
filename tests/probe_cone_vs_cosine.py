@@ -31,6 +31,7 @@ from tqdm import tqdm
 from comparison.dataset.ImageAttributionDataset.dataloader import get_dataloader
 from comparison.training.test_hypclip import harness_class_names, load_anchors
 from geometry.lorentz import half_aperture, oxy_angle
+from losses.axis_cone_loss import axis_cone_q
 from models.attribution_clip import AttributionCLIP
 
 N_IMAGES = 8000          # fixed-seed subset, comparable across checkpoints
@@ -75,15 +76,27 @@ def main(ckpt_path):
     # its tangent vector: cosine on x_anc/x_img IS cosine in tangent space.
     anc_dir = F.normalize(x_anc, dim=-1)
 
+    # The cone rule depends on which loss trained the checkpoint: argmin xi for the
+    # entailment-cone loss, argmin q for the axis loss. Reading the wrong one would
+    # answer the wrong question without failing.
+    loss_kind = ckpt.get('loss', 'cone')
+    min_radius = ckpt.get('min_radius', 0.1)
+    rule = 'argmin q (axis cone)' if loss_kind == 'axis' else 'argmin ξ'
+    print(f"Cone rule: {rule}")
+
     cone_pred, cos_pred, all_labels = [], [], []
     with torch.no_grad():
         for b in tqdm(loader, desc="probe", leave=False):
             x_img, _ = model.encode_image(b['image'].to(device))
             B = x_img.shape[0]
-            xi = oxy_angle(x_anc.unsqueeze(0).expand(B, K, -1).reshape(B * K, -1),
-                           x_img.unsqueeze(1).expand(B, K, -1).reshape(B * K, -1),
-                           curv=curv).reshape(B, K)
-            cone_pred.append(xi.argmin(1).cpu())
+            if loss_kind == 'axis':
+                score = axis_cone_q(x_img, x_anc, min_radius)
+            else:
+                score = oxy_angle(
+                    x_anc.unsqueeze(0).expand(B, K, -1).reshape(B * K, -1),
+                    x_img.unsqueeze(1).expand(B, K, -1).reshape(B * K, -1),
+                    curv=curv).reshape(B, K)
+            cone_pred.append(score.argmin(1).cpu())
             cos_pred.append((F.normalize(x_img, dim=-1) @ anc_dir.T).argmax(1).cpu())
             all_labels.append(b['label'].cpu())
 
@@ -92,7 +105,7 @@ def main(ckpt_path):
     y = torch.cat(all_labels)
     agree = (cone == cos).float().mean().item()
 
-    print(f"\n  accuracy, argmin ξ (the model)      : {(cone == y).float().mean():.4f}")
+    print(f"\n  accuracy, {rule} (the model)  : {(cone == y).float().mean():.4f}")
     print(f"  accuracy, argmax cos (no geometry)  : {(cos == y).float().mean():.4f}")
     print(f"  AGREEMENT between the two rules     : {agree:.4f}")
 
