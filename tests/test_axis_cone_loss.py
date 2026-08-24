@@ -29,6 +29,12 @@ import torch.nn.functional as F
 
 from losses.axis_cone_loss import AxisConeLoss, axis_cone_q
 
+# float64 throughout: check 6 compares autograd against a finite difference, and in
+# float32 the negative term's difference quotient is a few hundred ulp of the loss —
+# it disagrees at the 1e-2 level for pure rounding reasons, which would hide a real
+# discrepancy of the same size. Everything here is CPU and tiny, so it is free.
+torch.set_default_dtype(torch.float64)
+
 K_R = 0.5          # min_radius
 D = 6
 
