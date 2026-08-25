@@ -226,7 +226,10 @@ def test_aperture_equilibrium_is_coverage():
     q = axis_cone_q(x, _axis(), sp).squeeze(1)
     outside = (q > 1).double().mean().item()
     viol_mass = (q * (q > 1)).mean().item()
-    assert abs(viol_mass - nu) < 1e-3, (viol_mass, nu)
+    # The violator mass is a STEP function of psi: each sample crosses the wall at q = 1
+    # and adds 1/n to it, so it jumps over nu rather than landing on it. One jump is the
+    # honest tolerance here, not a round number.
+    assert abs(viol_mass - nu) < 2.0 / n, (viol_mass, nu, 1.0 / n)
     assert outside <= nu + 1e-9, (outside, nu)
 
     # the depth the aperture implies round-trips, which is what keeps the stored anchor,
@@ -234,8 +237,8 @@ def test_aperture_equilibrium_is_coverage():
     assert torch.allclose(sin_psi_from_depth(
         _axis() * depth_from_sin_psi(sp, K_R), K_R), sp, atol=1e-12)
     print(f"8 ok  coverage equilibrium at ψ={psi_star:.2f}°: viol mass {viol_mass:.4f} "
-          f"= ν {nu}, and {100*outside:.2f}% of the class outside its own cone "
-          f"(≤ ν by construction); depth↔ψ round trip exact")
+          f"= ν {nu} to within one sample ({1.0/n:.4f}), and {100*outside:.2f}% of the "
+          f"class outside its own cone (≤ ν by construction); depth↔ψ round trip exact")
 
 
 def test_detaches_hold():
