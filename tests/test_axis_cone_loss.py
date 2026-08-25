@@ -24,8 +24,12 @@ quietly become a cosine.
      to 65 degrees and its spread across classes collapsed from 8.7 to 0.6;
   7. psi's gradient has the right sign on both terms, and the sigmoid parameterisation
      keeps it inside its range with no projection;
-  8. the aperture equilibrium is where the derivation says: the wall lands on the class's
-     RMS angular radius.
+  8. the aperture equilibrium is where the derivation says: the cone shrinks until the
+     mass of the samples left outside it equals nu, so nu upper-bounds the fraction of a
+     class's own samples that fall outside its own cone;
+  9. the two crossed detaches hold — the pull term cannot move psi, and the aperture term
+     cannot move the images. Without them, widening the cone is a cheaper way to lower
+     the loss than rotating a 128-dimensional axis, and the optimiser takes it.
 """
 import math
 
@@ -166,16 +170,19 @@ def test_psi_gradient_signs_and_bounds():
     x = _at_angle(math.radians(20.0))
     labels = torch.zeros(1, dtype=torch.long)
 
-    def g_psi(psi_deg, lam_neg, lam_ap, lab=0):
+    def g_psi(psi_deg, lam_neg, lam_ap, lab=0, nu=0.05):
         sp = _sin(psi_deg).clone().requires_grad_(True)
-        AxisConeLoss(min_radius=K_R, lambda_neg=lam_neg, lambda_aperture=lam_ap)(
+        AxisConeLoss(min_radius=K_R, lambda_neg=lam_neg, lambda_aperture=lam_ap, nu=nu)(
             x, torch.cat([a, _axis(1)]), torch.full((1,), lab, dtype=torch.long),
             torch.cat([sp, _sin(psi_deg)]))[0].backward()
         return sp.grad[0].item()
 
-    pos = g_psi(30.0, 0.0, 0.0)          # own class: descent should WIDEN
-    ap = g_psi(30.0, 0.0, 1.0) - pos     # aperture term alone: should NARROW
-    assert pos < 0, pos
+    # the pull term is detached from W, so it must not move psi AT ALL
+    pull_only = g_psi(30.0, 0.0, 0.0)
+    assert abs(pull_only) < 1e-12, pull_only
+    # the image at 20 deg is inside a 30 deg cone, so no sample is outside: the hinge is
+    # silent and log W alone is left, which narrows.
+    ap = g_psi(30.0, 0.0, 1.0)
     assert ap > 0, ap
 
     # sigmoid parameterisation: psi is inside the range for any raw value, no clamp
@@ -184,37 +191,76 @@ def test_psi_gradient_signs_and_bounds():
         psi = lo + (hi - lo) * torch.sigmoid(torch.tensor(raw))
         assert lo <= psi.item() <= hi, (raw, psi)
     mid = lo + (hi - lo) * torch.sigmoid(torch.tensor(0.0))
-    print(f"7 ok  ψ gradient: positive term {pos:+.4f} (widens), aperture {ap:+.4f} "
-          f"(narrows); sigmoid bounds ψ to [5, 60]°, init {math.degrees(mid):.1f}°")
+    print(f"7 ok  pull cannot move ψ ({pull_only:.1e}, detached), aperture {ap:+.4f} "
+          f"(narrows when nothing is outside); sigmoid bounds ψ to [5, 60]°, "
+          f"init {math.degrees(mid):.1f}°")
 
 
-def test_aperture_equilibrium():
-    """With every image of a class at the same angle theta, the derivation says the wall
-    settles at exactly theta (lambda_aperture = 1)."""
-    theta = math.radians(22.0)
-    x = torch.cat([_at_angle(theta, off=1), _at_angle(theta, off=2),
-                   _at_angle(theta, off=3)])
-    labels = torch.zeros(3, dtype=torch.long)
+def test_aperture_equilibrium_is_coverage():
+    """nu bounds the fraction left outside. Build a class with a known spread of angles,
+    find where the aperture gradient vanishes, and check the coverage there."""
+    nu = 0.10
+    n = 400
+    # angles spread over [4, 44] degrees: a mix of tight and outlying samples
+    angles = [math.radians(4.0 + 40.0 * i / (n - 1)) for i in range(n)]
+    x = torch.cat([_at_angle(t, off=1 + (i % 4)) for i, t in enumerate(angles)])
+    labels = torch.zeros(n, dtype=torch.long)
 
     def g(psi_deg):
         sp = _sin(psi_deg).clone().requires_grad_(True)
-        AxisConeLoss(min_radius=K_R, lambda_neg=0.0, lambda_aperture=1.0)(
+        AxisConeLoss(min_radius=K_R, lambda_neg=0.0, lambda_aperture=1.0, nu=nu)(
             x, _axis(), labels, sp)[0].backward()
         return sp.grad[0].item()
 
-    at_eq, too_wide, too_narrow = g(22.0), g(45.0), g(8.0)
-    assert abs(at_eq) < 1e-9, at_eq
-    assert too_wide > 0, too_wide        # descent shrinks psi toward the spread
-    assert too_narrow < 0, too_narrow    # descent grows psi toward the spread
+    lo, hi = 5.0, 59.0
+    assert g(lo) < 0 and g(hi) > 0, (g(lo), g(hi))     # brackets a minimum
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if g(mid) < 0:
+            lo = mid
+        else:
+            hi = mid
+    psi_star = (lo + hi) / 2
 
-    # and the depth the aperture implies round-trips, which is what keeps the stored
-    # anchor, the snapshots and the eval reading the same geometry
-    sp = _sin(22.0)
+    sp = _sin(psi_star)
+    q = axis_cone_q(x, _axis(), sp).squeeze(1)
+    outside = (q > 1).double().mean().item()
+    viol_mass = (q * (q > 1)).mean().item()
+    assert abs(viol_mass - nu) < 1e-3, (viol_mass, nu)
+    assert outside <= nu + 1e-9, (outside, nu)
+
+    # the depth the aperture implies round-trips, which is what keeps the stored anchor,
+    # the snapshots and the eval reading the same geometry
     assert torch.allclose(sin_psi_from_depth(
         _axis() * depth_from_sin_psi(sp, K_R), K_R), sp, atol=1e-12)
-    print(f"8 ok  aperture equilibrium at ψ = the class spread (22°): grad {at_eq:+.2e}; "
-          f"ψ=45° → {too_wide:+.3f} (narrows), ψ=8° → {too_narrow:+.3f} (widens); "
-          f"depth↔ψ round trip exact")
+    print(f"8 ok  coverage equilibrium at ψ={psi_star:.2f}°: viol mass {viol_mass:.4f} "
+          f"= ν {nu}, and {100*outside:.2f}% of the class outside its own cone "
+          f"(≤ ν by construction); depth↔ψ round trip exact")
+
+
+def test_detaches_hold():
+    """Each parameter has one job: the pull must not reach psi, the aperture must not
+    reach the images. This is what stops 'widen the cone' from substituting for 'rotate
+    the axis' — the substitution that ran psi to 65 degrees when they were coupled."""
+    x = _at_angle(math.radians(40.0)).clone().requires_grad_(True)   # outside a 30° cone
+    sp = _sin(30.0).clone().requires_grad_(True)
+    labels = torch.zeros(1, dtype=torch.long)
+
+    AxisConeLoss(min_radius=K_R, lambda_neg=0.0, lambda_aperture=0.0, nu=0.05)(
+        x, _axis(), labels, sp)[0].backward()
+    assert x.grad.abs().max() > 0, "pull must move the image"
+    assert sp.grad is None or abs(sp.grad.item()) < 1e-12, sp.grad
+
+    x2 = _at_angle(math.radians(40.0)).clone().requires_grad_(True)
+    sp2 = _sin(30.0).clone().requires_grad_(True)
+    ap_only = AxisConeLoss(min_radius=K_R, lambda_neg=0.0, lambda_aperture=1.0, nu=0.05)
+    (ap_only(x2, _axis(), labels, sp2)[0]
+     - AxisConeLoss(min_radius=K_R, lambda_neg=0.0, lambda_aperture=0.0)(
+         x2, _axis(), labels, sp2)[0]).backward()
+    assert abs(sp2.grad.item()) > 0, "aperture must move psi"
+    assert x2.grad is None or x2.grad.abs().max() < 1e-12, x2.grad.abs().max()
+    print("9 ok  detaches hold: pull moves the image and not ψ, aperture moves ψ and not "
+          "the image")
 
 
 if __name__ == "__main__":
@@ -225,5 +271,6 @@ if __name__ == "__main__":
     test_psi_spread_breaks_the_cosine_rule()
     test_anchor_is_direction_only()
     test_psi_gradient_signs_and_bounds()
-    test_aperture_equilibrium()
+    test_aperture_equilibrium_is_coverage()
+    test_detaches_hold()
     print("\nall axis-cone invariants hold")

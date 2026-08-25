@@ -24,8 +24,10 @@
 # at its floor, and the psi SPREAD across classes collapsing 8.7° -> 0.6° — which is exactly
 # when argmin q becomes argmax cos. Decoupled, the radial gradient on the anchor is exactly
 # zero and the trainer keeps ‖a‖ = 2K/sin psi so the stored anchor is still the point it
-# represents. Where psi settles is set by the log-W term, whose equilibrium puts each cone's
-# wall on the RMS angular radius of its own class.
+# represents. Where psi settles is set by the aperture block, which shrinks the cone until
+# the mass of the samples left outside it equals --nu: the narrowest cone that still holds
+# its own class, with nu as the slack. nu upper-bounds the fraction of a class's own
+# samples outside its cone, so 0.05 means "leave at most 5% out".
 #
 # LoRA is on the upper half of the vision encoder only (layers 12-23, 24 adapters instead
 # of 72) and nothing on the text side: with free anchors the text encoder is out of the
@@ -38,9 +40,18 @@
 # Read out of the epoch line, in order of importance:
 #   ψ∈[min,max]  must SPREAD. If the apertures stay equal then argmin q IS argmax cos,
 #                algebraically, however high the accuracy climbs — that is the 0.9985
-#                cone-cosine agreement that has pinned every run so far.
-#   q_pos        must fall, and `inside` rise.
-#   min∠         must not collapse (the previous loss went 78.7° → 9.2° in two epochs).
+#                cone-cosine agreement that has pinned every run so far. With psi free and
+#                a coverage criterion, a narrow spread would now be a fact about the data.
+#   out vs ν     the coverage the cone actually reached against what was asked for. Equal
+#                means the aperture converged; far apart means it is still in transit.
+#   min∠         the open problem: it fell 41° → 9.7° over the last run, because the
+#                negative term goes to exactly zero once an image is outside a wrong cone,
+#                so nothing holds the anchors apart while the pull drags them all into the
+#                same narrow region of CLIP space.
+#
+# The schedule now floors at --lr_min instead of annealing to 1e-6: in the 5-epoch runs
+# psi, min-angle and q were all still moving when the last two epochs ran at 9.6e-4 and
+# 1e-6, so those final numbers said where the clock stopped, not where the equilibrium is.
 #
 # Submit:  sbatch --export=ALL,RUN=axis      slurm/slurm_train_22cls_axis.sh
 #          sbatch --export=ALL,RUN=axis_adam slurm/slurm_train_22cls_axis.sh
@@ -83,8 +94,8 @@ RUN=${RUN:-axis}
 LORA_T='vision_model\.encoder\.layers\.(1[2-9]|2[0-3])\.self_attn\.(q|v)_proj'
 
 case "$RUN" in
-  axis)      EXTRA="--optimizer sgd   --lr 1e-2" ;;
-  axis_adam) EXTRA="--optimizer adamw --lr 3e-4" ;;
+  axis)      EXTRA="--optimizer sgd   --lr 1e-2 --lr_min 1e-3" ;;
+  axis_adam) EXTRA="--optimizer adamw --lr 3e-4 --lr_min 3e-5" ;;
   *) echo "RUN must be axis or axis_adam (got '$RUN')"; exit 2 ;;
 esac
 CKPT=$OUT/attribution_22cls_${RUN}_vitl14.pt
@@ -113,6 +124,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --anchor_init       random \
     --anchor_init_norm  2.0 \
     --psi_range       5.0 60.0 \
+    --nu              0.05 \
     --lambda_aperture 1.0 \
     --lambda_neg      1.0 \
     --neg_samples     8 \
@@ -122,7 +134,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     $EXTRA \
     --no_captions \
     --batch_size      256 \
-    --num_epochs      5 \
+    --num_epochs      10 \
     --num_workers     8 \
     --split_manifest  $MANIFEST \
     --output          $CKPT

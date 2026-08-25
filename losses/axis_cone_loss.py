@@ -32,31 +32,39 @@ Write K = min_radius, a_k for the class anchor on the hyperboloid, x for an imag
 
               q = 0 on the axis · q = 1 exactly on the cone WALL · q > 1 outside.
 
-Loss:
-    L = mean_i [ q_{i,y_i} + λ_ap · log W_{y_i} + λ_neg · mean_{k ∈ N_i} max(0, 1 − q_ik)² ]
-    subject to ‖u_k‖ ∈ [r_min, r_max]  (a hard projection in the trainer, not a penalty)
+Loss — the goal is the NARROWEST cone per class that still holds its own samples, with a
+little slack so it does not memorise the training set:
 
-The positive term is the squared normalised distance from the right axis: zero only ON
-the axis, gradient everywhere, never saturating. The negative term says "stay out of
-other people's cones" and needs NO margin hyper-parameter — the margin is the cone wall.
+    L =  mean_i [ c_{i,y_i} / W_{y_i}.detach() ]                          pull
+      +  λ_ap · mean_i [ log W_{y_i} + max(0, q_ap − 1)/ν ]               aperture
+      +  λ_neg · mean_{k ∈ N_i} max(0, 1 − q_ik)²                         exclusion
+    where q_ap = c_{i,y_i}.detach() / W_{y_i}
 
-The APERTURE term is what sets ψ, and it is not optional. Without it the only pressure on
-the aperture is one-way: q = c/W is lowered by growing W, so every anchor walks to the
-smallest radius the range allows and ψ ends up uniform — measured, ‖t_anc‖ pinned at the
-floor to the digit and ψ ∈ [28.0, 28.0]. The negative term cannot supply the counterforce:
-with anchors ~68° apart and cones ~28° wide, an image inside its own cone is 40° from
-every other axis, so max(0, 1 − q_neg) is exactly zero and stays there. With ψ uniform,
-argmin q IS argmax cos and the whole construction is a cosine again.
+The pull is the squared normalised distance from the right axis: zero only ON the axis,
+gradient everywhere, never saturating. The exclusion term says "stay out of other people's
+cones" and needs no margin — the margin is the cone wall.
 
-log W restores the second direction and costs no hyper-parameter search, because its
-equilibrium is exact and readable:
+The APERTURE block is what sets ψ, and its shape is the whole point. Stationarity in W:
 
-    ∂/∂W [ mean_i c_ik/W + λ_ap log W ] = 0   ⇒   W_k = mean_i(c_ik) / λ_ap
+    ∂/∂W [ log W + mean_i max(0, c_i/W − 1)/ν ] = 0
+        ⇒   mean_i( q_i · 1[q_i > 1] ) = ν
 
-i.e. at λ_ap = 1 the cone wall sits exactly on the RMS angular radius of its own class,
-and mean_i q_i,k = 1. Tight classes get narrow cones, diffuse ones get wide cones — so ψ
-varies across classes for a reason that comes from the data, which is the necessary
-condition for argmin q to differ from argmax cos at all.
+Every counted term has q > 1, so the fraction of a class's own samples left OUTSIDE its
+cone is at most ν: one interpretable knob, "how much slack am I allowing". This is the
+ν-SVM / SVDD property, and it is a COVERAGE criterion. The obvious alternative — a plain
+mean, whose equilibrium is W_k = mean_i(c_ik), i.e. the wall on the class's RMS angular
+radius — sounds similar and is not: on a realistic spread it leaves ~42% of the samples
+outside their own cone, which is not "holds its samples" by any reading.
+
+The two DETACHES are not decoration. Without them the pull term also sees W, and lowering
+q by widening the cone is far cheaper than rotating a 128-dimensional axis against 21
+competitors — measured, with ψ tied to the anchor depth it ran monotonically to 65° and
+pinned at its bound. Detached, each parameter has exactly one job: the pull moves the
+encoder and the anchor direction, the aperture block moves ψ.
+
+ψ must also end up DIFFERENT across classes: with a uniform ψ, argmin q is argmax cos
+algebraically, and the whole construction is a cosine classifier. That is what a coverage
+criterion buys — a tight class needs a narrow cone, a diffuse one a wide cone.
 
 Three properties this form has and the obvious alternatives do not:
 
@@ -91,9 +99,9 @@ substitute for the other:
         TOWARD the image; the axis of a wrong class whose cone swallowed it turns AWAY.
         The radial component of the gradient on u_k is exactly zero — q reads a normalised
         direction — so the trainer is free to keep ‖u_k‖ slaved to psi for display.
-    aperture: the positive term pushes psi UP (widen until you contain your own class),
-        the aperture term pushes it DOWN (its equilibrium is below), the negative term
-        pushes it down too when a wrong image is inside. Bounded by construction.
+    aperture: only the aperture block reaches psi — the pull is detached from W. log W
+        shrinks the cone, the hinge widens it for every sample left outside, and they
+        balance at the coverage nu. Bounded to its range by construction, no clamp.
 
 Inference:  ŷ = argmin_k q_ik.  Open-set: reject when min_k q_ik > 1 (outside every cone).
 Since the ψ_k differ across classes, argmin q is NOT argmax cos — which is the point:
@@ -137,6 +145,15 @@ def depth_from_sin_psi(sin_psi: torch.Tensor, min_radius: float) -> torch.Tensor
     return 2.0 * min_radius / sin_psi.clamp_min(1e-6)
 
 
+def axis_chord2(x_img: torch.Tensor, x_anc: torch.Tensor) -> torch.Tensor:
+    """(B, K) squared chord distance from each cone's AXIS, ‖x̂ − û_k‖² = 2(1 − cos θ)."""
+    x_hat = F.normalize(x_img, dim=-1)                              # (B, D)
+    u_hat = F.normalize(x_anc, dim=-1)                              # (K, D) axis directions
+    # From the vector difference rather than 2(1 − x̂·û): the subtraction form cancels
+    # catastrophically exactly where it matters, near the axis.
+    return (x_hat.unsqueeze(1) - u_hat.unsqueeze(0)).pow(2).sum(-1)
+
+
 def axis_cone_q(
     x_img: torch.Tensor,          # (B, D) images on the hyperboloid
     x_anc: torch.Tensor,          # (K, D) anchors — only the DIRECTION is read
@@ -144,12 +161,7 @@ def axis_cone_q(
     eps: float = 1e-12,
 ) -> torch.Tensor:
     """(B, K) squared distance from each cone's axis, in units of that cone's wall."""
-    x_hat = F.normalize(x_img, dim=-1)                              # (B, D)
-    u_hat = F.normalize(x_anc, dim=-1)                              # (K, D) axis directions
-    # ‖x̂ − û‖², from the vector difference rather than 2(1 − x̂·û): the subtraction form
-    # cancels catastrophically exactly where it matters, near the axis.
-    chord2 = (x_hat.unsqueeze(1) - u_hat.unsqueeze(0)).pow(2).sum(-1)   # (B, K)
-    return chord2 / (cone_wall_chord2(sin_psi) + eps)
+    return axis_chord2(x_img, x_anc) / (cone_wall_chord2(sin_psi) + eps)
 
 
 def predict_class(x_img: torch.Tensor, x_anc: torch.Tensor,
@@ -160,16 +172,20 @@ def predict_class(x_img: torch.Tensor, x_anc: torch.Tensor,
 
 class AxisConeLoss(nn.Module):
     def __init__(self, min_radius: float = 0.5, lambda_neg: float = 1.0,
-                 neg_samples: int = 0, lambda_aperture: float = 1.0):
+                 neg_samples: int = 0, lambda_aperture: float = 1.0,
+                 nu: float = 0.05):
         """neg_samples = 0 uses all K-1 negatives; k > 0 keeps k at random per sample.
-        lambda_aperture = 0 removes the log-W term, so nothing pushes the aperture down.
-        min_radius is only used to report the equivalent depth. This module has no
-        parameters; the anchors and their apertures belong to the trainer."""
+        nu is the fraction of a class's own samples the cone is allowed to leave outside.
+        lambda_aperture scales the whole aperture block; it cancels out of the equilibrium
+        (which is set by nu alone) and only sets how hard the aperture is driven relative
+        to the pull. min_radius is only used to report the equivalent depth. This module
+        has no parameters; the anchors and their apertures belong to the trainer."""
         super().__init__()
         self.min_radius = min_radius
         self.lambda_neg = lambda_neg
         self.neg_samples = neg_samples
         self.lambda_aperture = lambda_aperture
+        self.nu = nu
 
     def forward(
         self,
@@ -181,16 +197,28 @@ class AxisConeLoss(nn.Module):
         B, K = x_img.shape[0], x_anc.shape[0]
         device = x_img.device
 
-        q = axis_cone_q(x_img, x_anc, sin_psi)                       # (B, K)
-        pos_idx = labels.unsqueeze(1)
-        q_pos = q.gather(1, pos_idx).squeeze(1)                      # (B,)
-        L_pos = q_pos.mean()
-
-        # Aperture: log of the wall for each sample's OWN class, so every class balances
-        # against its own spread. Batch-frequency weighting cancels in the ratio, which
-        # is why the equilibrium mean_i q = lambda_aperture is exact per class.
+        chord2 = axis_chord2(x_img, x_anc)                           # (B, K)
         wall2 = cone_wall_chord2(sin_psi)                            # (K,)
-        L_ap = torch.log(wall2[labels] + 1e-12).mean()
+        q = chord2 / (wall2 + 1e-12)                                 # (B, K)
+        pos_idx = labels.unsqueeze(1)
+        c_pos = chord2.gather(1, pos_idx).squeeze(1)                 # (B,)
+        w_pos = wall2[labels]                                        # (B,)
+        q_pos = c_pos / (w_pos + 1e-12)
+
+        # Two crossed detaches, one job per parameter. Without them the pull term also
+        # sees W, and lowering it by widening the cone is cheaper than rotating the axis —
+        # the same shortcut that made psi run to 65 degrees when it was tied to the depth.
+        #   pull:     drives the encoder and the anchor DIRECTION, W held fixed
+        L_pos = (c_pos / (w_pos.detach() + 1e-12)).mean()
+        #   aperture: drives PSI only, the samples held fixed. Shrink the cone (log W)
+        #   against a hinge that only the samples left OUTSIDE it pay. Stationarity gives
+        #       mean_i( q_i · 1[q_i > 1] ) = nu
+        #   and since every counted term has q > 1, the fraction of a class's own samples
+        #   outside its cone is at most nu. That is "the narrowest cone that still holds
+        #   them, with a little slack" — the nu-SVM / SVDD property, one interpretable knob.
+        q_ap = c_pos.detach() / (w_pos + 1e-12)
+        L_ap = (torch.log(w_pos + 1e-12)
+                + (q_ap - 1.0).clamp_min(0.0) / self.nu).mean()
 
         neg_mask = torch.ones(B, K, device=device, dtype=torch.bool)
         neg_mask.scatter_(1, pos_idx, False)
@@ -226,6 +254,10 @@ class AxisConeLoss(nn.Module):
                 "loss_ap":      L_ap.detach(),
                 "q_pos":        q_pos.mean().detach(),
                 "inside_img":   (q_pos < 1.0).float().mean().detach(),
+                # The quantity the aperture term drives to nu. Reading it next to
+                # 1 - inside_img says whether the cone has reached the coverage it was
+                # asked for, or is still in transit.
+                "viol_mass":    (q_pos * (q_pos > 1.0).to(q_pos.dtype)).mean().detach(),
                 "cone_acc":     (q.argmin(dim=1) == labels).float().mean().detach(),
                 # psi SPREAD is the necessary condition for argmin q to differ from
                 # argmax cos at all. If min and max stay equal, we rebuilt a cosine.

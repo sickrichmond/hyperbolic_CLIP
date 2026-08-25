@@ -276,6 +276,14 @@ def parse_args():
                         "measured, psi ran to 65° and its spread across classes collapsed "
                         "from 8.7° to 0.6°, which is exactly when argmin q becomes "
                         "argmax cos. Init is the midpoint of the range.")
+    p.add_argument("--nu", type=float, default=0.05,
+                   help="--loss axis only. The fraction of a class's OWN samples its cone "
+                        "is allowed to leave outside — the slack that stops the cone from "
+                        "memorising the training set. At stationarity "
+                        "mean_i(q_i·1[q_i>1]) = nu, and every counted term has q>1, so nu "
+                        "upper-bounds that fraction (the nu-SVM / SVDD property). The "
+                        "alternative, putting the wall on the class's RMS radius, sounds "
+                        "equivalent and leaves ~42%% of the samples outside their own cone.")
     p.add_argument("--lambda_aperture", type=float, default=1.0,
                    help="--loss axis only. Weight of the log-W aperture term, whose "
                         "equilibrium is W_k = mean_i(c_ik)/λ: at 1.0 each cone's wall "
@@ -308,6 +316,13 @@ def parse_args():
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
     p.add_argument("--weight_decay",   type=float, default=0.01)
+    p.add_argument("--lr_min",         type=float, default=1e-6,
+                   help="Floor of the cosine schedule. The default anneals essentially to "
+                        "zero, which freezes the geometry mid-transient: in the axis runs "
+                        "psi, min-angle and q were all still moving when the last two "
+                        "epochs ran at 9.6e-4 and 1e-6, so the final numbers say where the "
+                        "clock stopped, not where the equilibrium is. Around lr/10 keeps "
+                        "the late epochs doing work.")
     p.add_argument("--optimizer", choices=["adamw", "sgd"], default="adamw",
                    help="Default adamw: every checkpoint in the method comparison was "
                         "trained with it, and flipping the default would silently make "
@@ -839,6 +854,7 @@ def main():
         cone_loss = AxisConeLoss(
             min_radius=args.min_radius, lambda_neg=args.lambda_neg,
             neg_samples=args.neg_samples, lambda_aperture=args.lambda_aperture,
+            nu=args.nu,
         ).to(device)
         val_predict = lambda xi_, xa_: axis_cone_q(
             xi_, xa_, sin_psi_now().detach()).argmin(1)
@@ -882,7 +898,7 @@ def main():
           + f"  lr={args.lr}  weight_decay={args.weight_decay}")
     steps_per_epoch = len(train_loader)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.num_epochs * steps_per_epoch, eta_min=1e-6
+        optimizer, T_max=args.num_epochs * steps_per_epoch, eta_min=args.lr_min
     )
     scaler = GradScaler("cuda")
     if args.lambda_ce > 0:
@@ -919,7 +935,8 @@ def main():
     # ── Training loop ─────────────────────────────────────────────────────────
     axis = args.loss == "axis"
     if axis:
-        base_keys = ["loss_pos", "loss_neg", "loss_ap", "q_pos", "inside_img", "cone_acc",
+        base_keys = ["loss_pos", "loss_neg", "loss_ap", "q_pos", "inside_img",
+                     "viol_mass", "cone_acc",
                      "psi_min_deg", "psi_deg", "psi_max_deg",
                      "sep_min_deg", "sep_mean_deg", "anc_norm"]
     else:
@@ -1078,8 +1095,13 @@ def main():
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
             # psi SPREAD is the line to read: if it stays a point, every class has the
             # same aperture and argmin q IS argmax cos, however high the accuracy goes.
+            # inside vs nu is the coverage the cone actually reached; viol_mass is the
+            # quantity the aperture term drives to nu, so the two together say whether it
+            # got there or is still in transit.
             print(f"           acc={100*avg['cone_acc']:.1f}%  "
-                  f"inside={100*avg['inside_img']:.1f}%  "
+                  f"inside={100*avg['inside_img']:.1f}% (out {100*(1-avg['inside_img']):.1f}%"
+                  f" vs ν {100*args.nu:.0f}%)  "
+                  f"viol={avg['viol_mass']:.3f}  "
                   f"q_pos={avg['q_pos']:.3f}  "
                   f"ψ∈[{avg['psi_min_deg']:.1f},{avg['psi_max_deg']:.1f}]°"
                   f" (μ{avg['psi_deg']:.1f}°)  "
@@ -1202,6 +1224,8 @@ def main():
                     # not an error.
                     "loss":            args.loss,
                     "lambda_aperture": args.lambda_aperture,
+                    "nu":              args.nu,
+                    "lr_min":          args.lr_min,
                     # The aperture is a free parameter now, not a function of the anchor
                     # norm. The eval must read THIS, not re-derive it from the depth.
                     "anchor_sin_psi":  (sin_psi_now().detach().cpu()
