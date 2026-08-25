@@ -36,7 +36,8 @@ from data.iab_clip_dataset import IABCLIPDataset
 from geometry.lorentz import exp_map0, half_aperture, log_map0
 from models.attribution_clip import AttributionCLIP
 from losses.attribution_loss import EntailmentConeLoss, _pairwise_xi, predict_class
-from losses.axis_cone_loss import AxisConeLoss, axis_cone_q
+from losses.axis_cone_loss import (AxisConeLoss, axis_cone_q, depth_from_sin_psi,
+                                   sin_psi_from_depth)
 
 
 # Class-anchor text templates. Order matters: this defines the integer labels.
@@ -152,7 +153,9 @@ def parse_args():
                         "so the LOWER bound is what keeps the cones from degenerating "
                         "into halfspaces: with min_radius 0.5, ‖t‖=1.0 gives psi 58.3 deg "
                         "and ‖t‖=3.0 gives 5.7 deg. Replaces --lambda_norm (same quantity, "
-                        "imposed exactly instead of as a penalty).")
+                        "imposed exactly instead of as a penalty). IGNORED by --loss "
+                        "axis, where the aperture is its own parameter (--psi_range) and "
+                        "the anchor norm is slaved to it.")
     p.add_argument("--anchor_prompts", type=str, default=None,
                    help="JSON map {class_name: sentence} replacing the two default templates "
                         "(e.g. data/anchor_prompts_structural.json). Used by both 'text' and "
@@ -262,6 +265,17 @@ def parse_args():
                         "(centroid ARI 0.253 -> -0.007). 'axis': xi^2, an MSE from the cone "
                         "AXIS, gradient 2*xi everywhere and psi absent, so the loss cannot "
                         "be lowered by widening the cone.")
+    p.add_argument("--psi_range", type=float, nargs=2, default=[5.0, 60.0],
+                   metavar=("MIN_DEG", "MAX_DEG"),
+                   help="--loss axis only. Bounds on the per-class half-aperture, which "
+                        "is now a FREE parameter: psi_k = lo + (hi-lo)·sigmoid(raw_k), "
+                        "bounded by construction so no clamp is needed. Deriving psi from "
+                        "the anchor's depth instead (sin psi = 2K/‖a‖) makes 'widen my "
+                        "cone' and 'move toward the origin' the same action, and the "
+                        "optimiser always takes that shortcut over rotating the axis: "
+                        "measured, psi ran to 65° and its spread across classes collapsed "
+                        "from 8.7° to 0.6°, which is exactly when argmin q becomes "
+                        "argmax cos. Init is the midpoint of the range.")
     p.add_argument("--lambda_aperture", type=float, default=1.0,
                    help="--loss axis only. Weight of the log-W aperture term, whose "
                         "equilibrium is W_k = mean_i(c_ik)/λ: at 1.0 each cone's wall "
@@ -458,23 +472,33 @@ def run_validation(model_inner, val_loader, x_anc, class_names, device, curv,
     axis loss reads a different quantity, and evaluating a model with the wrong rule is
     a failure that shows up as a plausible-looking accuracy, not as an error.
 
-    collect > 0 also returns up to that many val embeddings (and their labels).
-    They are already computed here and thrown away; the per-epoch Poincare snapshot
-    reads them so it costs no extra forward pass."""
+    collect > 0 also returns that many val embeddings (and their labels) for the
+    per-epoch snapshot. They are already computed here and thrown away, so it costs no
+    extra forward pass — but the quota is PER CLASS: the loader is not shuffled, so
+    taking the first `collect` rows gives the first two classes and nothing else, and the
+    snapshot then shows a cloud that is not the data."""
     model_inner.eval()
 
     per_class_correct = {c: 0 for c in class_names}
     per_class_total   = {c: 0 for c in class_names}
     idx_of = {c: i for i, c in enumerate(class_names)}
     emb, emb_lab = [], []
+    quota = max(1, collect // len(class_names)) if collect else 0
+    taken = {c: 0 for c in class_names}
 
     for batch in tqdm(val_loader, desc="val", leave=False):
         pixel = batch["pixel_values"].to(device)
         with autocast("cuda"):
             x_img, _ = model_inner.encode_image(pixel)
-        if collect and sum(len(e) for e in emb) < collect:
-            emb.append(x_img.float().cpu())
-            emb_lab.extend(idx_of[g] for g in batch["generator"])
+        if quota and any(n < quota for n in taken.values()):
+            keep = []
+            for j, g in enumerate(batch["generator"]):
+                if taken[g] < quota:
+                    taken[g] += 1
+                    keep.append(j)
+            if keep:
+                emb.append(x_img[keep].float().cpu())
+                emb_lab.extend(idx_of[batch["generator"][j]] for j in keep)
         pred_idx = (predict(x_img, x_anc) if predict is not None
                     else predict_class(x_img, x_anc, curv=curv))
         pred_names = [class_names[i] for i in pred_idx.tolist()]
@@ -494,8 +518,8 @@ def run_validation(model_inner, val_loader, x_anc, class_names, device, curv,
         "balanced_acc":  balanced,
         "per_class_acc": per_class_acc,
         "total":         total,
-        "emb":           torch.cat(emb)[:collect].numpy() if emb else None,
-        "emb_labels":    emb_lab[:collect],
+        "emb":           torch.cat(emb).numpy() if emb else None,
+        "emb_labels":    emb_lab,
     }
 
 
@@ -716,6 +740,34 @@ def main():
         if anchor_drift is not None:
             print(f"  drift scale s={F.softplus(anchor_drift).item():.3f} (learned)")
 
+    # ── Aperture, decoupled from the anchor's depth (--loss axis) ────────────
+    # psi is its own parameter so that rotating the axis and widening the cone are two
+    # different moves. sigmoid keeps it inside --psi_range with no projection step, and
+    # the anchor tangent's norm is then slaved to it after every optimizer step, so the
+    # anchor still sits at the depth its aperture implies (2K/sin psi) for the plots and
+    # for the checkpoint.
+    anchor_psi_raw = None
+    psi_lo, psi_hi = (math.radians(v) for v in args.psi_range)
+    if args.loss == "axis":
+        anchor_psi_raw = nn.Parameter(torch.zeros(len(class_names), device=device))
+        if anchor_tangent is not None:
+            # Slave the norm once here too, so the init report and the first snapshot
+            # show the depth the aperture implies rather than --anchor_init_norm.
+            with torch.no_grad():
+                rc = args.curv ** 0.5
+                sp0 = torch.sin(psi_lo + (psi_hi - psi_lo)
+                                * torch.sigmoid(anchor_psi_raw))
+                want = torch.asinh(rc * depth_from_sin_psi(sp0, args.min_radius)) / rc
+                anchor_tangent.mul_(
+                    want.unsqueeze(1)
+                    / anchor_tangent.norm(dim=-1, keepdim=True).clamp_min(1e-8))
+
+    def sin_psi_now():
+        """(K,) sine of each half-aperture, or None outside the axis loss."""
+        if anchor_psi_raw is None:
+            return None
+        return torch.sin(psi_lo + (psi_hi - psi_lo) * torch.sigmoid(anchor_psi_raw))
+
     def anchor_tangent_now():
         """Current tangent anchors (K, D_hyp), or None in plain 'text' mode."""
         if anchor_delta is not None:
@@ -744,10 +796,11 @@ def main():
         t_now = anchor_tangent_now()
         x_anc0 = (exp_map0(t_now.float(), curv=args.curv) if t_now is not None
                   else model.encode_text(anchor_ids, anchor_mask)[0])
-        psi0 = half_aperture(x_anc0, curv=args.curv, min_radius=args.min_radius)
         if args.loss == "axis":
-            q0 = axis_cone_q(x_probe, x_anc0, args.min_radius)
+            psi0 = torch.arcsin(sin_psi_now())
+            q0 = axis_cone_q(x_probe, x_anc0, sin_psi_now())
         else:
+            psi0 = half_aperture(x_anc0, curv=args.curv, min_radius=args.min_radius)
             xi0 = _pairwise_xi(x_anc0, x_probe, curv=args.curv)
             pinned = (xi0 > math.pi - 5e-3).float().mean().item()
     model.train()
@@ -787,7 +840,8 @@ def main():
             min_radius=args.min_radius, lambda_neg=args.lambda_neg,
             neg_samples=args.neg_samples, lambda_aperture=args.lambda_aperture,
         ).to(device)
-        val_predict = lambda xi_, xa_: axis_cone_q(xi_, xa_, args.min_radius).argmin(1)
+        val_predict = lambda xi_, xa_: axis_cone_q(
+            xi_, xa_, sin_psi_now().detach()).argmin(1)
     else:
         val_predict = None
         cone_loss = EntailmentConeLoss(
@@ -805,7 +859,7 @@ def main():
         ).to(device)
 
     trainable = core.trainable_parameters()
-    for extra in (anchor_tangent, anchor_delta, anchor_drift):
+    for extra in (anchor_tangent, anchor_delta, anchor_drift, anchor_psi_raw):
         if extra is not None:
             trainable = trainable + [extra]
     trainable = trainable + list(cone_loss.parameters())
@@ -949,11 +1003,14 @@ def main():
                         perm = torch.randperm(x_img.size(0), device=device)
                         t = log_map0(x_img.float(), curv=args.curv)
                         x_mix = exp_map0(lam * t + (1 - lam) * t[perm], curv=args.curv)
-                loss_a, stats = cone_loss(x_mix, x_anc, labels)
-                loss_b, _     = cone_loss(x_mix, x_anc, labels[perm])
+                sp = sin_psi_now()
+                loss_a, stats = (cone_loss(x_mix, x_anc, labels, sp) if axis
+                                 else cone_loss(x_mix, x_anc, labels))
+                loss_b, _     = (cone_loss(x_mix, x_anc, labels[perm], sp) if axis
+                                 else cone_loss(x_mix, x_anc, labels[perm]))
                 loss = lam * loss_a + (1 - lam) * loss_b
             else:
-                loss, stats = (cone_loss(x_img, x_anc, labels) if axis
+                loss, stats = (cone_loss(x_img, x_anc, labels, sin_psi_now()) if axis
                                else cone_loss(x_img, x_anc, labels,
                                               x_cap=x_cap, x_fam=x_fam))
 
@@ -964,7 +1021,18 @@ def main():
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
-            if args.anchor_norm_range and anchor_tangent is not None:
+            if axis and anchor_tangent is not None:
+                # q reads a normalised direction, so the radial component of the gradient
+                # on the anchor is exactly zero. Set the norm to the depth the aperture
+                # implies, ‖a‖ = 2K/sin ψ, so the stored anchor is still the point it
+                # represents — for the snapshots, the checkpoint and the eval.
+                with torch.no_grad():
+                    rc = args.curv ** 0.5
+                    want = torch.asinh(
+                        rc * depth_from_sin_psi(sin_psi_now(), args.min_radius)) / rc
+                    n = anchor_tangent.norm(dim=-1, keepdim=True).clamp_min(1e-8)
+                    anchor_tangent.mul_(want.unsqueeze(1) / n)
+            elif args.anchor_norm_range and anchor_tangent is not None:
                 # Projection onto the norm range, not a penalty: psi is a function of
                 # ‖t‖ alone, so this pins the aperture band exactly. Below the lower
                 # bound every cone degenerates into a halfspace and argmin xi is a
@@ -1134,6 +1202,11 @@ def main():
                     # not an error.
                     "loss":            args.loss,
                     "lambda_aperture": args.lambda_aperture,
+                    # The aperture is a free parameter now, not a function of the anchor
+                    # norm. The eval must read THIS, not re-derive it from the depth.
+                    "anchor_sin_psi":  (sin_psi_now().detach().cpu()
+                                        if anchor_psi_raw is not None else None),
+                    "psi_range":       args.psi_range,
                     "pos_mode":        args.pos_mode,
                     "neg_samples":     args.neg_samples,
                     "optimizer":       args.optimizer,

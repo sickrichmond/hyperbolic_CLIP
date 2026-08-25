@@ -15,12 +15,17 @@
 # acosh, no asin, hence no clamp for a gradient to die on, which is how both previous
 # formulations failed.
 #
-# The anchors are free parameters in tangent space, random directions, with the norm
-# hard-projected into [0.95, 3.5] after every step => ψ between 79° and 3.5°. The floor is
-# only there to keep ‖a‖ = sinh‖u‖ above 2·min_radius so sin ψ never saturates at 1; the
-# aperture itself is set by the log-W term, whose equilibrium puts each cone's wall on the
-# RMS angular radius of its own class. Without that term ψ pins at the floor and goes
-# uniform, and a uniform ψ makes argmin q identical to argmax cos.
+# The anchors are free parameters in tangent space, random directions, and the aperture
+# psi is a SEPARATE free parameter per class, bounded to --psi_range by a sigmoid.
+# Decoupling them is not cosmetic: deriving psi from the anchor's depth (sin psi = 2K/‖a‖)
+# makes "widen my cone" and "move toward the origin" the same action, and the optimiser
+# takes that scalar shortcut over the 128-dimensional rotation every time. Measured over
+# five epochs with the coupled version: psi 53.3° -> 65.0° monotone, the anchor norm pinned
+# at its floor, and the psi SPREAD across classes collapsing 8.7° -> 0.6° — which is exactly
+# when argmin q becomes argmax cos. Decoupled, the radial gradient on the anchor is exactly
+# zero and the trainer keeps ‖a‖ = 2K/sin psi so the stored anchor is still the point it
+# represents. Where psi settles is set by the log-W term, whose equilibrium puts each cone's
+# wall on the RMS angular radius of its own class.
 #
 # LoRA is on the upper half of the vision encoder only (layers 12-23, 24 adapters instead
 # of 72) and nothing on the text side: with free anchors the text encoder is out of the
@@ -107,7 +112,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --min_radius      0.5 \
     --anchor_init       random \
     --anchor_init_norm  2.0 \
-    --anchor_norm_range 0.95 3.5 \
+    --psi_range       5.0 60.0 \
     --lambda_aperture 1.0 \
     --lambda_neg      1.0 \
     --neg_samples     8 \

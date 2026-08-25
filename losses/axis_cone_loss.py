@@ -18,7 +18,10 @@ Write K = min_radius, a_k for the class anchor on the hyperboloid, x for an imag
 
                   δ_wall(k)²    = 2(1 − cos ψ_k)
 
-  aperture    The repo's: sin ψ_k = min(1, 2K/‖a_k‖).
+  aperture    sin ψ_k, a FREE per-class parameter — see "Why psi is its own parameter".
+              The equivalent depth is ‖a_k‖ = 2K/sin ψ_k, so the anchor is still a point
+              in hyperbolic space and the aperture is still tied to depth; only the
+              parameterisation differs.
 
   score       The squared distance from the axis, in units of the squared distance at
               the wall — a ratio of two distances, dimensionless:
@@ -71,15 +74,26 @@ Three properties this form has and the obvious alternatives do not:
   DEPTH-INVARIANT.  q does not involve ‖x‖, so there is no pressure to collapse images
   toward the origin, and no need to calibrate how deep the projection head starts.
 
-Why the anchors move — u_k enters q through two orthogonal channels:
-    direction (tangential): via cos θ = ⟨x̂, û_k⟩. A pure rotation, radius untouched. The
-        axis of the correct class turns TOWARD the image; the axis of a wrong class whose
-        cone swallowed it turns AWAY.
-    radius (radial): via cos ψ_k, since sin ψ_k = 2K/‖a_k‖. ∂q/∂‖a‖ > 0 always — deeper
-        anchor ⇒ narrower cone ⇒ larger q. So the positive term pushes the radius DOWN
-        (widen until you contain your own class) and the negative term pushes it UP
-        (narrow until you stop swallowing the others). The aperture is negotiated between
-        the two; the norm range is only a backstop, not the mechanism.
+Why psi is its own parameter, and not 2K/‖a_k‖ as the entailment-cone formula has it.
+
+Deriving the aperture from the anchor's depth makes "widen my cone" and "move toward the
+origin" THE SAME ACTION. That hands the optimiser a scalar knob which lowers q for every
+sample of the class at once, costs nothing, and which nothing opposes — while the
+alternative, rotating the axis toward the class, is a 128-dimensional move that has to
+compete with 21 other anchors. It takes the knob every time. Measured over five epochs:
+psi 53.3° → 65.0° monotone, ‖t_anc‖ down to the norm range's floor and pinned there, the
+psi SPREAD collapsing 8.7° → 0.6° — and a uniform psi is exactly the condition under which
+argmin q IS argmax cos.
+
+Decoupled, u_k carries only the direction and psi_k only the aperture, so neither can
+substitute for the other:
+    direction (tangential): via cos θ = ⟨x̂, û_k⟩. The axis of the correct class turns
+        TOWARD the image; the axis of a wrong class whose cone swallowed it turns AWAY.
+        The radial component of the gradient on u_k is exactly zero — q reads a normalised
+        direction — so the trainer is free to keep ‖u_k‖ slaved to psi for display.
+    aperture: the positive term pushes psi UP (widen until you contain your own class),
+        the aperture term pushes it DOWN (its equilibrium is below), the negative term
+        pushes it down too when a wrong image is inside. Bounded by construction.
 
 Inference:  ŷ = argmin_k q_ik.  Open-set: reject when min_k q_ik > 1 (outside every cone).
 Since the ψ_k differ across classes, argmin q is NOT argmax cos — which is the point:
@@ -100,21 +114,33 @@ import torch.nn.functional as F
 from losses.attribution_loss import _subsample
 
 
-def cone_wall_chord2(x_anc: torch.Tensor, min_radius: float = 0.5) -> torch.Tensor:
+def cone_wall_chord2(sin_psi: torch.Tensor) -> torch.Tensor:
     """(K,) squared chord distance from the axis to the cone wall, 2(1 − cos ψ).
 
     Written as sin²ψ/(1+cos ψ) rather than 1 − cos ψ: for a narrow cone cos ψ is within
     1e-4 of 1 and the subtraction would lose most of its significant digits.
     """
-    sin2 = (2.0 * min_radius / x_anc.norm(dim=-1)).clamp(max=1.0).pow(2)
+    sin2 = sin_psi.pow(2)
     cos_psi = (1.0 - sin2).clamp_min(0.0).sqrt()
     return 2.0 * sin2 / (1.0 + cos_psi)
 
 
+def sin_psi_from_depth(x_anc: torch.Tensor, min_radius: float) -> torch.Tensor:
+    """(K,) the COUPLED parameterisation, sin ψ = min(1, 2K/‖a‖). Kept for checkpoints
+    written before psi became a free parameter, and to convert a psi back to a depth."""
+    return (2.0 * min_radius / x_anc.norm(dim=-1)).clamp(max=1.0)
+
+
+def depth_from_sin_psi(sin_psi: torch.Tensor, min_radius: float) -> torch.Tensor:
+    """(K,) hyperboloid norm ‖a‖ = 2K/sin ψ. The anchor is still a point in hyperbolic
+    space at the depth its aperture implies; only the parameterisation changed."""
+    return 2.0 * min_radius / sin_psi.clamp_min(1e-6)
+
+
 def axis_cone_q(
     x_img: torch.Tensor,          # (B, D) images on the hyperboloid
-    x_anc: torch.Tensor,          # (K, D) anchors on the hyperboloid
-    min_radius: float = 0.5,
+    x_anc: torch.Tensor,          # (K, D) anchors — only the DIRECTION is read
+    sin_psi: torch.Tensor,        # (K,)   sine of each cone's half-aperture
     eps: float = 1e-12,
 ) -> torch.Tensor:
     """(B, K) squared distance from each cone's axis, in units of that cone's wall."""
@@ -123,22 +149,22 @@ def axis_cone_q(
     # ‖x̂ − û‖², from the vector difference rather than 2(1 − x̂·û): the subtraction form
     # cancels catastrophically exactly where it matters, near the axis.
     chord2 = (x_hat.unsqueeze(1) - u_hat.unsqueeze(0)).pow(2).sum(-1)   # (B, K)
-    return chord2 / (cone_wall_chord2(x_anc, min_radius) + eps)
+    return chord2 / (cone_wall_chord2(sin_psi) + eps)
 
 
 def predict_class(x_img: torch.Tensor, x_anc: torch.Tensor,
-                  min_radius: float = 0.5) -> torch.Tensor:
+                  sin_psi: torch.Tensor) -> torch.Tensor:
     """Image-only inference: the cone whose axis is nearest, in cone-wall units."""
-    return axis_cone_q(x_img, x_anc, min_radius).argmin(dim=1)
+    return axis_cone_q(x_img, x_anc, sin_psi).argmin(dim=1)
 
 
 class AxisConeLoss(nn.Module):
     def __init__(self, min_radius: float = 0.5, lambda_neg: float = 1.0,
                  neg_samples: int = 0, lambda_aperture: float = 1.0):
         """neg_samples = 0 uses all K-1 negatives; k > 0 keeps k at random per sample.
-        lambda_aperture = 0 removes the log-W term, which pins every aperture at the norm
-        range's floor — see the module docstring. This module has no parameters; the
-        anchors belong to the trainer."""
+        lambda_aperture = 0 removes the log-W term, so nothing pushes the aperture down.
+        min_radius is only used to report the equivalent depth. This module has no
+        parameters; the anchors and their apertures belong to the trainer."""
         super().__init__()
         self.min_radius = min_radius
         self.lambda_neg = lambda_neg
@@ -148,13 +174,14 @@ class AxisConeLoss(nn.Module):
     def forward(
         self,
         x_img: torch.Tensor,       # (B, D)
-        x_anc: torch.Tensor,       # (K, D)
+        x_anc: torch.Tensor,       # (K, D) anchors — only the DIRECTION is read
         labels: torch.Tensor,      # (B,) int in [0, K)
+        sin_psi: torch.Tensor,     # (K,) sine of each cone's half-aperture
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         B, K = x_img.shape[0], x_anc.shape[0]
         device = x_img.device
 
-        q = axis_cone_q(x_img, x_anc, self.min_radius)               # (B, K)
+        q = axis_cone_q(x_img, x_anc, sin_psi)                       # (B, K)
         pos_idx = labels.unsqueeze(1)
         q_pos = q.gather(1, pos_idx).squeeze(1)                      # (B,)
         L_pos = q_pos.mean()
@@ -162,7 +189,7 @@ class AxisConeLoss(nn.Module):
         # Aperture: log of the wall for each sample's OWN class, so every class balances
         # against its own spread. Batch-frequency weighting cancels in the ratio, which
         # is why the equilibrium mean_i q = lambda_aperture is exact per class.
-        wall2 = cone_wall_chord2(x_anc, self.min_radius)             # (K,)
+        wall2 = cone_wall_chord2(sin_psi)                            # (K,)
         L_ap = torch.log(wall2[labels] + 1e-12).mean()
 
         neg_mask = torch.ones(B, K, device=device, dtype=torch.bool)
@@ -179,8 +206,10 @@ class AxisConeLoss(nn.Module):
         loss = L_pos + self.lambda_aperture * L_ap + self.lambda_neg * L_neg
 
         with torch.no_grad():
-            anc_norm = x_anc.norm(dim=-1)
-            psi = torch.arcsin((2.0 * self.min_radius / anc_norm).clamp(max=1.0))
+            psi = torch.arcsin(sin_psi.clamp(max=1.0))
+            # the depth the aperture implies — the anchor's position in hyperbolic space,
+            # which is no longer what the parameter stores
+            anc_norm = depth_from_sin_psi(sin_psi, self.min_radius)
             if K > 1:
                 d = F.normalize(x_anc, dim=-1)
                 cos = (d @ d.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
