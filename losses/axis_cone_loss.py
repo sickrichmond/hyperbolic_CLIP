@@ -38,11 +38,16 @@ little slack so it does not memorise the training set:
     L =  mean_i [ c_{i,y_i} / W_{y_i}.detach() ]                          pull
       +  λ_ap · mean_i [ log W_{y_i} + max(0, q_ap − 1)/ν ]               aperture
       +  λ_neg · mean_{k ∈ N_i} max(0, 1 − q_ik)²                         exclusion
-    where q_ap = c_{i,y_i}.detach() / W_{y_i}
+      +  λ_sep · mean_{overlapping k<l}
+                    max(0, ψ_k + ψ_l + m_sep − ∠(u_k,u_l))²           separation
+    where q_ap = chord(θ_{i,y_i} + m_in)².detach() / W_{y_i}
 
 The pull is the squared normalised distance from the right axis: zero only ON the axis,
 gradient everywhere, never saturating. The exclusion term says "stay out of other people's
-cones" and needs no margin — the margin is the cone wall.
+cones". The separation term additionally makes the cones themselves disjoint: two angular
+caps cannot intersect when their axis angle is at least the sum of their half-apertures,
+with m_sep reserving optional empty space between their walls. Padding each positive angle
+by m_in keeps the covered training samples that far inside their own wall.
 
 The APERTURE block is what sets ψ, and its shape is the whole point. Stationarity in W:
 
@@ -59,8 +64,8 @@ outside their own cone, which is not "holds its samples" by any reading.
 The two DETACHES are not decoration. Without them the pull term also sees W, and lowering
 q by widening the cone is far cheaper than rotating a 128-dimensional axis against 21
 competitors — measured, with ψ tied to the anchor depth it ran monotonically to 65° and
-pinned at its bound. Detached, each parameter has exactly one job: the pull moves the
-encoder and the anchor direction, the aperture block moves ψ.
+pinned at its bound. Detached, the pull moves the encoder and anchor direction, while
+the aperture block moves ψ; the optional separation constraint may move both.
 
 ψ must also end up DIFFERENT across classes: with a uniform ψ, argmin q is argmax cos
 algebraically, and the whole construction is a cosine classifier. That is what a coverage
@@ -75,9 +80,10 @@ Three properties this form has and the obvious alternatives do not:
   one-sided ray distance is monotone but goes FLAT past 90°, which is a dead gradient
   zone right where random anchors start. The chord ratio has neither problem.
 
-  ALGEBRAIC.  No arccos, acosh, asin or asinh anywhere, hence no clamp for a gradient to
-  die on — the failure that stopped the two previous formulations. ∂q/∂cos θ =
-  −1/(1 − cos ψ) is constant.
+  ALGEBRAIC CLASSIFIER.  q itself needs no arccos, acosh, asin or asinh, hence no clamp
+  where image classification gradients can die — the failure that stopped the two
+  previous formulations. ∂q/∂cos θ = −1/(1 − cos ψ) is constant. The optional
+  aperture/separation constraints do use angles, but not on the image pull path.
 
   DEPTH-INVARIANT.  q does not involve ‖x‖, so there is no pressure to collapse images
   toward the origin, and no need to calibrate how deep the projection head starts.
@@ -99,9 +105,10 @@ substitute for the other:
         TOWARD the image; the axis of a wrong class whose cone swallowed it turns AWAY.
         The radial component of the gradient on u_k is exactly zero — q reads a normalised
         direction — so the trainer is free to keep ‖u_k‖ slaved to psi for display.
-    aperture: only the aperture block reaches psi — the pull is detached from W. log W
-        shrinks the cone, the hinge widens it for every sample left outside, and they
-        balance at the coverage nu. Bounded to its range by construction, no clamp.
+    aperture: the pull is detached from W. log W shrinks the cone, the hinge widens it
+        for every sample left outside, and they balance at coverage nu. The optional
+        separation constraint also reaches psi because narrowing is one valid way to
+        make two cones disjoint. Bounded to its range by construction.
 
 Inference:  ŷ = argmin_k q_ik.  Open-set: reject when min_k q_ik > 1 (outside every cone).
 Since the ψ_k differ across classes, argmin q is NOT argmax cos — which is the point:
@@ -114,6 +121,8 @@ learned angular scale. The hyperbolic content is the aperture-depth relation
 parameter-free open-set rule. Claiming more than that would be wrong.
 """
 from __future__ import annotations
+
+import math
 
 import torch
 import torch.nn as nn
@@ -173,7 +182,8 @@ def predict_class(x_img: torch.Tensor, x_anc: torch.Tensor,
 class AxisConeLoss(nn.Module):
     def __init__(self, min_radius: float = 0.5, lambda_neg: float = 1.0,
                  neg_samples: int = 0, lambda_aperture: float = 1.0,
-                 nu: float = 0.05):
+                 nu: float = 0.05, lambda_sep: float = 0.0,
+                 separation_margin: float = 0.0, inside_margin: float = 0.0):
         """neg_samples = 0 uses all K-1 negatives; k > 0 keeps k at random per sample.
         nu is the fraction of a class's own samples the cone is allowed to leave outside.
         lambda_aperture scales the whole aperture block; it cancels out of the equilibrium
@@ -186,6 +196,9 @@ class AxisConeLoss(nn.Module):
         self.neg_samples = neg_samples
         self.lambda_aperture = lambda_aperture
         self.nu = nu
+        self.lambda_sep = lambda_sep
+        self.separation_margin = math.radians(separation_margin)
+        self.inside_margin = math.radians(inside_margin)
 
     def forward(
         self,
@@ -216,7 +229,10 @@ class AxisConeLoss(nn.Module):
         #   and since every counted term has q > 1, the fraction of a class's own samples
         #   outside its cone is at most nu. That is "the narrowest cone that still holds
         #   them, with a little slack" — the nu-SVM / SVDD property, one interpretable knob.
-        q_ap = c_pos.detach() / (w_pos + 1e-12)
+        cos_pos = (1.0 - 0.5 * c_pos.detach()).clamp(-1.0, 1.0)
+        padded_angle = (torch.arccos(cos_pos) + self.inside_margin).clamp(max=math.pi)
+        c_cover = 2.0 * (1.0 - torch.cos(padded_angle))
+        q_ap = c_cover / (w_pos + 1e-12)
         L_ap = (torch.log(w_pos + 1e-12)
                 + (q_ap - 1.0).clamp_min(0.0) / self.nu).mean()
 
@@ -231,18 +247,32 @@ class AxisConeLoss(nn.Module):
         else:
             L_neg = torch.zeros((), device=device)
 
-        loss = L_pos + self.lambda_aperture * L_ap + self.lambda_neg * L_neg
+        psi = torch.arcsin(sin_psi.clamp(max=1.0))
+        if K > 1:
+            d = F.normalize(x_anc, dim=-1)
+            cos = (d @ d.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+            iu = torch.triu_indices(K, K, offset=1, device=device)
+            ang = torch.arccos(cos[iu[0], iu[1]])
+            need = psi[iu[0]] + psi[iu[1]] + self.separation_margin
+            overlap = (need - ang).clamp_min(0.0)
+            # Average active constraints only: with 22 classes, averaging one bad pair
+            # over all 231 pairs would dilute precisely the violation this term exists for.
+            active = overlap > 0
+            L_sep = (overlap[active].pow(2).mean() if active.any()
+                     else torch.zeros((), device=device))
+        else:
+            ang = torch.full((1,), float("nan"), device=device)
+            overlap = torch.zeros(1, device=device)
+            L_sep = torch.zeros((), device=device)
+
+        loss = (L_pos + self.lambda_aperture * L_ap + self.lambda_neg * L_neg
+                + self.lambda_sep * L_sep)
 
         with torch.no_grad():
-            psi = torch.arcsin(sin_psi.clamp(max=1.0))
             # the depth the aperture implies — the anchor's position in hyperbolic space,
             # which is no longer what the parameter stores
             anc_norm = depth_from_sin_psi(sin_psi, self.min_radius)
             if K > 1:
-                d = F.normalize(x_anc, dim=-1)
-                cos = (d @ d.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
-                iu = torch.triu_indices(K, K, offset=1, device=device)
-                ang = torch.arccos(cos[iu[0], iu[1]])
                 sep_min, sep_mean = ang.min(), ang.mean()
             else:
                 # No pairs to separate. NaN rather than a made-up angle, so a run with
@@ -252,12 +282,13 @@ class AxisConeLoss(nn.Module):
                 "loss_pos":     L_pos.detach(),
                 "loss_neg":     L_neg.detach(),
                 "loss_ap":      L_ap.detach(),
+                "loss_sep":     L_sep.detach(),
                 "q_pos":        q_pos.mean().detach(),
-                "inside_img":   (q_pos < 1.0).float().mean().detach(),
+                "inside_img":   (q_ap < 1.0).float().mean().detach(),
                 # The quantity the aperture term drives to nu. Reading it next to
                 # 1 - inside_img says whether the cone has reached the coverage it was
                 # asked for, or is still in transit.
-                "viol_mass":    (q_pos * (q_pos > 1.0).to(q_pos.dtype)).mean().detach(),
+                "viol_mass":    (q_ap * (q_ap > 1.0).to(q_ap.dtype)).mean().detach(),
                 "cone_acc":     (q.argmin(dim=1) == labels).float().mean().detach(),
                 # psi SPREAD is the necessary condition for argmin q to differ from
                 # argmax cos at all. If min and max stay equal, we rebuilt a cosine.
@@ -266,6 +297,7 @@ class AxisConeLoss(nn.Module):
                 "psi_max_deg":  torch.rad2deg(psi.max()).detach(),
                 "sep_min_deg":  torch.rad2deg(sep_min).detach(),
                 "sep_mean_deg": torch.rad2deg(sep_mean).detach(),
+                "sep_overlap":  (overlap > 0).float().mean().detach(),
                 "anc_norm":     anc_norm.mean().detach(),
             }
         return loss, stats

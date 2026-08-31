@@ -6,14 +6,11 @@
 # class's cone.
 #
 #     q_ik = ‖x̂ᵢ − ûₖ‖² / ‖wallₖ‖²  =  (1 − cos θ) / (1 − cos ψₖ)
-#     L    = mean_i [ q_i,yi  +  λ_neg · mean_k≠yi max(0, 1 − q_ik)² ]
+#     L    = pull + coverage/aperture + wrong-cone exclusion + cone separation
 #
-# q = 0 on the axis, 1 exactly on the cone WALL, > 1 outside. So the negative term needs
-# no margin: the margin IS the wall. The aperture is not tuned either — the positive term
-# widens the cone (contain your own class) and the negative narrows it (stop swallowing
-# the others), and it settles where they balance. Everything is algebraic: no arccos, no
-# acosh, no asin, hence no clamp for a gradient to die on, which is how both previous
-# formulations failed.
+# q = 0 on the axis, 1 exactly on the cone WALL, > 1 outside. The coverage block finds
+# the narrowest aperture that leaves at most --nu of the class outside, --inside_margin
+# pads that coverage, and --lambda_sep keeps different cone walls disjoint.
 #
 # The anchors are free parameters in tangent space, random directions, and the aperture
 # psi is a SEPARATE free parameter per class, bounded to --psi_range by a sigmoid.
@@ -36,6 +33,10 @@
 #   RUN=axis       SGD, lr 1e-2.
 #   RUN=axis_adam  the same loss under AdamW at its own lr. The control: without it a bad
 #                  axis run cannot be told apart from an untuned SGD lr.
+#   RUN=axis_constrained  images learn directions at 1/10 the anchors' learning rate;
+#                         their radius is fixed and the cones have inside/outside margins.
+#   RUN=axis_anchors  frozen image encoder/head; only anchor axes and apertures move.
+#                     Images stay at tangent radius 4 and cone walls keep a 2° gap.
 #
 # Read out of the epoch line, in order of importance:
 #   ψ∈[min,max]  must SPREAD. If the apertures stay equal then argmin q IS argmax cos,
@@ -55,6 +56,8 @@
 #
 # Submit:  sbatch --export=ALL,RUN=axis      slurm/slurm_train_22cls_axis.sh
 #          sbatch --export=ALL,RUN=axis_adam slurm/slurm_train_22cls_axis.sh
+#          sbatch --export=ALL,RUN=axis_constrained slurm/slurm_train_22cls_axis.sh
+#          sbatch --export=ALL,RUN=axis_anchors slurm/slurm_train_22cls_axis.sh
 # ==========================================================================
 
 #SBATCH --account=EUHPC_D35_189
@@ -88,6 +91,8 @@ OUT=$WORK/hyp_fine_tuning/checkpoints
 MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 
 RUN=${RUN:-axis}
+PSI_RANGE="5.0 60.0"
+NEG_SAMPLES=8
 
 # peft re.fullmatch's this against the base model's module names, so one string
 # picks both the encoder and the layer range: vision blocks 12-23, q and v.
@@ -96,16 +101,22 @@ LORA_T='vision_model\.encoder\.layers\.(1[2-9]|2[0-3])\.self_attn\.(q|v)_proj'
 case "$RUN" in
   axis)      EXTRA="--optimizer sgd   --lr 1e-2 --lr_min 1e-3" ;;
   axis_adam) EXTRA="--optimizer adamw --lr 3e-4 --lr_min 3e-5" ;;
-  *) echo "RUN must be axis or axis_adam (got '$RUN')"; exit 2 ;;
+  axis_constrained)
+    NEG_SAMPLES=0
+    EXTRA="--optimizer sgd --lr 1e-3 --anchor_lr 1e-2 --lr_min 1e-4 --fixed_image_radius 4.0 --radial_margin 0.5 --inside_margin 2.0 --lambda_sep 10.0 --separation_margin 2.0 --log_every 10 --snapshot_every 100"
+    ;;
+  axis_anchors)
+    NEG_SAMPLES=0
+    EXTRA="--optimizer sgd --lr 1e-2 --lr_schedule constant --anchors_only --fixed_image_radius 4.0 --radial_margin 0.5 --inside_margin 2.0 --lambda_sep 10.0 --separation_margin 2.0 --log_every 10 --snapshot_every 100"
+    ;;
+  *) echo "RUN must be axis, axis_adam, axis_constrained, or axis_anchors (got '$RUN')"; exit 2 ;;
 esac
 CKPT=$OUT/attribution_22cls_${RUN}_vitl14.pt
 
 mkdir -p $OUT
 cd $REPO
 
-# No --lambda_sep and no --lambda_norm: this loss has neither term. The separation comes
-# out of the negative term instead of a floor that fought the aperture, and the radius is
-# constrained exactly by the projection rather than approximately by a penalty.
+# No norm penalty: fixed-radius runs constrain image depth exactly in the projection.
 CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --dataset_path    $DATA \
     --captions_dir    $CAPS \
@@ -123,11 +134,11 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --min_radius      0.5 \
     --anchor_init       random \
     --anchor_init_norm  2.0 \
-    --psi_range       5.0 60.0 \
+    --psi_range       $PSI_RANGE \
     --nu              0.05 \
     --lambda_aperture 1.0 \
     --lambda_neg      1.0 \
-    --neg_samples     8 \
+    --neg_samples     $NEG_SAMPLES \
     --momentum        0.9 \
     --weight_decay    0.01 \
     --diag_plot_dir   $WORK/hyp_fine_tuning/viz/$RUN \

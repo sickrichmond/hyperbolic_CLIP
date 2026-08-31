@@ -2,7 +2,7 @@
 
     python -m tests.test_axis_cone_loss
 
-Eight invariants. The first three pin down that q is the quantity we think it is; the
+Eleven invariants. The first three pin down that q is the quantity we think it is; the
 rest pin down the failures that would be invisible in a training log — a dead gradient,
 a coupled parameter that hands the optimiser a shortcut, and a decision rule that has
 quietly become a cosine.
@@ -30,6 +30,9 @@ quietly become a cosine.
   9. the two crossed detaches hold — the pull term cannot move psi, and the aperture term
      cannot move the images. Without them, widening the cone is a cheaper way to lower
      the loss than rotating a 128-dimensional axis, and the optimiser takes it.
+ 10. overlapping cones pay exactly their squared angular violation, including the
+     requested empty margin; disjoint cones pay zero.
+ 11. the inside margin is part of coverage, not the classification score.
 """
 import math
 
@@ -266,6 +269,51 @@ def test_detaches_hold():
           "the image")
 
 
+def test_overlap_penalty():
+    psi_deg, margin_deg, angle_deg = 20.0, 5.0, 30.0
+    anchors = torch.zeros(2, D)
+    anchors[0, 0] = 1.0
+    anchors[1, 0] = math.cos(math.radians(angle_deg))
+    anchors[1, 1] = math.sin(math.radians(angle_deg))
+    sin_psi = torch.full((2,), math.sin(math.radians(psi_deg)))
+    labels = torch.zeros(1, dtype=torch.long)
+    loss_fn = AxisConeLoss(
+        min_radius=K_R, lambda_neg=0.0, lambda_aperture=0.0,
+        lambda_sep=1.0, separation_margin=margin_deg,
+    )
+
+    _, stats = loss_fn(_axis(), anchors, labels, sin_psi)
+    expected = math.radians(2 * psi_deg + margin_deg - angle_deg) ** 2
+    assert abs(stats["loss_sep"].item() - expected) < 1e-12
+    assert stats["sep_overlap"].item() == 1.0
+
+    anchors[1].zero_()
+    anchors[1, 1] = 1.0
+    _, clear = loss_fn(_axis(), anchors, labels, sin_psi)
+    assert clear["loss_sep"].item() == 0.0
+    assert clear["sep_overlap"].item() == 0.0
+    print("10 ok overlap penalty: 15° violation pays its squared angle; 90°-separated "
+          "cones pay zero")
+
+
+def test_inside_margin():
+    x = _at_angle(math.radians(19.0))
+    sin_psi = _sin(20.0)
+    labels = torch.zeros(1, dtype=torch.long)
+    _, plain = AxisConeLoss(
+        min_radius=K_R, lambda_neg=0.0, lambda_aperture=1.0,
+    )(x, _axis(), labels, sin_psi)
+    _, padded = AxisConeLoss(
+        min_radius=K_R, lambda_neg=0.0, lambda_aperture=1.0, inside_margin=2.0,
+    )(x, _axis(), labels, sin_psi)
+    assert plain["q_pos"].item() < 1.0
+    assert plain["inside_img"].item() == 1.0
+    assert padded["q_pos"].item() < 1.0, "classifier score must not change"
+    assert padded["inside_img"].item() == 0.0, "coverage must include the margin"
+    print("11 ok inside margin: a point 1° inside the wall still classifies inside, but "
+          "fails a 2° padded coverage constraint")
+
+
 if __name__ == "__main__":
     test_monotone_and_one_sided()
     test_q_is_one_on_the_wall()
@@ -276,4 +324,6 @@ if __name__ == "__main__":
     test_psi_gradient_signs_and_bounds()
     test_aperture_equilibrium_is_coverage()
     test_detaches_hold()
+    test_overlap_penalty()
+    test_inside_margin()
     print("\nall axis-cone invariants hold")

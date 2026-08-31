@@ -149,6 +149,7 @@ class EntailmentConeLoss(nn.Module):
         norm_mode: str = "floor",
         target_norm_family: float = 0.0,
         lambda_sep: float = 0.0,
+        separation_margin: float = 0.0,
         theta_max: float = 150.0,
         lambda_family: float = 0.0,
         family_of: torch.Tensor | None = None,
@@ -186,6 +187,7 @@ class EntailmentConeLoss(nn.Module):
         self.norm_mode = norm_mode
         self.target_norm_family = target_norm_family
         self.lambda_sep = lambda_sep
+        self.separation_margin = math.radians(separation_margin)
         self.theta_max = math.radians(theta_max)
         self.lambda_family = lambda_family
         self.pos_mode = pos_mode
@@ -242,7 +244,7 @@ class EntailmentConeLoss(nn.Module):
         cos = (d @ d.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
         iu = torch.triu_indices(K, K, offset=1, device=x_anc.device)
         ang = torch.arccos(cos[iu[0], iu[1]])
-        need = psi_anc[iu[0]] + psi_anc[iu[1]]
+        need = psi_anc[iu[0]] + psi_anc[iu[1]] + self.separation_margin
         floor = torch.clamp(need - ang, min=0.0).pow(2).mean()
         ceiling = torch.clamp(ang - self.theta_max, min=0.0).pow(2).mean()
         with torch.no_grad():
@@ -455,6 +457,7 @@ class EntailmentConeLoss(nn.Module):
             "mean_anc_norm":   anc_norms.mean().detach(),
             # a pair overlaps when its axes are closer than the sum of its apertures
             "sep_overlap":     (sep_ang < psi_anc[_iu[0]] + psi_anc[_iu[1]]
+                                 + self.separation_margin
                                 ).float().mean().detach(),
             **stats_extra,
         }

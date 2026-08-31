@@ -106,6 +106,20 @@ def parse_args():
                         "--init_scale, whose useful value spans two orders of magnitude "
                         "depending on the backbone. Set it ABOVE the anchors' tangent norm "
                         "(--anchor_init_norm): a cone contains what is deeper than its apex.")
+    p.add_argument("--fixed_image_radius", type=float, default=0.0,
+                   help="Fix every image's TANGENT norm after the projection head (0 = off). "
+                        "This is an ongoing constraint, unlike --init_depth: the head may "
+                        "learn directions but cannot contract the image cloud toward the "
+                        "origin. Set it above the deepest reachable anchor plus "
+                        "--radial_margin.")
+    p.add_argument("--radial_margin", type=float, default=0.0,
+                   help="Required tangent-radius gap between fixed-radius images and the "
+                        "deepest reachable anchor. Validated at startup when "
+                        "--fixed_image_radius is enabled.")
+    p.add_argument("--anchors_only", action="store_true", default=False,
+                   help="Freeze CLIP+LoRA and the projection head after initialisation; "
+                        "optimise only free anchors/apertures. Requires a free "
+                        "--anchor_init mode.")
     p.add_argument("--init_scale",     type=float, default=0.1,
                    help="Scale on the projection head's last layer, i.e. how DEEP the "
                         "images start. It is not cosmetic with free anchors: an entailment "
@@ -243,8 +257,15 @@ def parse_args():
                         "from argmax cos.")
     p.add_argument("--lambda_sep",     type=float, default=0.0,
                    help="Anchor separation on the PROJECTED anchors: at least ψ_c + ψ_c' apart "
-                        "(the cone-disjointness criterion, violated by 12-17× on every run "
-                        "measured) and at most --theta_max apart.")
+                        "+ --separation_margin (the cone-disjointness constraint) and, for "
+                        "--loss cone, at most --theta_max apart.")
+    p.add_argument("--separation_margin", type=float, default=0.0,
+                   help="Degrees of empty angular space required between every cone pair; "
+                        "used when --lambda_sep > 0.")
+    p.add_argument("--inside_margin", type=float, default=0.0,
+                   help="--loss axis only. Degrees by which covered training images must "
+                        "sit inside their correct cone wall; applied to the nu-coverage "
+                        "constraint, not to the classifier score.")
     p.add_argument("--theta_max",      type=float, default=150.0,
                    help="Degrees. A guard against antipodal pairs, not a shaping term: the "
                         "euclidean model's widest pair is 132.2°, so it stays inert on a "
@@ -265,7 +286,7 @@ def parse_args():
                         "(1−cos θ)/(1−cos ψ_k), the squared distance from the cone's axis "
                         "in units of the distance to its wall, so q=1 IS the wall. "
                         "With 'axis' the flags "
-                        "--lambda_sep/--lambda_norm/--target_norm/--lambda_ce/"
+                        "--lambda_norm/--target_norm/--lambda_ce/"
                         "--lambda_hinge/--pos_mode/--hierarchy/--init_depth are all "
                         "ignored: that loss has none of those terms and q is invariant "
                         "to the image depth.")
@@ -290,17 +311,17 @@ def parse_args():
     p.add_argument("--nu", type=float, default=0.05,
                    help="--loss axis only. The fraction of a class's OWN samples its cone "
                         "is allowed to leave outside — the slack that stops the cone from "
-                        "memorising the training set. At stationarity "
+                        "memorising the training set. With --inside_margin, 'outside' is "
+                        "measured against the padded coverage boundary. At stationarity "
                         "mean_i(q_i·1[q_i>1]) = nu, and every counted term has q>1, so nu "
                         "upper-bounds that fraction (the nu-SVM / SVDD property). The "
                         "alternative, putting the wall on the class's RMS radius, sounds "
                         "equivalent and leaves ~42%% of the samples outside their own cone.")
     p.add_argument("--lambda_aperture", type=float, default=1.0,
                    help="--loss axis only. Weight of the log-W aperture term, whose "
-                        "equilibrium is W_k = mean_i(c_ik)/λ: at 1.0 each cone's wall "
-                        "settles exactly on the RMS angular radius of its own class, so "
-                        "tight classes get narrow cones and ψ varies for a reason that "
-                        "comes from the data. Setting it to 0 removes the only downward "
+                        "equilibrium is controlled by --nu: tight classes get narrow "
+                        "cones and ψ varies for a reason that comes from the data. "
+                        "Setting it to 0 removes the only downward "
                         "pressure on the aperture — measured: every anchor pins at the "
                         "norm floor and ψ goes uniform, which makes argmin q identical to "
                         "argmax cos.")
@@ -581,6 +602,38 @@ def run_validation(model_inner, val_loader, x_anc, class_names, device, curv,
 
 def main():
     args = parse_args()
+    if min(args.fixed_image_radius, args.radial_margin, args.separation_margin,
+           args.inside_margin) < 0:
+        raise ValueError("radius and angular margins must be non-negative")
+    if args.fixed_image_radius > 0 and args.init_depth > 0:
+        raise ValueError("Use --fixed_image_radius or --init_depth, not both")
+    if args.anchors_only and args.anchor_init == "text":
+        raise ValueError("--anchors_only requires free anchors: random, image_centroid, "
+                         "or text_free")
+    if args.loss == "axis" and not (0 < args.psi_range[0] <= args.psi_range[1] < 90):
+        raise ValueError("--psi_range must satisfy 0 < MIN <= MAX < 90 degrees")
+    if args.loss == "axis" and args.inside_margin >= args.psi_range[1]:
+        raise ValueError("--inside_margin must be smaller than the maximum --psi_range")
+    if args.fixed_image_radius > 0:
+        if args.anchor_init not in ("random", "image_centroid"):
+            raise ValueError("--fixed_image_radius needs random or image_centroid anchors "
+                             "whose depth is bounded")
+        if args.loss == "axis":
+            rc = args.curv ** 0.5
+            min_psi = math.radians(args.psi_range[0])
+            max_anchor_radius = math.asinh(
+                rc * 2.0 * args.min_radius / math.sin(min_psi)) / rc
+        elif args.anchor_norm_range:
+            max_anchor_radius = args.anchor_norm_range[1]
+        else:
+            raise ValueError("--fixed_image_radius with --loss cone also needs "
+                             "--anchor_norm_range to bound anchor depth")
+        required = max_anchor_radius + args.radial_margin
+        if args.fixed_image_radius < required:
+            raise ValueError(
+                f"--fixed_image_radius {args.fixed_image_radius:g} must be at least "
+                f"{required:.3f}: deepest anchor {max_anchor_radius:.3f} + "
+                f"radial margin {args.radial_margin:g}")
     if args.no_captions:
         args.lambda_cap_in_class = 0.0
         args.lambda_img_in_cap = 0.0
@@ -708,6 +761,7 @@ def main():
         curv=args.curv,
         lora_target=args.lora_target,
         init_scale=args.init_scale,
+        image_radius=args.fixed_image_radius,
     ).to(device)
 
     # ── Anchors ───────────────────────────────────────────────────────────────
@@ -869,7 +923,12 @@ def main():
             psi0 = half_aperture(x_anc0, curv=args.curv, min_radius=args.min_radius)
             xi0 = _pairwise_xi(x_anc0, x_probe, curv=args.curv)
             pinned = (xi0 > math.pi - 5e-3).float().mean().item()
-    model.train()
+    if args.anchors_only:
+        model.requires_grad_(False)
+        model.eval()
+        print("Anchors-only: CLIP+LoRA and projection head frozen in eval mode")
+    else:
+        model.train()
     t_img = t_probe.norm(dim=-1).median().item()
     x_img = x_probe.norm(dim=-1).median().item()
     x_anc_n = x_anc0.norm(dim=-1).median().item()
@@ -921,7 +980,9 @@ def main():
         cone_loss = AxisConeLoss(
             min_radius=args.min_radius, lambda_neg=args.lambda_neg,
             neg_samples=args.neg_samples, lambda_aperture=args.lambda_aperture,
-            nu=args.nu,
+            nu=args.nu, lambda_sep=args.lambda_sep,
+            separation_margin=args.separation_margin,
+            inside_margin=args.inside_margin,
         ).to(device)
         val_predict = lambda xi_, xa_: axis_cone_q(
             xi_, xa_, sin_psi_now().detach()).argmin(1)
@@ -937,7 +998,8 @@ def main():
             lambda_ce=args.lambda_ce, ce_tau_init=args.ce_tau_init,
             lambda_hinge=args.lambda_hinge, norm_mode=args.norm_mode,
             target_norm_family=args.target_norm_family,
-            lambda_sep=args.lambda_sep, theta_max=args.theta_max,
+            lambda_sep=args.lambda_sep, separation_margin=args.separation_margin,
+            theta_max=args.theta_max,
             lambda_family=args.lambda_family, family_of=family_of,
             pos_mode=args.pos_mode, neg_samples=args.neg_samples,
         ).to(device)
@@ -950,11 +1012,16 @@ def main():
     backbone = core.trainable_parameters() + list(cone_loss.parameters())
     geometric = [p for p in (anchor_tangent, anchor_delta, anchor_drift, anchor_psi_raw)
                  if p is not None]
-    trainable = backbone + geometric          # clip_grad_norm_ still sees everything
     anchor_lr = args.lr if args.anchor_lr is None else args.anchor_lr
-    groups = [{"params": backbone, "lr": args.lr, "weight_decay": args.weight_decay}]
+    groups = []
+    if backbone:
+        groups.append({"params": backbone, "lr": args.lr,
+                       "weight_decay": args.weight_decay})
     if geometric:
         groups.append({"params": geometric, "lr": anchor_lr, "weight_decay": 0.0})
+    if not groups:
+        raise ValueError("No trainable parameters: use a free --anchor_init mode or "
+                         "disable --anchors_only")
     if args.optimizer == "sgd":
         optimizer = torch.optim.SGD(
             groups,
@@ -1042,7 +1109,7 @@ def main():
     axis = args.loss == "axis"
     if axis:
         base_keys = ["loss_pos", "loss_neg", "loss_ap", "q_pos", "inside_img",
-                     "viol_mass", "cone_acc",
+                     "viol_mass", "cone_acc", "loss_sep", "sep_overlap",
                      "psi_min_deg", "psi_deg", "psi_max_deg",
                      "sep_min_deg", "sep_mean_deg", "anc_norm"]
     else:
@@ -1096,11 +1163,15 @@ def main():
                 Path(args.diag_plot_dir) / "step_0000000.png",
                 curv=args.curv, min_radius=args.min_radius,
                 psi=snap_psi(), state=None, seed=args.seed, title="init (step 0)")
-        model.train()
+        if not args.anchors_only:
+            model.train()
 
     global_step = 0
     for epoch in range(1, args.num_epochs + 1):
-        model.train()
+        if args.anchors_only:
+            model.eval()
+        else:
+            model.train()
         sums = {"loss": 0.0,
                 **{k: 0.0 for k in
                    base_keys + ce_keys + axreg_keys + sep_keys + fam_keys}}
@@ -1159,14 +1230,17 @@ def main():
                         # every mixed sample would get a smaller tangent and land closer
                         # to the origin, turning mixup into a norm regulariser as well.
                         mixed = F.normalize(lam * e + (1 - lam) * e[perm], dim=-1)
-                        x_mix, _ = core.to_hyperbolic(mixed)
+                        x_mix, _ = core.to_hyperbolic(mixed, core.image_radius)
                     else:
                         # Tangent space at the origin: exp_map0 is radial, so a convex
                         # combination there is the manifold-mixup analogue (mixing on
                         # the hyperboloid itself would need a geodesic).
                         perm = torch.randperm(x_img.size(0), device=device)
                         t = log_map0(x_img.float(), curv=args.curv)
-                        x_mix = exp_map0(lam * t + (1 - lam) * t[perm], curv=args.curv)
+                        mixed_t = lam * t + (1 - lam) * t[perm]
+                        if core.image_radius > 0:
+                            mixed_t = F.normalize(mixed_t, dim=-1) * core.image_radius
+                        x_mix = exp_map0(mixed_t, curv=args.curv)
                 sp = sin_psi_now()
                 loss_a, stats = (cone_loss(x_mix, x_anc, labels, sp) if axis
                                  else cone_loss(x_mix, x_anc, labels))
@@ -1181,7 +1255,10 @@ def main():
             optimizer.zero_grad()
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            nn.utils.clip_grad_norm_(trainable, 1.0)
+            if backbone:
+                nn.utils.clip_grad_norm_(backbone, 1.0)
+            if geometric:
+                nn.utils.clip_grad_norm_(geometric, 1.0)
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
@@ -1270,7 +1347,7 @@ def main():
         if args.loss == "axis":
             print(f"\nEpoch {epoch}: train loss={avg['loss']:.4f}  "
                   f"pos={avg['loss_pos']:.4f}  ap={avg['loss_ap']:+.4f}  "
-                  f"neg={avg['loss_neg']:.4f}  "
+                  f"neg={avg['loss_neg']:.4f}  sep={avg['loss_sep']:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
             # psi SPREAD is the line to read: if it stays a point, every class has the
             # same aperture and argmin q IS argmax cos, however high the accuracy goes.
@@ -1285,6 +1362,7 @@ def main():
                   f"ψ∈[{avg['psi_min_deg']:.1f},{avg['psi_max_deg']:.1f}]°"
                   f" (μ{avg['psi_deg']:.1f}°)  "
                   f"min∠={avg['sep_min_deg']:.1f}°  mean∠={avg['sep_mean_deg']:.1f}°  "
+                  f"overlap={100*avg['sep_overlap']:.1f}%  "
                   f"‖a_anc‖={avg['anc_norm']:.2f}"
                   + (f"  ‖t_anc‖={anchor_tangent.norm(dim=-1).mean().item():.2f}"
                      if anchor_tangent is not None else ""))
@@ -1389,6 +1467,9 @@ def main():
                     "hyperbolic_dim":  args.hyperbolic_dim,
                     "init_scale":      args.init_scale,
                     "init_depth":      args.init_depth,
+                    "image_radius":    args.fixed_image_radius,
+                    "radial_margin":   args.radial_margin,
+                    "anchors_only":    args.anchors_only,
                     "curv":            args.curv,
                     "min_radius":      args.min_radius,
                     "class_names":     class_names,
@@ -1429,6 +1510,8 @@ def main():
                     "target_norm":     args.target_norm,
                     "lambda_norm":     args.lambda_norm,
                     "lambda_sep":      args.lambda_sep,
+                    "separation_margin": args.separation_margin,
+                    "inside_margin":  args.inside_margin,
                     "theta_max":       args.theta_max,
                     # Everything the evaluator needs to rebuild the family readout
                     # without re-reading the tree from disk: the names in anchor order,

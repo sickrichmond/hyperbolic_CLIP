@@ -4,7 +4,7 @@ Two cases, because the whole point is that the Poincare snapshots cannot tell th
 apart: random 128-d anchors (mean angle ~90 deg, healthy) and collapsed anchors both
 draw as one overlapping blob in any 2-D projection.
 
-    python tests/test_sep_stats.py
+    python -m tests.test_sep_stats
 """
 import torch
 import torch.nn.functional as F

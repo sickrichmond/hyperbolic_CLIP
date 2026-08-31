@@ -28,12 +28,14 @@ class AttributionCLIP(nn.Module):
         hyperbolic_dim: int = 128,
         curv: float = 1.0,
         init_scale: float = 0.1,
+        image_radius: float = 0.0,
         attn_implementation: str | None = None,
         lora_target: str | None = None,
     ):
         super().__init__()
         self.curv = curv
         self.hyperbolic_dim = hyperbolic_dim
+        self.image_radius = image_radius
 
         # attn_implementation="eager" is required to read attention maps
         # (output_attentions=True), which the explainability pipeline needs.
@@ -87,7 +89,9 @@ class AttributionCLIP(nn.Module):
 
     # ── Hyperbolic projection ────────────────────────────────────────────────
 
-    def to_hyperbolic(self, clip_emb: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def to_hyperbolic(
+        self, clip_emb: torch.Tensor, radius: float = 0.0
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """clip_emb: (B, D_clip). Returns (x_hyp, tangent), both (B, D_hyp).
 
         Forces fp32 throughout: sinh/acosh/asin in the hyperbolic ops are unstable
@@ -96,11 +100,13 @@ class AttributionCLIP(nn.Module):
         with torch.amp.autocast("cuda", enabled=False):
             clip_emb = clip_emb.float()
             tangent = self.projection(clip_emb)
+            if radius > 0:
+                tangent = F.normalize(tangent, dim=-1) * radius
             x_hyp = exp_map0(tangent, curv=self.curv)
         return x_hyp, tangent
 
     def encode_image(self, pixel_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.to_hyperbolic(self._clip_image(pixel_values))
+        return self.to_hyperbolic(self._clip_image(pixel_values), self.image_radius)
 
     def encode_text(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
@@ -153,6 +159,7 @@ class AttributionCLIP(nn.Module):
             lora_alpha=ckpt.get("lora_alpha", 16),
             hyperbolic_dim=ckpt.get("hyperbolic_dim", 128),
             curv=ckpt.get("curv", 1.0),
+            image_radius=ckpt.get("image_radius", 0.0),
             lora_target=ckpt.get("lora_target"),
             **overrides,
         )
