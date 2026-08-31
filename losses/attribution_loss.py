@@ -369,6 +369,10 @@ class EntailmentConeLoss(nn.Module):
                 })
 
         # ───── 6) Anchor separation ──────────────────────────────────────────
+        _d = F.normalize(x_anc, dim=-1)
+        _iu = torch.triu_indices(x_anc.shape[0], x_anc.shape[0], offset=1, device=device)
+        sep_ang = torch.arccos((_d @ _d.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)[_iu[0], _iu[1]])
+
         L_sep = torch.tensor(0.0, device=device)
         if self.lambda_sep > 0:
             L_sep, sep_stats = self._sep_term(x_anc, psi_anc)
@@ -441,8 +445,17 @@ class EntailmentConeLoss(nn.Module):
             # necessary condition for the cone rule to differ from a cosine at all.
             "psi_min_deg":     torch.rad2deg(psi_anc.min()).detach(),
             "psi_max_deg":     torch.rad2deg(psi_anc.max()).detach(),
+            # Pairwise anchor separation, logged ALWAYS and not only under lambda_sep:
+            # this is the collapse number (78.7 deg at random init -> 41.2 within one
+            # epoch in the previous run) and the 2-D snapshots cannot show it, since 22
+            # near-orthogonal directions in 128-d project to one blob whatever they do.
+            "sep_min_deg":     torch.rad2deg(sep_ang.min()).detach(),
+            "sep_mean_deg":    torch.rad2deg(sep_ang.mean()).detach(),
             "mean_xi_img_anc": xi_ia_pos.mean().detach(),
             "mean_anc_norm":   anc_norms.mean().detach(),
+            # a pair overlaps when its axes are closer than the sum of its apertures
+            "sep_overlap":     (sep_ang < psi_anc[_iu[0]] + psi_anc[_iu[1]]
+                                ).float().mean().detach(),
             **stats_extra,
         }
         return loss, stats

@@ -1048,6 +1048,7 @@ def main():
     else:
         base_keys = ["loss_img_in_cls", "loss_pos", "loss_neg", "xi_sat",
                      "psi_min_deg", "psi_max_deg",
+                     "sep_min_deg", "sep_mean_deg", "sep_overlap",
                      "loss_cap_in_cls", "loss_img_in_cap", "loss_norm",
                      "cone_acc", "inside_img", "mean_psi_anc", "mean_xi_img_anc",
                      "mean_anc_norm"]
@@ -1056,7 +1057,7 @@ def main():
     ce_keys   = ["loss_ce", "ce_tau"] if args.lambda_ce > 0 and not axis else []
     axreg_keys = (["loss_axis", "frac_shallow"]
                   if args.lambda_axis > 0 and not axis else [])
-    sep_keys  = (["loss_sep", "sep_min_deg", "sep_max_deg", "sep_overlap"]
+    sep_keys  = (["loss_sep", "sep_max_deg"]
                  if args.lambda_sep > 0 and not axis else [])
     fam_keys  = (["loss_fam_anc", "loss_fam_img", "inside_family", "family_acc",
                   "mean_psi_fam", "fam_tau"]
@@ -1303,16 +1304,19 @@ def main():
                           f"  shallow={100 * avg['frac_shallow']:.1f}%")
             if ce_keys:
                 line1 += f"  L_ce={avg['loss_ce']:.4f}  τ={avg['ce_tau']:.3f}"
+            # Unconditional, not gated on lambda_sep: this is the anchor-collapse
+            # readout (78.7° at random init → 41.2° within epoch 1 last run) and the
+            # Poincare snapshots cannot show it — 22 near-orthogonal directions in
+            # 128-d land on one blob in any 2-D basis, including at init.
+            # 2ψ/min∠ is stop criterion 1a (must fall below 1; sweepwin sits at 12.8,
+            # Phase B's `flat` reached 1.2).
+            line1 += (f"  min∠={avg['sep_min_deg']:.1f}°"
+                      f"  mean∠={avg['sep_mean_deg']:.1f}°"
+                      f"  overlap={100*avg['sep_overlap']:.0f}%"
+                      f"  2ψ/min∠={2*math.degrees(avg['mean_psi_anc'])/max(avg['sep_min_deg'], 1e-6):.1f}")
             if sep_keys:
-                # min∠ must climb above 2ψ; today it sits 12-17x below it.
-                # 2psi/min-angle is stop criterion 1a (must fall below 1; sweepwin sits
-                # at 12.8, Phase B's `flat` reached 1.2). Printed here so it is readable
-                # per epoch instead of only post-hoc from probe_anchor_spread.
                 line1 += (f"  L_sep={avg['loss_sep']:.4f}"
-                          f"  min∠={avg['sep_min_deg']:.1f}°"
-                          f"  max∠={avg['sep_max_deg']:.1f}°"
-                          f"  overlap={100*avg['sep_overlap']:.0f}%"
-                          f"  2ψ/min∠={2*math.degrees(avg['mean_psi_anc'])/max(avg['sep_min_deg'], 1e-6):.1f}")
+                          f"  max∠={avg['sep_max_deg']:.1f}°")
             if fam_keys:
                 line1 += (f"  L_famA={avg['loss_fam_anc']:.4f}"
                           f"  L_famI={avg['loss_fam_img']:.4f}"
