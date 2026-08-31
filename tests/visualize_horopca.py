@@ -178,7 +178,8 @@ def run_horopca_2d(fit_pts: np.ndarray, project_pts: np.ndarray,
         X_fit = torch.as_tensor(fit_pts, dtype=torch.float64, device=device)
         pca = HoroPCA(dim=fit_pts.shape[1], n_components=2,
                       lr=lr, max_steps=max_steps).double().to(device)
-        pca.fit(X_fit, iterative=False, optim=True)
+        with torch.enable_grad():
+            pca.fit(X_fit, iterative=False, optim=True)
     with torch.no_grad():
         return pca.map_to_ball(X_all).cpu().numpy(), pca
 
