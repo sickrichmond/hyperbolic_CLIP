@@ -67,11 +67,36 @@ the same head trained with a plain CE keeps 0.119 of it.
                     anchors -- and with equal psi, argmin xi IS argmax cos, which is why
                     the cone rule has never differed from a cosine.
 
+lambda_axis > 0 adds the AXIS-RAY regulariser, the always-on companion to the hinge:
+
+  L_axis = mean_i d_ray(x_i, axis of a_{y_i})
+
+d_ray is the geodesic distance to the cone's axis RAY — the geodesic from the origin
+through the apex, restricted to the side the cone opens toward (geometry/lorentz.py).
+It answers the standing objection to the hinge, which is that its gradient is exactly
+zero the moment a point is inside its cone: d_ray keeps pulling all the way to the axis
+and vanishes only ON it. Unlike pos_mode="axis" (L_pos = ξ²) it is a genuine hyperbolic
+distance rather than an angle, and unlike the origin-angle score in axis_cone_loss it
+READS THE RADIUS — so it cannot report a point as on-axis when that point is nowhere
+near the cone.
+
+Two properties it is chosen for, both asserted in tests/test_axis_ray_dist.py:
+  - it is strictly monotone in the angle over all of [0, pi]. Measuring to the full
+    geodesic instead is bilateral and makes the antipode an attractor;
+  - its apex branch moves the anchor RADIALLY, which is the only term here that does.
+    With psi coupled to depth (psi = asin(2K/‖a‖)) that is what lets each class find its
+    own aperture, instead of L_norm pinning all K anchors to one norm and hence to one
+    psi — and with equal psi, argmin xi IS argmax cos algebraically.
+  The apex branch also pulls an image that is SHALLOWER than its anchor back outward,
+  which is the one configuration where oxy_angle saturates at pi and the hinge has no
+  gradient at all.
+
 Total:
   L = lambda_hinge * L_img_in_class
       + λ_cap_in_class * L_cap_in_class
       + λ_img_in_cap   * L_img_in_cap
       + λ_norm         * L_norm   (anchor norm regulariser)
+      + λ_axis         * L_axis   (distance to the cone axis ray)
       + λ_ce           * L_ce     (ranking / calibration term)
       + λ_sep          * L_sep    (cone disjointness, floor and ceiling)
       + λ_family       * L_family (model anchor in family cone + image in family cone)
@@ -84,7 +109,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from geometry.lorentz import half_aperture, oxy_angle
+from geometry.lorentz import axis_ray_dist, half_aperture, oxy_angle
 
 
 def _pairwise_xi(apex: torch.Tensor, point: torch.Tensor, curv: float) -> torch.Tensor:
@@ -117,6 +142,7 @@ class EntailmentConeLoss(nn.Module):
         lambda_img_in_cap: float = 0.0,
         lambda_norm: float = 0.0,
         target_norm: float = 0.0,
+        lambda_axis: float = 0.0,
         lambda_ce: float = 0.0,
         ce_tau_init: float = 1.0,
         lambda_hinge: float = 1.0,
@@ -154,6 +180,7 @@ class EntailmentConeLoss(nn.Module):
         self.lambda_img_in_cap = lambda_img_in_cap
         self.lambda_norm = lambda_norm
         self.target_norm = target_norm
+        self.lambda_axis = lambda_axis
         self.lambda_ce = lambda_ce
         self.lambda_hinge = lambda_hinge
         self.norm_mode = norm_mode
@@ -321,6 +348,26 @@ class EntailmentConeLoss(nn.Module):
         else:
             L_norm = torch.tensor(0.0, device=device)
 
+        # ───── 4b) Axis-ray regulariser ──────────────────────────────────────
+        # The hinge above is exactly flat inside the cone; this is not. d_ray vanishes
+        # only ON the axis and reads the RADIUS, so unlike an origin-angle score it
+        # cannot call a point on-axis while that point sits nowhere near the cone.
+        L_axis = torch.tensor(0.0, device=device)
+        if self.lambda_axis > 0:
+            a_pos = x_anc[labels]                                            # (B, D)
+            L_axis = axis_ray_dist(x_img, a_pos, curv=self.curv).mean()
+            with torch.no_grad():
+                # The direct monitor for the failure this term exists to prevent: an
+                # entailment cone holds the points DEEPER than its apex, so any image
+                # shallower than its own anchor is outside every cone by construction and
+                # sits in oxy_angle's acos clamp, where the hinge gradient is zero. A run
+                # with this above a few percent is not training, whatever `inside` says.
+                frac_shallow = (x_img.norm(dim=-1) <= a_pos.norm(dim=-1)).float().mean()
+                stats_extra.update({
+                    "loss_axis":    L_axis.detach(),
+                    "frac_shallow": frac_shallow.detach(),
+                })
+
         # ───── 6) Anchor separation ──────────────────────────────────────────
         L_sep = torch.tensor(0.0, device=device)
         if self.lambda_sep > 0:
@@ -360,6 +407,7 @@ class EntailmentConeLoss(nn.Module):
             + self.lambda_cap_in_class * L_cap_in_class
             + self.lambda_img_in_cap   * L_img_in_cap
             + self.lambda_norm         * L_norm
+            + self.lambda_axis         * L_axis
             + self.lambda_sep          * L_sep
             + self.lambda_family       * L_family
         )

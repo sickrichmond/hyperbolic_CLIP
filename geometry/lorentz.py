@@ -119,3 +119,65 @@ def oxy_angle(x: Tensor, y: Tensor, curv: float | Tensor = 1.0, eps: float = 1e-
     acos_input = acos_numer / (torch.norm(x, dim=-1) * acos_denom + eps)
     _angle = torch.acos(torch.clamp(acos_input, min=-1 + eps, max=1 - eps))
     return _angle
+
+def axis_ray_dist(
+    x: Tensor, a: Tensor, curv: float | Tensor = 1.0, eps: float = 1e-8
+) -> Tensor:
+    """Geodesic distance from each point to the cone AXIS RAY of its anchor.
+
+    The axis of the entailment cone at apex `a` is the geodesic from the origin through
+    `a`, and the cone opens along it AWAY from the origin -- so the axis proper is the
+    RAY from `a` outward, not the whole geodesic:
+
+        x_par  = <x, a_hat>                 a_hat = a/||a||   (space components)
+        x_perp = ||x - x_par * a_hat||
+
+        t* >= r_a   <=>   x_par / x_time >= ||a|| / a_time
+
+          perpendicular branch:  d = asinh(sqrt(c) * x_perp) / sqrt(c)
+          apex branch:           d = d_H(a, x)
+
+    The branch test is exact and needs no artanh: both sides are tanh of a radius
+    (tanh(sqrt(c) r) = ||.|| / ._time), and tanh is increasing.
+
+    Measuring to the full GEODESIC instead gives sinh(sqrt(c) d) = sqrt(c) x_perp
+    unconditionally, which is BILATERAL -- ||x_perp|| is invariant under x -> -x, so
+    theta=160 deg scores exactly as theta=20 deg and "descending" past 90 deg means
+    walking toward the antipode. That is the degeneracy losses/axis_cone_loss.py
+    rejects, and it is why the ray matters. Restricting to the ray makes the result
+    strictly monotone in the angle over all of [0, pi]. The ray from the ORIGIN is
+    one-sided too, but goes FLAT past 90 deg -- there the nearest point is the origin
+    and the anchor drops out of the expression entirely, a dead gradient zone exactly
+    where random anchors start. From the APEX the far side is covered by d_H(a, x),
+    which keeps a non-zero gradient on both operands everywhere.
+
+    Gradients, and why both branches are needed:
+      perpendicular  reads only the anchor's DIRECTION, so it ROTATES the anchor;
+      apex           reads the anchor as a point, so it moves the anchor RADIALLY.
+    Anchor depth is a learnable quantity only because of the second one. The apex branch
+    also pulls an image that is SHALLOWER than its anchor back outward, which is the one
+    configuration in which oxy_angle saturates at pi and the cone hinge has no gradient
+    at all.
+
+    Both arguments are (B, D) space components, aligned per sample -- pass
+    `x_anc[labels]`, not the (K, D) anchor block. Returns (B,).
+    """
+    rc = curv ** 0.5
+    a_norm = torch.norm(a, dim=-1, keepdim=True)                      # (B, 1)
+    a_hat = a / a_norm.clamp_min(eps)
+    x_par = torch.sum(x * a_hat, dim=-1, keepdim=True)                # (B, 1)
+
+    # From the vector difference, and with eps INSIDE the sqrt. Two separate reasons:
+    # sqrt(||x||^2 - x_par^2) cancels catastrophically near the axis, and torch.norm has
+    # a NaN gradient at exactly zero -- which is the point this term drives every sample
+    # toward, so it is reached in practice rather than in theory.
+    diff = x - x_par * a_hat
+    x_perp = torch.sqrt(torch.sum(diff ** 2, dim=-1) + eps ** 2)      # (B,)
+
+    x_time = torch.sqrt(1 / curv + torch.sum(x ** 2, dim=-1, keepdim=True))
+    a_time = torch.sqrt(1 / curv + a_norm ** 2)
+
+    d_perp = torch.asinh(rc * x_perp) / rc
+    d_apex = elementwise_dist(a, x, curv=curv)
+    beyond = (x_par / x_time) >= (a_norm / a_time)                    # (B, 1) bool
+    return torch.where(beyond.squeeze(-1), d_perp, d_apex)

@@ -2,7 +2,7 @@
 
     python -m tests.test_phase_b
 
-Five invariants, each pinning down one thing that would otherwise fail silently:
+Nine invariants, each pinning down one thing that would otherwise fail silently:
 
   1. the defaults are inert — with the new knobs off, the total is exactly what it was
      (L_img_in_class + λ_norm·L_norm), so `B_ce` really is one variable from sweepwin;
@@ -17,7 +17,10 @@ Five invariants, each pinning down one thing that would otherwise fail silently:
   7. neg_samples keeps exactly k negatives per row, and all of them when k is larger
      than the row;
   8. the anchor norm clamp pulls a tangent back into range from BOTH sides, and the
-     Poincare<->Lorentz round trip the disk plot relies on is exact.
+     Poincare<->Lorentz round trip the disk plot relies on is exact;
+  9. lambda_axis adds exactly lambda_axis * mean(d_ray) and nothing else, and
+     frac_shallow separates the configuration the cone rule needs (images DEEPER than
+     their anchors) from the one the last axis run spent five epochs in.
 """
 import math
 
@@ -46,7 +49,36 @@ def test_defaults_are_inert():
     expected = st["loss_img_in_cls"] + 0.5 * st["loss_norm"]
     assert torch.allclose(loss, expected, atol=1e-6), (loss, expected)
     assert st["loss_sep"].item() == 0.0
+    # lambda_axis defaults to 0, so the axis-ray regulariser must not appear at all —
+    # not as a term and not as a stat that a log parser would then expect to find.
+    assert "loss_axis" not in st and "frac_shallow" not in st, sorted(st)
     print("1 ok  defaults inert, no new term leaks in")
+
+
+def test_axis_regulariser_is_additive_and_shallow_aware():
+    """lambda_axis adds exactly lambda_axis * mean(d_ray) and nothing else, and
+    frac_shallow reports the configuration in which the hinge has no gradient at all."""
+    g = torch.Generator().manual_seed(0)
+    x_anc = _ray(torch.randn(K, D, generator=g), 3.0)
+    labels = torch.arange(B) % K
+
+    # images DEEPER than every anchor: the configuration the cone rule needs
+    deep = _ray(torch.randn(B, D, generator=g), 9.0)
+    base = EntailmentConeLoss(min_radius=0.5)(deep, x_anc, labels)[0]
+    lam = 0.25
+    tot, st = EntailmentConeLoss(min_radius=0.5, lambda_axis=lam)(deep, x_anc, labels)
+    assert torch.allclose(tot, base + lam * st["loss_axis"], atol=1e-6), (tot, base)
+    assert st["frac_shallow"].item() == 0.0, st["frac_shallow"]
+    assert st["loss_axis"].item() > 0.0, "a random point is not on its axis"
+
+    # images SHALLOWER than every anchor: what the last axis run actually trained in
+    shallow = _ray(torch.randn(B, D, generator=g), 0.009)
+    _, st2 = EntailmentConeLoss(min_radius=0.5, lambda_axis=lam)(shallow, x_anc, labels)
+    assert st2["frac_shallow"].item() == 1.0, st2["frac_shallow"]
+    # ...and there the hinge is flat, because every xi is at the acos clamp
+    assert st2["xi_sat"].item() > 0.5, st2["xi_sat"]
+    print(f"9 ok  lambda_axis is exactly additive; frac_shallow 0.0 when images are "
+          f"deeper, 1.0 when they are not (xi_sat {st2['xi_sat'].item():.2f} there)")
 
 
 def test_separation_floor():
@@ -211,4 +243,5 @@ if __name__ == "__main__":
     test_axis_has_gradient_inside_the_cone()
     test_negative_subsample()
     test_anchor_clamp_and_poincare_round_trip()
+    test_axis_regulariser_is_additive_and_shallow_aware()
     print("\nall Phase B invariants hold")

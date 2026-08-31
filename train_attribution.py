@@ -215,6 +215,17 @@ def parse_args():
                    help="Weight of the anchor-norm regulariser (0 disables it).")
     p.add_argument("--target_norm",    type=float, default=0.0,
                    help="Target ‖t_anchor‖. With curv=1, ψ ≈ π/8 at ‖t‖≈2.6, π/16 at ‖t‖≈5.")
+    p.add_argument("--lambda_axis",    type=float, default=0.0,
+                   help="Weight of the AXIS-RAY regulariser (--loss cone only): the "
+                        "geodesic distance from each image to the axis ray of its own "
+                        "cone. The hinge's gradient is exactly zero once a point is "
+                        "inside its cone; this one vanishes only ON the axis, and unlike "
+                        "the origin-angle score of --loss axis it reads the RADIUS, so a "
+                        "point cannot be scored as on-axis while sitting nowhere near "
+                        "the cone. Its apex branch is also the only term here that moves "
+                        "an anchor RADIALLY, which is what makes psi (=asin(2K/‖a‖)) a "
+                        "learned per-class quantity instead of one that L_norm pins to a "
+                        "single value for every class. 0 disables it.")
     p.add_argument("--lambda_hinge",   type=float, default=1.0,
                    help="Scale on the two-term hinge. Set to 0 together with --lambda_ce 1 "
                         "to REPLACE it by cross-entropy rather than mix the two: pure CE "
@@ -323,6 +334,22 @@ def parse_args():
                         "epochs ran at 9.6e-4 and 1e-6, so the final numbers say where the "
                         "clock stopped, not where the equilibrium is. Around lr/10 keeps "
                         "the late epochs doing work.")
+    p.add_argument("--lr_schedule", choices=["cosine", "constant"], default="cosine",
+                   help="'cosine' (default) anneals from --lr to --lr_min over the run. "
+                        "'constant' holds --lr for every step, which is what a "
+                        "DIAGNOSTIC run wants: under a decaying schedule a quantity that "
+                        "stops moving is indistinguishable from one whose updates went "
+                        "to zero, and in the 5-epoch axis runs epoch 1 received 38.7% of "
+                        "the total lr budget against epoch 5's 1.3%, so every final "
+                        "number recorded where the clock stopped.")
+    p.add_argument("--anchor_lr",      type=float, default=None,
+                   help="Separate lr for the geometric parameters (anchor tangents, the "
+                        "drift scalar, the free aperture). Defaults to --lr, which "
+                        "reproduces the single-group behaviour exactly. They also always "
+                        "get weight_decay=0: decay on the aperture parameter pulls psi "
+                        "toward the middle of --psi_range and, worse, pulls every class "
+                        "there together — and a psi with no spread across classes is the "
+                        "exact condition under which argmin xi IS argmax cos.")
     p.add_argument("--optimizer", choices=["adamw", "sgd"], default="adamw",
                    help="Default adamw: every checkpoint in the method comparison was "
                         "trained with it, and flipping the default would silently make "
@@ -346,6 +373,20 @@ def parse_args():
     p.add_argument("--seed",           type=int,   default=42)
     p.add_argument("--max_per_class",  type=int,   default=None)
     p.add_argument("--num_workers",    type=int,   default=8)
+    p.add_argument("--log_every",      type=int,   default=0,
+                   help="Append the per-step stats dict to <diag_plot_dir>/stats.csv "
+                        "every N steps (0 = off). Costs nothing: psi_min/max_deg, "
+                        "sep_min/mean_deg, inside_img and cone_acc are already computed "
+                        "every step and then averaged away into the epoch line. The "
+                        "anchor collapse in the last axis run went from 78.7 deg to 41.2 "
+                        "deg WITHIN epoch 1, so epoch-level logging could not see it.")
+    p.add_argument("--snapshot_every", type=int,   default=0,
+                   help="Write a Poincare snapshot every N steps as well as per epoch "
+                        "(0 = off; requires --diag_plot_dir). The HoroPCA basis is fit "
+                        "ONCE before training, so frame 0 is the init configuration and "
+                        "every later frame is a cheap projection into the same basis — "
+                        "the fit is the expensive half. Uses the current TRAINING batch, "
+                        "so a frame costs no extra forward pass.")
     p.add_argument("--diag_plot_dir",  type=str,   default=None,
                    help="Write one Poincare-disk snapshot per epoch here (HoroPCA to 2-D, "
                         "anchors as stars with their cones drawn). Needs the HoroPCA repo — "
@@ -746,12 +787,22 @@ def main():
             cos = (d @ d.T).clamp(-1, 1)
             iu = torch.triu_indices(len(class_names), len(class_names), offset=1)
             ang = torch.arccos(cos[iu[0], iu[1]])     # off-diagonal pairs only
+        # Degrees, to match every epoch line — this used to print radians next to a
+        # min∠ of 1.374, which reads as a small number and is in fact 78.7°. And for
+        # --loss axis the psi below is NOT the one in force: the aperture there is a free
+        # parameter and the block after this one reassigns ‖t‖ to the depth it implies,
+        # so half_aperture(t0) reports the pre-slaving value (16.0° where the run
+        # actually starts at 32.5°). Say which is which instead of printing the stale one.
+        psi_lo_d, psi_hi_d = args.psi_range
+        psi_txt = (f"ψ={0.5 * (psi_lo_d + psi_hi_d):.1f}° (free, mid --psi_range)"
+                   if args.loss == "axis"
+                   else f"ψ={math.degrees(psi0.mean()):.1f}° (=asin(2K/‖a‖))")
         print(f"Anchor init ({args.anchor_init}): ‖t‖={t0.norm(dim=-1).mean():.2f}  "
-              f"ψ={psi0.mean():.3f} rad  min∠={ang.min():.3f}  mean∠={ang.mean():.3f}  "
-              f"(K={len(class_names)})")
-        if ang.min() < 2 * psi0.mean():
-            print(f"  ⚠️  closest anchor pair is inside 2ψ={2 * psi0.mean():.3f} rad — "
-                  f"those cones overlap at init")
+              f"{psi_txt}  min∠={math.degrees(ang.min()):.1f}°  "
+              f"mean∠={math.degrees(ang.mean()):.1f}°  (K={len(class_names)})")
+        if args.loss != "axis" and ang.min() < 2 * psi0.mean():
+            print(f"  ⚠️  closest anchor pair is inside "
+                  f"2ψ={math.degrees(2 * psi0.mean()):.1f}° — those cones overlap at init")
         if anchor_drift is not None:
             print(f"  drift scale s={F.softplus(anchor_drift).item():.3f} (learned)")
 
@@ -822,8 +873,9 @@ def main():
     t_img = t_probe.norm(dim=-1).median().item()
     x_img = x_probe.norm(dim=-1).median().item()
     x_anc_n = x_anc0.norm(dim=-1).median().item()
+    x_anc_max = x_anc0.norm(dim=-1).max().item()
     print(f"Image depth at init: ‖t_img‖={t_img:.3f} ‖x_img‖={x_img:.3f}  vs  "
-          f"‖x_anc‖={x_anc_n:.3f}")
+          f"‖x_anc‖={x_anc_n:.3f} (max {x_anc_max:.3f})")
     if args.loss == "axis":
         # q is invariant to the image depth, so there is no ordering to get wrong here;
         # what matters is that psi is non-degenerate and q starts well above 1 (outside
@@ -836,10 +888,25 @@ def main():
         print(f"  ξ(anchor→image) median {xi0.median().item():.3f} rad "
               f"({math.degrees(xi0.median().item()):.1f}°)  ψ={psi0.median().item():.3f}  "
               f"{100 * pinned:.0f}% pinned at π   (images must be DEEPER than anchors)")
+        # HARD failure, not a warning. This is the exact configuration the last axis run
+        # trained in for five epochs — ‖x_img‖=0.009 against ‖x_anc‖=1.861, images ~200x
+        # SHALLOWER than their anchors, so no image was inside any cone at any point —
+        # and nothing in the epoch line said so. The cone rule cannot be evaluated at all
+        # in that regime, so refuse to start rather than produce another unreadable run.
+        if x_img <= x_anc_max:
+            want = 1.5 * math.asinh(x_anc_max)
+            raise ValueError(
+                f"containment INVERTED: median image depth ‖x_img‖={x_img:.4f} is not "
+                f"above the DEEPEST anchor ‖x_anc‖={x_anc_max:.4f}. An entailment cone "
+                f"holds the points farther from the origin than its apex, so every ξ "
+                f"sits at π and oxy_angle's acos clamp makes the gradient exactly zero "
+                f"— no learning rate moves it.\n"
+                f"    Fix: --init_depth {want:.2f}  (1.5x the deepest anchor's tangent "
+                f"norm, giving ‖x_img‖≈{math.sinh(want):.1f})."
+            )
         if pinned > 0.05:
-            print(f"  ⚠️  containment INVERTED — the acos clamp zeroes the gradient and no "
-                  f"lr will move it.\n      Try --init_depth "
-                  f"{1.5 * math.asinh(x_anc_n):.2f} (1.5× the anchors' tangent norm).")
+            print(f"  ⚠️  {100 * pinned:.0f}% of the ξ matrix is pinned at π even though "
+                  f"the depth ordering is right — check the anchor spread.")
 
     if torch.cuda.device_count() > 1:
         print(f"Using {torch.cuda.device_count()} GPUs")
@@ -866,6 +933,7 @@ def main():
             lambda_cap_in_class=args.lambda_cap_in_class,
             lambda_img_in_cap=args.lambda_img_in_cap,
             lambda_norm=args.lambda_norm, target_norm=args.target_norm,
+            lambda_axis=args.lambda_axis,
             lambda_ce=args.lambda_ce, ce_tau_init=args.ce_tau_init,
             lambda_hinge=args.lambda_hinge, norm_mode=args.norm_mode,
             target_norm_family=args.target_norm_family,
@@ -874,14 +942,22 @@ def main():
             pos_mode=args.pos_mode, neg_samples=args.neg_samples,
         ).to(device)
 
-    trainable = core.trainable_parameters()
-    for extra in (anchor_tangent, anchor_delta, anchor_drift, anchor_psi_raw):
-        if extra is not None:
-            trainable = trainable + [extra]
-    trainable = trainable + list(cone_loss.parameters())
+    # Two parameter groups, because the geometric parameters and the backbone have
+    # nothing in common numerically: 22 anchor directions and K apertures against 1.5M
+    # LoRA weights, with gradients on entirely different scales. Sharing one lr and one
+    # weight decay across them is a default, not a decision — and the decay in
+    # particular is actively wrong on the aperture (see --anchor_lr).
+    backbone = core.trainable_parameters() + list(cone_loss.parameters())
+    geometric = [p for p in (anchor_tangent, anchor_delta, anchor_drift, anchor_psi_raw)
+                 if p is not None]
+    trainable = backbone + geometric          # clip_grad_norm_ still sees everything
+    anchor_lr = args.lr if args.anchor_lr is None else args.anchor_lr
+    groups = [{"params": backbone, "lr": args.lr, "weight_decay": args.weight_decay}]
+    if geometric:
+        groups.append({"params": geometric, "lr": anchor_lr, "weight_decay": 0.0})
     if args.optimizer == "sgd":
         optimizer = torch.optim.SGD(
-            trainable,
+            groups,
             lr=args.lr,
             momentum=args.momentum,
             nesterov=args.momentum > 0,
@@ -889,17 +965,27 @@ def main():
         )
     else:
         optimizer = torch.optim.AdamW(
-            trainable,
+            groups,
             lr=args.lr,
             weight_decay=args.weight_decay,
         )
     print(f"Optimizer: {args.optimizer}"
           + (f" (momentum {args.momentum}, nesterov)" if args.optimizer == "sgd" else "")
-          + f"  lr={args.lr}  weight_decay={args.weight_decay}")
+          + f"  lr={args.lr}  weight_decay={args.weight_decay}"
+          + (f"  |  {len(geometric)} geometric tensors at lr={anchor_lr} wd=0"
+             if geometric else ""))
     steps_per_epoch = len(train_loader)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.num_epochs * steps_per_epoch, eta_min=args.lr_min
-    )
+    if args.lr_schedule == "constant":
+        # A no-op scheduler rather than dropping the call site: scheduler.step() stays
+        # where it is, and get_last_lr() keeps working for the epoch line.
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
+        print(f"LR schedule: constant at {args.lr} for all "
+              f"{args.num_epochs * steps_per_epoch} steps")
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.num_epochs * steps_per_epoch, eta_min=args.lr_min
+        )
+        print(f"LR schedule: cosine {args.lr} → {args.lr_min}")
     scaler = GradScaler("cuda")
     if args.lambda_ce > 0:
         print(f"CE ranking term: λ_ce={args.lambda_ce}  τ_init={args.ce_tau_init} (learned)")
@@ -922,11 +1008,31 @@ def main():
     # not enough — HoroPCA is located lazily, so probe it now.
     plot_epoch_snapshot = None
     diag_state = None
+    snap_every = 0
     if args.diag_plot_dir:
         from tests.visualize_horopca import plot_epoch_snapshot, _load_horopca
         _load_horopca()
         Path(args.diag_plot_dir).mkdir(parents=True, exist_ok=True)
-        print(f"Per-epoch Poincare snapshots → {args.diag_plot_dir}")
+        snap_every = args.snapshot_every
+        print(f"Per-epoch Poincare snapshots → {args.diag_plot_dir}"
+              + (f" (+ every {snap_every} steps)" if snap_every else ""))
+
+    def snap_psi():
+        """(K,) half-apertures for the snapshot, in the parameterisation actually in
+        force. Under --loss axis psi is a free parameter, so recomputing it from the
+        anchor norm inside the plotter reports a value the model does not have."""
+        return (torch.arcsin(sin_psi_now()).detach().float().cpu().numpy()
+                if args.loss == "axis" else None)
+
+    # ── Step-level trace ─────────────────────────────────────────────────────
+    stat_csv = None
+    stat_csv_keys: list[str] = []
+    if args.log_every > 0:
+        if not args.diag_plot_dir:
+            raise ValueError("--log_every needs --diag_plot_dir to write stats.csv into")
+        stat_csv = open(Path(args.diag_plot_dir) / "stats.csv", "w", encoding="utf-8")
+        print(f"Step-level stats every {args.log_every} steps → "
+              f"{Path(args.diag_plot_dir) / 'stats.csv'}")
 
     best_balanced = -1.0
     out_path = Path(args.output)
@@ -948,6 +1054,8 @@ def main():
     cap_keys  = ["inside_cap", "inside_img_cap", "mean_psi_cap",
                  "mean_xi_cap_anc", "mean_xi_img_cap", "mean_cap_norm"]
     ce_keys   = ["loss_ce", "ce_tau"] if args.lambda_ce > 0 and not axis else []
+    axreg_keys = (["loss_axis", "frac_shallow"]
+                  if args.lambda_axis > 0 and not axis else [])
     sep_keys  = (["loss_sep", "sep_min_deg", "sep_max_deg", "sep_overlap"]
                  if args.lambda_sep > 0 and not axis else [])
     fam_keys  = (["loss_fam_anc", "loss_fam_img", "inside_family", "family_acc",
@@ -955,13 +1063,51 @@ def main():
                  if args.lambda_family > 0 and args.hierarchy != "none" and not axis
                  else [])
 
+    # Everything the loss already emits per step. No extra computation: these are
+    # computed inside the loss every step and, until now, averaged away into one line.
+    stat_csv_keys = base_keys + ce_keys + axreg_keys + sep_keys + fam_keys
+    if use_caps:
+        stat_csv_keys = stat_csv_keys + cap_keys
+
+    # Frame 0, fit BEFORE any optimiser step: the basis and the Frechet isometry are
+    # reused for every later frame (the fit is the expensive half of HoroPCA), and the
+    # configuration the anchors start from is the baseline the run is read against —
+    # random directions in 128-d give min∠ ≈ 78.7°, mean∠ ≈ 89.9°.
+    if snap_every and plot_epoch_snapshot is not None:
+        model.eval()
+        with torch.no_grad():
+            # Several batches, not one: this is the ONLY fit in the run — every later
+            # frame reuses this basis, which is what makes them comparable — so its
+            # quality sets the quality of the whole sequence. plot_epoch_snapshot
+            # subsamples to max_points=1500 for the fit, so that is the target.
+            e0, l0 = [], []
+            for probe0 in train_loader:
+                e0.append(core.encode_image(probe0["pixel_values"].to(device))[0]
+                          .float().cpu())
+                l0.extend(name_to_idx[g] for g in probe0["generator"])
+                if sum(t.shape[0] for t in e0) >= 1500:
+                    break
+            t_now0 = anchor_tangent_now()
+            xa0 = (exp_map0(t_now0.float(), curv=args.curv) if t_now0 is not None
+                   else core.encode_text(anchor_ids, anchor_mask)[0])
+            diag_state = plot_epoch_snapshot(
+                torch.cat(e0).numpy(), l0, xa0, class_names,
+                Path(args.diag_plot_dir) / "step_0000000.png",
+                curv=args.curv, min_radius=args.min_radius,
+                psi=snap_psi(), state=None, seed=args.seed, title="init (step 0)")
+        model.train()
+
+    global_step = 0
     for epoch in range(1, args.num_epochs + 1):
         model.train()
-        sums = {"loss": 0.0, **{k: 0.0 for k in base_keys + ce_keys + sep_keys + fam_keys}}
+        sums = {"loss": 0.0,
+                **{k: 0.0 for k in
+                   base_keys + ce_keys + axreg_keys + sep_keys + fam_keys}}
         if use_caps:
             sums.update({k: 0.0 for k in cap_keys})
         bar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.num_epochs}")
         for step, batch in enumerate(bar, 1):
+            global_step += 1
             pixel    = batch["pixel_values"].to(device)
             cap_ids  = batch["input_ids"].to(device)        # already tokenized augmented caption
             cap_mask = batch["attention_mask"].to(device)
@@ -1060,11 +1206,43 @@ def main():
                     anchor_tangent.mul_(n.clamp(lo, hi) / n.clamp_min(1e-8))
 
             sums["loss"] += loss.item()
-            for k in base_keys + ce_keys + sep_keys + fam_keys:
+            for k in base_keys + ce_keys + axreg_keys + sep_keys + fam_keys:
                 sums[k] += stats[k].item()
             if use_caps:
                 for k in cap_keys:
                     sums[k] += stats[k].item()
+
+            # ── Step-level trace ─────────────────────────────────────────────
+            # INSTANTANEOUS values, not the running mean the tqdm bar shows: the
+            # quantity of interest here is a transient. In the last axis run the
+            # anchors went from min∠ 78.7° to 41.2° inside epoch 1, so an epoch
+            # average of that trajectory is a number no reading can recover.
+            if stat_csv is not None and (global_step % args.log_every == 0
+                                         or global_step == 1):
+                row = {"step": global_step, "epoch": epoch,
+                       "lr": scheduler.get_last_lr()[0], "loss": loss.item(),
+                       **{k: stats[k].item() for k in stat_csv_keys}}
+                if stat_csv.tell() == 0:
+                    stat_csv.write(",".join(row) + "\n")
+                stat_csv.write(",".join(f"{v:.6g}" for v in row.values()) + "\n")
+                stat_csv.flush()      # a killed job keeps everything up to the kill
+
+            if (snap_every and plot_epoch_snapshot is not None
+                    and global_step % snap_every == 0):
+                # The current TRAINING batch, so a frame costs no extra forward pass.
+                # diag_state carries the basis fit before step 1, so every frame —
+                # intra-epoch and per-epoch alike — lands in the SAME 2-D frame.
+                # --mixup_at clip never materialises the unmixed x_img (the mix happens
+                # before the projection head), so the mixed points are all there is.
+                x_snap = x_mix if mix_at_clip else x_img
+                with torch.no_grad():
+                    diag_state = plot_epoch_snapshot(
+                        x_snap.detach().float().cpu().numpy(), labels.tolist(),
+                        x_anc.detach(), class_names,
+                        Path(args.diag_plot_dir) / f"step_{global_step:07d}.png",
+                        curv=args.curv, min_radius=args.min_radius,
+                        psi=snap_psi(), state=diag_state, seed=args.seed,
+                        title=f"epoch {epoch} · step {global_step}")
 
             if step % 25 == 0 or step == steps_per_epoch:
                 if axis:
@@ -1117,6 +1295,12 @@ def main():
                 line1 += (f"  L_cap_cls={avg['loss_cap_in_cls']:.4f}"
                           f"  L_img_cap={avg['loss_img_in_cap']:.4f}")
             line1 += f"  L_norm={avg['loss_norm']:.4f}"
+            if axreg_keys:
+                # frac_shallow is the one to watch: an image shallower than its own
+                # anchor is outside every cone by construction and its xi is pinned at
+                # the acos clamp, where the hinge has no gradient. It should be ~0.
+                line1 += (f"  L_axis={avg['loss_axis']:.4f}"
+                          f"  shallow={100 * avg['frac_shallow']:.1f}%")
             if ce_keys:
                 line1 += f"  L_ce={avg['loss_ce']:.4f}  τ={avg['ce_tau']:.3f}"
             if sep_keys:
@@ -1182,7 +1366,8 @@ def main():
                 val["emb"], val["emb_labels"], x_anc_val, class_names,
                 Path(args.diag_plot_dir) / f"epoch_{epoch:02d}.png",
                 curv=args.curv, min_radius=args.min_radius,
-                state=diag_state, seed=args.seed, title=f"epoch {epoch}")
+                psi=snap_psi(), state=diag_state, seed=args.seed,
+                title=f"epoch {epoch}")
 
         # ── Save best checkpoint by balanced val accuracy ────────────────────
         if val["balanced_acc"] > best_balanced:
@@ -1266,6 +1451,10 @@ def main():
                 out_path,
             )
             print(f"  ↳ saved checkpoint (balanced val={100*best_balanced:.1f}%) → {out_path}")
+
+    if stat_csv is not None:
+        stat_csv.close()
+        print(f"Step-level trace: {Path(args.diag_plot_dir) / 'stats.csv'}")
 
     print(f"\nBest balanced val accuracy: {100*best_balanced:.1f}%  ({out_path})")
 

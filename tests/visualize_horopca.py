@@ -311,6 +311,15 @@ def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0,
         if m.any():
             ax.scatter(imgs_2d[m, 0], imgs_2d[m, 1], c=[colors[c]], s=6,
                        alpha=0.4, label=f"{c} ({m.sum()})")
+    if origin_2d is not None:
+        # The MODEL's origin — the vertex every drawn angle is measured from, and the
+        # point the cones open away from. The Fréchet centering puts the IMAGE centroid
+        # at the middle of the disk, so the two are different places and "the data is in
+        # the middle" is true by construction rather than a fact about the model. Without
+        # this marker there is no way to read either statement off the figure.
+        o = np.asarray(origin_2d).reshape(2)
+        ax.scatter(*o, marker="+", s=260, c="black", linewidths=2.0, zorder=11,
+                   label="model origin")
     for i, c in enumerate(classes):
         ax.scatter(ancs_2d[i, 0], ancs_2d[i, 1], c=[colors[c]], s=700,
                    marker="*", edgecolors="black", linewidths=1.8, zorder=10,
@@ -338,7 +347,7 @@ def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0,
 
 def plot_epoch_snapshot(x_img, labels, x_anc, class_names, out_png, curv=1.0,
                         min_radius=0.1, state=None, seed=42, max_points=1500,
-                        title=None):
+                        title=None, psi=None):
     """One Poincaré-disk frame per training epoch, cones included.
 
     `x_img` (N, D) Lorentz space-components, `labels` their integer class indices,
@@ -348,9 +357,15 @@ def plot_epoch_snapshot(x_img, labels, x_anc, class_names, out_png, curv=1.0,
     basis and the Fréchet-mean isometry are reused, which is what makes consecutive
     frames comparable — and skips the expensive half (the fit is O(N²·D) in fp64).
     Returns the state for the next epoch.
+
+    `psi` (K,) in radians overrides the aperture. Pass it whenever the model's aperture
+    is NOT `asin(2K/‖a‖)` — under `--loss axis` it is a free parameter, and recomputing
+    it from the anchor norm here draws a cone the model does not have. Left None the
+    coupled formula is used, which is correct for `--loss cone`.
     """
     x_anc_c = x_anc.detach().float().cpu()
-    psi = half_aperture(x_anc_c, curv=curv, min_radius=min_radius).numpy()
+    if psi is None:
+        psi = half_aperture(x_anc_c, curv=curv, min_radius=min_radius).numpy()
 
     p_imgs = lorentz_to_poincare(np.asarray(x_img), curv=curv)
     p_ancs = lorentz_to_poincare(x_anc_c.numpy(), curv=curv)
