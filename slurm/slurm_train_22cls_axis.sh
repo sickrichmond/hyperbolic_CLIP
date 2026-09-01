@@ -37,12 +37,16 @@
 #                         their radius is fixed and the cones have inside/outside margins.
 #   RUN=axis_anchors  frozen image encoder/head; only anchor axes and apertures move.
 #                     Images stay at tangent radius 4 and cone walls keep a 2° gap.
+#   RUN=axis_simplex  fixed regular-simplex axes and fixed 45° cones train the image
+#                     classifier; the best checkpoint is then calibrated on all train data.
 #
 # Read out of the epoch line, in order of importance:
 #   ψ∈[min,max]  must SPREAD. If the apertures stay equal then argmin q IS argmax cos,
 #                algebraically, however high the accuracy climbs — that is the 0.9985
 #                cone-cosine agreement that has pinned every run so far. With psi free and
 #                a coverage criterion, a narrow spread would now be a fact about the data.
+#                axis_simplex is intentionally uniform during training; its final all-data
+#                calibration creates the per-class spread after classifier selection.
 #   out vs ν     the coverage the cone actually reached against what was asked for. Equal
 #                means the aperture converged; far apart means it is still in transit.
 #   min∠         the open problem: it fell 41° → 9.7° over the last run, because the
@@ -58,6 +62,7 @@
 #          sbatch --export=ALL,RUN=axis_adam slurm/slurm_train_22cls_axis.sh
 #          sbatch --export=ALL,RUN=axis_constrained slurm/slurm_train_22cls_axis.sh
 #          sbatch --export=ALL,RUN=axis_anchors slurm/slurm_train_22cls_axis.sh
+#          sbatch --export=ALL,RUN=axis_simplex slurm/slurm_train_22cls_axis.sh
 # ==========================================================================
 
 #SBATCH --account=EUHPC_D35_189
@@ -103,13 +108,17 @@ case "$RUN" in
   axis_adam) EXTRA="--optimizer adamw --lr 3e-4 --lr_min 3e-5" ;;
   axis_constrained)
     NEG_SAMPLES=0
-    EXTRA="--optimizer sgd --lr 1e-3 --anchor_lr 1e-2 --lr_min 1e-4 --fixed_image_radius 4.0 --radial_margin 0.5 --inside_margin 2.0 --lambda_sep 10.0 --separation_margin 2.0 --log_every 10 --snapshot_every 100"
+    EXTRA="--optimizer sgd --lr 1e-3 --anchor_lr 1e-2 --lr_min 1e-4 --fixed_image_radius 4.0 --radial_margin 0.5 --inside_margin 2.0 --lambda_sep 10.0 --separation_margin 2.0 --log_every 10 --snapshot_every 100 --plot_all_train"
     ;;
   axis_anchors)
     NEG_SAMPLES=0
-    EXTRA="--optimizer sgd --lr 1e-2 --lr_schedule constant --anchors_only --fixed_image_radius 4.0 --radial_margin 0.5 --inside_margin 2.0 --lambda_sep 10.0 --separation_margin 2.0 --log_every 10 --snapshot_every 100"
+    EXTRA="--optimizer sgd --lr 1e-2 --lr_schedule constant --anchors_only --fixed_image_radius 4.0 --radial_margin 0.5 --inside_margin 2.0 --lambda_sep 10.0 --separation_margin 2.0 --log_every 10 --snapshot_every 100 --plot_all_train"
     ;;
-  *) echo "RUN must be axis, axis_adam, axis_constrained, or axis_anchors (got '$RUN')"; exit 2 ;;
+  axis_simplex)
+    NEG_SAMPLES=0
+    EXTRA="--optimizer sgd --lr 1e-3 --lr_min 1e-4 --anchor_init simplex --freeze_anchors --fixed_psi 45.0 --fixed_image_radius 4.0 --radial_margin 0.5 --inside_margin 2.0 --separation_margin 2.0 --lambda_aperture 0 --lambda_sep 0 --lambda_ce 1.0 --calibrate_psi --log_every 10 --snapshot_every 100 --plot_all_train"
+    ;;
+  *) echo "RUN must be axis, axis_adam, axis_constrained, axis_anchors, or axis_simplex (got '$RUN')"; exit 2 ;;
 esac
 CKPT=$OUT/attribution_22cls_${RUN}_vitl14.pt
 

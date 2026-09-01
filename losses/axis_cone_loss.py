@@ -40,6 +40,7 @@ little slack so it does not memorise the training set:
       +  λ_neg · mean_{k ∈ N_i} max(0, 1 − q_ik)²                         exclusion
       +  λ_sep · mean_{overlapping k<l}
                     max(0, ψ_k + ψ_l + m_sep − ∠(u_k,u_l))²           separation
+      +  λ_ce · CE(−q_i / τ, y_i)                                      ranking
     where q_ap = chord(θ_{i,y_i} + m_in)².detach() / W_{y_i}
 
 The pull is the squared normalised distance from the right axis: zero only ON the axis,
@@ -48,6 +49,8 @@ cones". The separation term additionally makes the cones themselves disjoint: tw
 caps cannot intersect when their axis angle is at least the sum of their half-apertures,
 with m_sep reserving optional empty space between their walls. Padding each positive angle
 by m_in keeps the covered training samples that far inside their own wall.
+The optional cross-entropy directly trains the argmin-q decision rule; unlike exclusion it
+still has a gradient when an image is outside every wrong cone but ranks the wrong one first.
 
 The APERTURE block is what sets ψ, and its shape is the whole point. Stationarity in W:
 
@@ -131,6 +134,52 @@ import torch.nn.functional as F
 from losses.attribution_loss import _subsample
 
 
+def regular_simplex(num_classes: int, dim: int, *, device=None, dtype=None) -> torch.Tensor:
+    """Unit vectors with the largest possible common pairwise angle.
+
+    K vertices need at least K-1 dimensions and have pairwise cosine -1/(K-1).
+    """
+    if num_classes < 2 or dim < num_classes - 1:
+        raise ValueError(f"A {num_classes}-vertex simplex needs dim >= {num_classes - 1}")
+    centered = (torch.eye(num_classes, device=device, dtype=dtype)
+                - torch.full((num_classes, num_classes), 1.0 / num_classes,
+                             device=device, dtype=dtype))
+    _, basis = torch.linalg.eigh(centered)
+    vertices = F.normalize(basis[:, -(num_classes - 1):], dim=-1)
+    return F.pad(vertices, (0, dim - (num_classes - 1)))
+
+
+@torch.no_grad()
+def calibrate_axis_apertures(x_img: torch.Tensor, labels: torch.Tensor,
+                             x_anc: torch.Tensor, coverage: float,
+                             inside_margin: float = 0.0) -> tuple[torch.Tensor, torch.Tensor]:
+    """Smallest per-class half-apertures covering `coverage` of fixed embeddings.
+
+    `inside_margin` is in radians. ``interpolation='higher'`` makes the requested
+    empirical coverage a guarantee rather than an interpolated approximation.
+    """
+    if not 0 < coverage <= 1:
+        raise ValueError("coverage must be in (0, 1]")
+    if x_img.ndim != 2 or x_anc.ndim != 2 or x_img.shape[1] != x_anc.shape[1]:
+        raise ValueError("x_img and x_anc must be (N,D) and (K,D) with the same D")
+    labels = labels.long()
+    if labels.numel() != x_img.shape[0]:
+        raise ValueError("labels must have one entry per image")
+
+    dots = (F.normalize(x_img, dim=-1)
+            * F.normalize(x_anc, dim=-1)[labels]).sum(-1).clamp(-1.0, 1.0)
+    required = torch.arccos(dots) + inside_margin
+    psi, covered = [], []
+    for k in range(x_anc.shape[0]):
+        values = required[labels == k]
+        if not len(values):
+            raise ValueError(f"Cannot calibrate absent class index {k}")
+        wall = torch.quantile(values, coverage, interpolation="higher")
+        psi.append(wall)
+        covered.append((values <= wall).float().mean())
+    return torch.stack(psi), torch.stack(covered)
+
+
 def cone_wall_chord2(sin_psi: torch.Tensor) -> torch.Tensor:
     """(K,) squared chord distance from the axis to the cone wall, 2(1 − cos ψ).
 
@@ -183,7 +232,8 @@ class AxisConeLoss(nn.Module):
     def __init__(self, min_radius: float = 0.5, lambda_neg: float = 1.0,
                  neg_samples: int = 0, lambda_aperture: float = 1.0,
                  nu: float = 0.05, lambda_sep: float = 0.0,
-                 separation_margin: float = 0.0, inside_margin: float = 0.0):
+                 separation_margin: float = 0.0, inside_margin: float = 0.0,
+                 lambda_ce: float = 0.0, ce_tau_init: float = 1.0):
         """neg_samples = 0 uses all K-1 negatives; k > 0 keeps k at random per sample.
         nu is the fraction of a class's own samples the cone is allowed to leave outside.
         lambda_aperture scales the whole aperture block; it cancels out of the equilibrium
@@ -197,8 +247,12 @@ class AxisConeLoss(nn.Module):
         self.lambda_aperture = lambda_aperture
         self.nu = nu
         self.lambda_sep = lambda_sep
+        self.lambda_ce = lambda_ce
         self.separation_margin = math.radians(separation_margin)
         self.inside_margin = math.radians(inside_margin)
+        if lambda_ce > 0:
+            raw = torch.tensor(float(ce_tau_init)).expm1().clamp(min=1e-6).log()
+            self.ce_tau_raw = nn.Parameter(raw)
 
     def forward(
         self,
@@ -265,8 +319,13 @@ class AxisConeLoss(nn.Module):
             overlap = torch.zeros(1, device=device)
             L_sep = torch.zeros((), device=device)
 
+        L_ce = torch.zeros((), device=device)
+        if self.lambda_ce > 0:
+            tau = F.softplus(self.ce_tau_raw)
+            L_ce = F.cross_entropy(-q / tau, labels)
+
         loss = (L_pos + self.lambda_aperture * L_ap + self.lambda_neg * L_neg
-                + self.lambda_sep * L_sep)
+                + self.lambda_sep * L_sep + self.lambda_ce * L_ce)
 
         with torch.no_grad():
             # the depth the aperture implies — the anchor's position in hyperbolic space,
@@ -283,6 +342,9 @@ class AxisConeLoss(nn.Module):
                 "loss_neg":     L_neg.detach(),
                 "loss_ap":      L_ap.detach(),
                 "loss_sep":     L_sep.detach(),
+                "loss_ce":      L_ce.detach(),
+                "ce_tau":       (F.softplus(self.ce_tau_raw).detach()
+                                 if self.lambda_ce > 0 else torch.ones((), device=device)),
                 "q_pos":        q_pos.mean().detach(),
                 "inside_img":   (q_ap < 1.0).float().mean().detach(),
                 # The quantity the aperture term drives to nu. Reading it next to

@@ -285,6 +285,7 @@ def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0,
     lim = zoom if zoom > 0 else min(1.08, max(0.1, 1.15 * max_r))
 
     colors = _class_colors(classes)
+    many_points = len(imgs_2d) > 10_000
 
     if psi is not None:
         # ponytail: euclidean wedge, exact only near the centre of the disk (geodesics
@@ -310,8 +311,10 @@ def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0,
     for c in classes:
         m = np.array([g == c for g in gt])
         if m.any():
-            ax.scatter(imgs_2d[m, 0], imgs_2d[m, 1], c=[colors[c]], s=6,
-                       alpha=0.4, label=f"{c} ({m.sum()})")
+            ax.scatter(imgs_2d[m, 0], imgs_2d[m, 1], c=[colors[c]],
+                       s=1 if many_points else 6,
+                       alpha=0.08 if many_points else 0.4,
+                       rasterized=many_points, label=f"{c} ({m.sum()})")
     if origin_2d is not None:
         # The MODEL's origin — the vertex every drawn angle is measured from, and the
         # point the cones open away from. The Fréchet centering puts the IMAGE centroid
@@ -374,13 +377,17 @@ def plot_epoch_snapshot(x_img, labels, x_anc, class_names, out_png, curv=1.0,
     # centering isometry below moves it off the middle of the disk.
     p_orig = lorentz_to_poincare(np.zeros((1, p_imgs.shape[1])), curv=curv)
 
-    pca, mu = state if state is not None else (None, None)
-    if mu is None:
-        mu = poincare_frechet_mean(p_imgs)
-    p_imgs, p_ancs, p_orig = (center_poincare(a, mu) for a in (p_imgs, p_ancs, p_orig))
-
     rng = np.random.default_rng(seed)
     fit_idx = rng.choice(len(p_imgs), size=min(max_points, len(p_imgs)), replace=False)
+
+    pca, mu = state if state is not None else (None, None)
+    if mu is None:
+        # The full plot may contain hundreds of thousands of rows. HoroPCA itself is
+        # deliberately fit on max_points, so use that same representative set for its
+        # centering isometry and project every row only after the fit.
+        mu = poincare_frechet_mean(p_imgs[fit_idx])
+    p_imgs, p_ancs, p_orig = (center_poincare(a, mu) for a in (p_imgs, p_ancs, p_orig))
+
     coords, pca = run_horopca_2d(
         np.concatenate([p_imgs[fit_idx], p_ancs], axis=0),
         np.concatenate([p_imgs, p_ancs, p_orig], axis=0),

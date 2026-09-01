@@ -2,7 +2,7 @@
 
     python -m tests.test_axis_cone_loss
 
-Eleven invariants. The first three pin down that q is the quantity we think it is; the
+Thirteen invariants. The first three pin down that q is the quantity we think it is; the
 rest pin down the failures that would be invisible in a training log — a dead gradient,
 a coupled parameter that hands the optimiser a shortcut, and a decision rule that has
 quietly become a cosine.
@@ -39,7 +39,8 @@ import math
 import torch
 import torch.nn.functional as F
 
-from losses.axis_cone_loss import (AxisConeLoss, axis_cone_q, depth_from_sin_psi,
+from losses.axis_cone_loss import (AxisConeLoss, axis_cone_q, calibrate_axis_apertures,
+                                   depth_from_sin_psi, regular_simplex,
                                    sin_psi_from_depth)
 
 # float64 throughout: checks 6-8 compare autograd against finite differences, and in
@@ -314,6 +315,43 @@ def test_inside_margin():
           "fails a 2° padded coverage constraint")
 
 
+def test_simplex_and_exact_calibration():
+    axes = regular_simplex(4, D)
+    gram = axes @ axes.T
+    off = gram[~torch.eye(4, dtype=torch.bool)]
+    assert torch.allclose(gram.diag(), torch.ones(4), atol=1e-12)
+    assert torch.allclose(off, torch.full_like(off, -1 / 3), atol=1e-12)
+
+    images, labels, angles = [], [], [5.0, 12.0, 19.0, 26.0]
+    for k, angle in enumerate(angles):
+        v = torch.zeros(D); v[-1] = 1.0  # padding dimension, perpendicular to all axes
+        t = math.radians(angle)
+        images.append(math.cos(t) * axes[k] + math.sin(t) * v)
+        labels.append(k)
+    psi, covered = calibrate_axis_apertures(
+        torch.stack(images), torch.tensor(labels), axes,
+        coverage=1.0, inside_margin=math.radians(2.0),
+    )
+    assert torch.allclose(torch.rad2deg(psi), torch.tensor(angles) + 2, atol=1e-9)
+    assert torch.equal(covered, torch.ones(4))
+    print("12 ok regular simplex has cos=-1/(K-1); exact calibration recovers each "
+          "class radius plus its inside margin")
+
+
+def test_q_cross_entropy_ranks_classes():
+    anchors = torch.zeros(2, D); anchors[0, 0] = 1; anchors[1, 1] = 1
+    x = _at_angle(math.radians(70.0))  # closer to e1, but labelled class 0
+    labels = torch.zeros(1, dtype=torch.long)
+    sp = torch.full((2,), math.sin(math.radians(45.0)))
+    plain = AxisConeLoss(lambda_neg=0, lambda_aperture=0)(x, anchors, labels, sp)[0]
+    ranked, stats = AxisConeLoss(
+        lambda_neg=0, lambda_aperture=0, lambda_ce=1, ce_tau_init=1,
+    )(x, anchors, labels, sp)
+    assert ranked > plain
+    assert stats["loss_ce"] > 0 and abs(stats["ce_tau"].item() - 1) < 1e-12
+    print("13 ok cross-entropy on -q penalises a wrong class ranking")
+
+
 if __name__ == "__main__":
     test_monotone_and_one_sided()
     test_q_is_one_on_the_wall()
@@ -326,4 +364,6 @@ if __name__ == "__main__":
     test_detaches_hold()
     test_overlap_penalty()
     test_inside_margin()
+    test_simplex_and_exact_calibration()
+    test_q_cross_entropy_ranks_classes()
     print("\nall axis-cone invariants hold")

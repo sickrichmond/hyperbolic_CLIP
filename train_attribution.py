@@ -36,7 +36,8 @@ from data.iab_clip_dataset import IABCLIPDataset
 from geometry.lorentz import exp_map0, half_aperture, log_map0
 from models.attribution_clip import AttributionCLIP
 from losses.attribution_loss import EntailmentConeLoss, _pairwise_xi, predict_class
-from losses.axis_cone_loss import (AxisConeLoss, axis_cone_q, depth_from_sin_psi,
+from losses.axis_cone_loss import (AxisConeLoss, axis_cone_q, calibrate_axis_apertures,
+                                   depth_from_sin_psi, regular_simplex,
                                    sin_psi_from_depth)
 
 
@@ -147,7 +148,7 @@ def parse_args():
                         "caption loss terms are off. Lets the caption on/off ablation run "
                         "on the SAME subset (only the loss varies, not the data).")
     p.add_argument("--anchor_init",
-                   choices=["text", "image_centroid", "text_free", "random"],
+                   choices=["text", "image_centroid", "text_free", "random", "simplex"],
                    default="text",
                    help="'text' (default): anchors are the class text prompts encoded by "
                         "CLIP at every step (they still move, through the text-encoder LoRA). "
@@ -159,7 +160,12 @@ def parse_args():
                         "--anchor_drift_init); at step 0 it is identical to 'text'. "
                         "'random': free parameters from random directions, rescaled to "
                         "--anchor_init_norm. No text encoder, no centroid pre-pass — the "
-                        "data decide where the anchors go, from nothing.")
+                        "data decide where the anchors go, from nothing. "
+                        "'simplex': optimally separated directions with pairwise cosine "
+                        "-1/(K-1); use --freeze_anchors for fixed classifier targets.")
+    p.add_argument("--freeze_anchors", action="store_true", default=False,
+                   help="Keep free anchor directions fixed. Intended for simplex classifier "
+                        "training; images must organize around known-separated targets.")
     p.add_argument("--anchor_norm_range", type=float, nargs=2, default=None,
                    metavar=("MIN", "MAX"),
                    help="Hard clamp on the TANGENT norm of the free anchors, applied "
@@ -286,7 +292,7 @@ def parse_args():
                         "(1−cos θ)/(1−cos ψ_k), the squared distance from the cone's axis "
                         "in units of the distance to its wall, so q=1 IS the wall. "
                         "With 'axis' the flags "
-                        "--lambda_norm/--target_norm/--lambda_ce/"
+                        "--lambda_norm/--target_norm/"
                         "--lambda_hinge/--pos_mode/--hierarchy/--init_depth are all "
                         "ignored: that loss has none of those terms and q is invariant "
                         "to the image depth.")
@@ -308,6 +314,10 @@ def parse_args():
                         "measured, psi ran to 65° and its spread across classes collapsed "
                         "from 8.7° to 0.6°, which is exactly when argmin q becomes "
                         "argmax cos. Init is the midpoint of the range.")
+    p.add_argument("--fixed_psi", type=float, default=0.0, metavar="DEG",
+                   help="--loss axis only. Hold every half-aperture at this many degrees "
+                        "during classifier training (0 learns it normally). Use with "
+                        "--lambda_aperture 0; --calibrate_psi fits per-class widths later.")
     p.add_argument("--nu", type=float, default=0.05,
                    help="--loss axis only. The fraction of a class's OWN samples its cone "
                         "is allowed to leave outside — the slack that stops the cone from "
@@ -317,6 +327,10 @@ def parse_args():
                         "upper-bounds that fraction (the nu-SVM / SVDD property). The "
                         "alternative, putting the wall on the class's RMS radius, sounds "
                         "equivalent and leaves ~42%% of the samples outside their own cone.")
+    p.add_argument("--calibrate_psi", action="store_true", default=False,
+                   help="After selecting the best classifier, freeze it and replace each "
+                        "aperture by the exact (1-nu) training-angle quantile plus "
+                        "--inside_margin. Requires fixed simplex anchors.")
     p.add_argument("--lambda_aperture", type=float, default=1.0,
                    help="--loss axis only. Weight of the log-W aperture term, whose "
                         "equilibrium is controlled by --nu: tight classes get narrow "
@@ -330,8 +344,9 @@ def parse_args():
                         "does NOT save compute — xi is computed against every anchor anyway "
                         "— it is dropout on the negative term.")
     p.add_argument("--lambda_ce",      type=float, default=0.0,
-                   help="Weight of a cross-entropy term on softmax(-ξ/τ) (0 disables it, and "
-                        "the loss is then bit-identical to before). The cone hinge saturates: "
+                   help="Weight of a cross-entropy ranking term on softmax(-score/τ), where "
+                        "score is ξ for --loss cone and q for --loss axis (0 disables it). "
+                        "The cone hinge saturates: "
                         "once an image is inside its own cone the gradient is zero, and the "
                         "negative term is averaged over K-1 classes so each wrong class weighs "
                         "λ_neg/21. Nothing therefore optimises the RANKING of ξ, which is what "
@@ -413,6 +428,10 @@ def parse_args():
                         "anchors as stars with their cones drawn). Needs the HoroPCA repo — "
                         "see tests/visualize_horopca.py. Reuses the embeddings validation "
                         "already computes, so it costs no extra forward pass.")
+    p.add_argument("--plot_all_train", action="store_true", default=False,
+                   help="After training, write train_all_final.png with every training "
+                        "image. This adds one clean, unshuffled pass over the train split; "
+                        "frequent step/epoch frames remain sampled.")
     return p.parse_args()
 
 
@@ -600,6 +619,22 @@ def run_validation(model_inner, val_loader, x_anc, class_names, device, curv,
     }
 
 
+@torch.no_grad()
+def collect_plot_embeddings(model, loader, name_to_idx, device):
+    """Collect one embedding for every row in an unshuffled plotting loader."""
+    model.eval()
+    emb, labels = [], []
+    for batch in tqdm(loader, desc="all-train plot", leave=False):
+        pixel = batch["pixel_values"].to(device)
+        with autocast("cuda"):
+            emb.append(model(pixel).float().cpu())
+        labels.extend(name_to_idx[g] for g in batch["generator"])
+    x = torch.cat(emb).numpy()
+    if len(x) != len(loader.dataset):
+        raise RuntimeError(f"Full-train plot collected {len(x)} of {len(loader.dataset)} rows")
+    return x, labels
+
+
 def main():
     args = parse_args()
     if min(args.fixed_image_radius, args.radial_margin, args.separation_margin,
@@ -608,15 +643,33 @@ def main():
     if args.fixed_image_radius > 0 and args.init_depth > 0:
         raise ValueError("Use --fixed_image_radius or --init_depth, not both")
     if args.anchors_only and args.anchor_init == "text":
-        raise ValueError("--anchors_only requires free anchors: random, image_centroid, "
-                         "or text_free")
+        raise ValueError("--anchors_only requires a free --anchor_init mode")
+    if args.freeze_anchors and args.anchor_init not in ("random", "image_centroid", "simplex"):
+        raise ValueError("--freeze_anchors requires random, image_centroid or simplex anchors")
     if args.loss == "axis" and not (0 < args.psi_range[0] <= args.psi_range[1] < 90):
         raise ValueError("--psi_range must satisfy 0 < MIN <= MAX < 90 degrees")
+    if args.loss == "axis" and not 0 < args.nu < 1:
+        raise ValueError("--nu must be in (0, 1) for the axis coverage objective")
     if args.loss == "axis" and args.inside_margin >= args.psi_range[1]:
         raise ValueError("--inside_margin must be smaller than the maximum --psi_range")
+    if args.fixed_psi and args.loss != "axis":
+        raise ValueError("--fixed_psi is only defined for --loss axis")
+    if args.fixed_psi and not (args.psi_range[0] <= args.fixed_psi <= args.psi_range[1]):
+        raise ValueError("--fixed_psi must lie inside --psi_range")
+    if args.fixed_psi and args.lambda_aperture != 0:
+        raise ValueError("A fixed aperture makes --lambda_aperture inert; set it to 0")
+    if args.fixed_psi and args.freeze_anchors and args.lambda_sep != 0:
+        raise ValueError("Fixed axes/apertures make --lambda_sep inert; set it to 0")
+    if args.calibrate_psi and not (args.loss == "axis" and args.fixed_psi
+                                   and args.freeze_anchors
+                                   and args.anchor_init == "simplex"):
+        raise ValueError("--calibrate_psi requires --loss axis, --fixed_psi, "
+                         "--freeze_anchors and --anchor_init simplex")
+    if args.plot_all_train and not args.diag_plot_dir:
+        raise ValueError("--plot_all_train requires --diag_plot_dir")
     if args.fixed_image_radius > 0:
-        if args.anchor_init not in ("random", "image_centroid"):
-            raise ValueError("--fixed_image_radius needs random or image_centroid anchors "
+        if args.anchor_init not in ("random", "image_centroid", "simplex"):
+            raise ValueError("--fixed_image_radius needs random, simplex or image_centroid anchors "
                              "whose depth is bounded")
         if args.loss == "axis":
             rc = args.curv ** 0.5
@@ -645,6 +698,9 @@ def main():
     print(f"Seed: {args.seed}")
 
     class_names, anchor_texts = build_anchors(args.generators, args.anchor_prompts)
+    if args.anchor_init == "simplex" and args.hyperbolic_dim < len(class_names) - 1:
+        raise ValueError(f"{len(class_names)} simplex anchors need --hyperbolic_dim >= "
+                         f"{len(class_names) - 1}")
     name_to_idx = {n: i for i, n in enumerate(class_names)}
     if args.anchor_init != "text" and (args.lambda_cap_in_class > 0
                                        or args.lambda_img_in_cap > 0):
@@ -654,8 +710,9 @@ def main():
         raise ValueError(f"--anchor_init {args.anchor_init} makes the anchors free "
                          f"parameters; the caption terms have no class anchor to attach "
                          f"to. Use --no_captions.")
-    if args.anchor_init == "image_centroid":
-        print(f"Class anchors: image centroids (text-free), {len(class_names)} classes")
+    if args.anchor_init in ("image_centroid", "simplex"):
+        kind = "image centroids" if args.anchor_init == "image_centroid" else "regular simplex"
+        print(f"Class anchors: {kind} (text-free), {len(class_names)} classes")
         for i, c in enumerate(class_names):
             print(f"  [{i}] {c}")
     else:
@@ -813,6 +870,9 @@ def main():
                 g = torch.Generator().manual_seed(args.seed)
                 t0 = torch.randn(len(class_names), args.hyperbolic_dim,
                                  generator=g).to(device)
+            elif args.anchor_init == "simplex":
+                t0 = regular_simplex(len(class_names), args.hyperbolic_dim,
+                                     device=device, dtype=torch.float32)
             elif args.anchor_init == "image_centroid":
                 t0 = model.projection(
                     class_centroids(model, train_ds, class_names, args, device).to(device))
@@ -822,8 +882,8 @@ def main():
                 t0 = F.normalize(t0, dim=-1) * args.anchor_init_norm
             t0 = t0.detach().float()
 
-        if args.anchor_init in ("image_centroid", "random"):
-            anchor_tangent = nn.Parameter(t0)
+        if args.anchor_init in ("image_centroid", "random", "simplex"):
+            anchor_tangent = nn.Parameter(t0, requires_grad=not args.freeze_anchors)
         else:
             anchor_t0 = t0                                        # fixed reference
             anchor_delta = nn.Parameter(torch.zeros_like(t0))
@@ -848,12 +908,23 @@ def main():
         # so half_aperture(t0) reports the pre-slaving value (16.0° where the run
         # actually starts at 32.5°). Say which is which instead of printing the stale one.
         psi_lo_d, psi_hi_d = args.psi_range
-        psi_txt = (f"ψ={0.5 * (psi_lo_d + psi_hi_d):.1f}° (free, mid --psi_range)"
-                   if args.loss == "axis"
-                   else f"ψ={math.degrees(psi0.mean()):.1f}° (=asin(2K/‖a‖))")
+        if args.loss == "axis" and args.fixed_psi:
+            psi_txt = f"ψ={args.fixed_psi:.1f}° (fixed during classifier training)"
+        elif args.loss == "axis":
+            psi_txt = f"ψ={0.5 * (psi_lo_d + psi_hi_d):.1f}° (free, mid --psi_range)"
+        else:
+            psi_txt = f"ψ={math.degrees(psi0.mean()):.1f}° (=asin(2K/‖a‖))"
         print(f"Anchor init ({args.anchor_init}): ‖t‖={t0.norm(dim=-1).mean():.2f}  "
               f"{psi_txt}  min∠={math.degrees(ang.min()):.1f}°  "
               f"mean∠={math.degrees(ang.mean()):.1f}°  (K={len(class_names)})")
+        if args.freeze_anchors:
+            print("Anchor directions: frozen")
+        if args.freeze_anchors and args.fixed_psi:
+            required_sep = 2 * args.fixed_psi + args.separation_margin
+            if math.degrees(ang.min()) + 1e-4 < required_sep:
+                raise ValueError(f"Fixed cones overlap at init: min axis angle "
+                                 f"{math.degrees(ang.min()):.2f}° < required "
+                                 f"{required_sep:.2f}°")
         if args.loss != "axis" and ang.min() < 2 * psi0.mean():
             print(f"  ⚠️  closest anchor pair is inside "
                   f"2ψ={math.degrees(2 * psi0.mean()):.1f}° — those cones overlap at init")
@@ -867,16 +938,22 @@ def main():
     # anchor still sits at the depth its aperture implies (2K/sin psi) for the plots and
     # for the checkpoint.
     anchor_psi_raw = None
+    fixed_sin_psi = None
     psi_lo, psi_hi = (math.radians(v) for v in args.psi_range)
     if args.loss == "axis":
-        anchor_psi_raw = nn.Parameter(torch.zeros(len(class_names), device=device))
+        if args.fixed_psi:
+            fixed_sin_psi = torch.full(
+                (len(class_names),), math.sin(math.radians(args.fixed_psi)), device=device)
+        else:
+            anchor_psi_raw = nn.Parameter(torch.zeros(len(class_names), device=device))
         if anchor_tangent is not None:
             # Slave the norm once here too, so the init report and the first snapshot
             # show the depth the aperture implies rather than --anchor_init_norm.
             with torch.no_grad():
                 rc = args.curv ** 0.5
-                sp0 = torch.sin(psi_lo + (psi_hi - psi_lo)
-                                * torch.sigmoid(anchor_psi_raw))
+                sp0 = (fixed_sin_psi if fixed_sin_psi is not None else
+                       torch.sin(psi_lo + (psi_hi - psi_lo)
+                                 * torch.sigmoid(anchor_psi_raw)))
                 want = torch.asinh(rc * depth_from_sin_psi(sp0, args.min_radius)) / rc
                 anchor_tangent.mul_(
                     want.unsqueeze(1)
@@ -884,6 +961,8 @@ def main():
 
     def sin_psi_now():
         """(K,) sine of each half-aperture, or None outside the axis loss."""
+        if fixed_sin_psi is not None:
+            return fixed_sin_psi
         if anchor_psi_raw is None:
             return None
         return torch.sin(psi_lo + (psi_hi - psi_lo) * torch.sigmoid(anchor_psi_raw))
@@ -983,6 +1062,7 @@ def main():
             nu=args.nu, lambda_sep=args.lambda_sep,
             separation_margin=args.separation_margin,
             inside_margin=args.inside_margin,
+            lambda_ce=args.lambda_ce, ce_tau_init=args.ce_tau_init,
         ).to(device)
         val_predict = lambda xi_, xa_: axis_cone_q(
             xi_, xa_, sin_psi_now().detach()).argmin(1)
@@ -1011,7 +1091,7 @@ def main():
     # particular is actively wrong on the aperture (see --anchor_lr).
     backbone = core.trainable_parameters() + list(cone_loss.parameters())
     geometric = [p for p in (anchor_tangent, anchor_delta, anchor_drift, anchor_psi_raw)
-                 if p is not None]
+                 if p is not None and p.requires_grad]
     anchor_lr = args.lr if args.anchor_lr is None else args.anchor_lr
     groups = []
     if backbone:
@@ -1083,6 +1163,9 @@ def main():
         snap_every = args.snapshot_every
         print(f"Per-epoch Poincare snapshots → {args.diag_plot_dir}"
               + (f" (+ every {snap_every} steps)" if snap_every else ""))
+        if args.plot_all_train:
+            print("Final Poincare snapshot will include every clean training image "
+                  "(one extra pass after training).")
 
     def snap_psi():
         """(K,) half-apertures for the snapshot, in the parameterisation actually in
@@ -1121,7 +1204,7 @@ def main():
                      "mean_anc_norm"]
     cap_keys  = ["inside_cap", "inside_img_cap", "mean_psi_cap",
                  "mean_xi_cap_anc", "mean_xi_img_cap", "mean_cap_norm"]
-    ce_keys   = ["loss_ce", "ce_tau"] if args.lambda_ce > 0 and not axis else []
+    ce_keys   = ["loss_ce", "ce_tau"] if args.lambda_ce > 0 else []
     axreg_keys = (["loss_axis", "frac_shallow"]
                   if args.lambda_axis > 0 and not axis else [])
     sep_keys  = (["loss_sep", "sep_max_deg"]
@@ -1349,6 +1432,8 @@ def main():
                   f"pos={avg['loss_pos']:.4f}  ap={avg['loss_ap']:+.4f}  "
                   f"neg={avg['loss_neg']:.4f}  sep={avg['loss_sep']:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
+            if ce_keys:
+                print(f"           CE={avg['loss_ce']:.4f}  τ={avg['ce_tau']:.3f}")
             # psi SPREAD is the line to read: if it stays a point, every class has the
             # same aperture and argmin q IS argmax cos, however high the accuracy goes.
             # inside vs nu is the coverage the cone actually reached; viol_mass is the
@@ -1498,8 +1583,9 @@ def main():
                     "lr_min":          args.lr_min,
                     # The aperture is a free parameter now, not a function of the anchor
                     # norm. The eval must read THIS, not re-derive it from the depth.
-                    "anchor_sin_psi":  (sin_psi_now().detach().cpu()
-                                        if anchor_psi_raw is not None else None),
+                    "anchor_sin_psi":  (sin_psi_now().detach().cpu() if axis else None),
+                    "fixed_psi":       args.fixed_psi,
+                    "freeze_anchors":  args.freeze_anchors,
                     "psi_range":       args.psi_range,
                     "pos_mode":        args.pos_mode,
                     "neg_samples":     args.neg_samples,
@@ -1538,6 +1624,121 @@ def main():
                 out_path,
             )
             print(f"  ↳ saved checkpoint (balanced val={100*best_balanced:.1f}%) → {out_path}")
+
+    if args.plot_all_train or args.calibrate_psi:
+        # Calibrate and plot the checkpoint selected by validation, not whichever weights
+        # happened to remain after the last epoch.
+        best_ckpt = torch.load(out_path, map_location=device, weights_only=False)
+        core.clip.load_state_dict(best_ckpt["lora_state"])
+        core.projection.load_state_dict(best_ckpt["projection"])
+
+        # One final pass is enough to show every train row. Doing this for every frame
+        # would turn 137 cheap snapshots into 137 additional full-dataset evaluations.
+        train_ds.train_augment = False
+        plot_loader = DataLoader(
+            train_ds, batch_size=args.batch_size, shuffle=False,
+            num_workers=args.num_workers, pin_memory=True,
+        )
+        all_emb, all_labels = collect_plot_embeddings(
+            model, plot_loader, name_to_idx, device,
+        )
+        with torch.no_grad():
+            t_anc_plot = best_ckpt.get("anchor_tangent")
+            x_anc_plot = (exp_map0(t_anc_plot.float().to(device), curv=args.curv)
+                          if t_anc_plot is not None
+                          else core.encode_text(anchor_ids, anchor_mask)[0])
+        plot_sin_psi = best_ckpt.get("anchor_sin_psi")
+        if plot_sin_psi is not None:
+            plot_sin_psi = plot_sin_psi.to(device)
+
+        if args.calibrate_psi:
+            target_coverage = 1.0 - args.nu
+            x_train = torch.from_numpy(all_emb)
+            y_train = torch.tensor(all_labels)
+            required_psi, _ = calibrate_axis_apertures(
+                x_train, y_train, x_anc_plot.cpu(), target_coverage,
+                inside_margin=math.radians(args.inside_margin),
+            )
+            calibrated_psi = required_psi.clamp(psi_lo, psi_hi)
+
+            dots = (F.normalize(x_train, dim=-1)
+                    * F.normalize(x_anc_plot.cpu(), dim=-1)[y_train]).sum(-1).clamp(-1, 1)
+            padded = torch.arccos(dots) + math.radians(args.inside_margin)
+            train_coverage = torch.stack([
+                (padded[y_train == k] <= calibrated_psi[k]).float().mean()
+                for k in range(len(class_names))
+            ])
+
+            axes = F.normalize(x_anc_plot, dim=-1)
+            cos = (axes @ axes.T).clamp(-1 + 1e-6, 1 - 1e-6)
+            iu = torch.triu_indices(len(class_names), len(class_names), offset=1,
+                                    device=device)
+            sep = torch.arccos(cos[iu[0], iu[1]])
+            need = (calibrated_psi.to(device)[iu[0]]
+                    + calibrated_psi.to(device)[iu[1]]
+                    + math.radians(args.separation_margin))
+            overlap = need > sep + 1e-6
+            range_ok = bool((required_psi <= psi_hi + 1e-7).all().item())
+            coverage_ok = bool((train_coverage + 1e-7 >= target_coverage).all().item())
+            feasible = range_ok and coverage_ok and not bool(overlap.any().item())
+
+            print(f"\nAperture calibration on {len(all_labels)} best-checkpoint train "
+                  f"embeddings: target={100*target_coverage:.1f}% + "
+                  f"{args.inside_margin:g}° inside margin")
+            for k, name in enumerate(class_names):
+                print(f"  {name:14s} required={math.degrees(required_psi[k].item()):5.1f}°  "
+                      f"candidate={math.degrees(calibrated_psi[k].item()):5.1f}°  "
+                      f"covered={100*train_coverage[k].item():5.1f}%")
+            n_overlap = int(overlap.sum().item())
+            print(f"  non-overlap: {len(overlap) - n_overlap}/{len(overlap)} "
+                  f"pairs feasible")
+
+            report = {
+                "applied": feasible,
+                "target_coverage": target_coverage,
+                "inside_margin_deg": args.inside_margin,
+                "required_psi_deg": torch.rad2deg(required_psi).tolist(),
+                "candidate_psi_deg": torch.rad2deg(calibrated_psi).tolist(),
+                "train_coverage": train_coverage.tolist(),
+                "overlapping_pairs": n_overlap,
+                "num_train": len(all_labels),
+            }
+            best_ckpt["aperture_calibration"] = report
+
+            if feasible:
+                plot_sin_psi = torch.sin(calibrated_psi).to(device)
+                rc = args.curv ** 0.5
+                want = torch.asinh(
+                    rc * depth_from_sin_psi(plot_sin_psi, args.min_radius)) / rc
+                calibrated_tangent = (F.normalize(t_anc_plot.float().to(device), dim=-1)
+                                      * want.unsqueeze(1))
+                x_anc_plot = exp_map0(calibrated_tangent, curv=args.curv)
+                best_ckpt["anchor_tangent"] = calibrated_tangent.cpu()
+                best_ckpt["anchor_sin_psi"] = plot_sin_psi.cpu()
+                val_cal = run_validation(
+                    core, val_loader, x_anc_plot, class_names, device, args.curv,
+                    predict=lambda xi_, xa_: axis_cone_q(
+                        xi_, xa_, plot_sin_psi).argmin(1),
+                )
+                best_ckpt["val_balanced_calibrated"] = val_cal["balanced_acc"]
+                print(f"  applied: calibrated balanced val="
+                      f"{100*val_cal['balanced_acc']:.1f}%")
+            else:
+                print("  NOT applied: coverage and non-overlap are jointly infeasible; "
+                      "the fixed training aperture remains in the checkpoint")
+            torch.save(best_ckpt, out_path)
+
+        if args.plot_all_train:
+            plot_epoch_snapshot(
+                all_emb, all_labels, x_anc_plot, class_names,
+                Path(args.diag_plot_dir) / "train_all_final.png",
+                curv=args.curv, min_radius=args.min_radius,
+                psi=(torch.arcsin(plot_sin_psi).cpu().numpy()
+                     if plot_sin_psi is not None else None),
+                state=None, seed=args.seed,
+                title=(f"best epoch {best_ckpt['epoch']} · all {len(all_labels)} "
+                       "training images"),
+            )
 
     if stat_csv is not None:
         stat_csv.close()
