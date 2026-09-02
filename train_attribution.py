@@ -36,7 +36,8 @@ from data.iab_clip_dataset import IABCLIPDataset
 from geometry.lorentz import exp_map0, half_aperture, log_map0
 from models.attribution_clip import AttributionCLIP
 from losses.attribution_loss import EntailmentConeLoss, _pairwise_xi, predict_class
-from losses.axis_cone_loss import (AxisConeLoss, axis_cone_q, calibrate_axis_apertures,
+from losses.axis_cone_loss import (AxisConeLoss, axis_chord2, axis_cone_q,
+                                   calibrate_axis_apertures, cone_inner_wall_chord2,
                                    depth_from_sin_psi, regular_simplex,
                                    sin_psi_from_depth)
 
@@ -272,6 +273,15 @@ def parse_args():
                    help="--loss axis only. Degrees by which covered training images must "
                         "sit inside their correct cone wall; applied to the nu-coverage "
                         "constraint, not to the classifier score.")
+    p.add_argument("--lambda_cover", type=float, default=0.0,
+                   help="--loss axis only. Weight of the per-class hinge outside "
+                        "psi-inside_margin. Unlike the aperture block, this term moves "
+                        "image/axis directions while holding psi fixed, so it directly "
+                        "optimises absolute cone coverage rather than relative ranking.")
+    p.add_argument("--lambda_center", type=float, default=1.0,
+                   help="--loss axis only. Weight of the always-on pull toward the correct "
+                        "axis. Keep small when --lambda_cover is active so easy points do "
+                        "not dominate the angular tail.")
     p.add_argument("--theta_max",      type=float, default=150.0,
                    help="Degrees. A guard against antipodal pairs, not a shaping term: the "
                         "euclidean model's widest pair is 132.2°, so it stays inert on a "
@@ -563,7 +573,7 @@ def class_centroids(core, dataset, class_names, args, device,
 
 @torch.no_grad()
 def run_validation(model_inner, val_loader, x_anc, class_names, device, curv,
-                   collect: int = 0, predict=None) -> dict:
+                   collect: int = 0, predict=None, inside=None) -> dict:
     """`predict(x_img, x_anc) -> (B,)` is the decision rule; defaults to argmin xi. The
     axis loss reads a different quantity, and evaluating a model with the wrong rule is
     a failure that shows up as a plausible-looking accuracy, not as an error.
@@ -577,6 +587,7 @@ def run_validation(model_inner, val_loader, x_anc, class_names, device, curv,
 
     per_class_correct = {c: 0 for c in class_names}
     per_class_total   = {c: 0 for c in class_names}
+    per_class_inside  = {c: 0 for c in class_names} if inside is not None else None
     idx_of = {c: i for i, c in enumerate(class_names)}
     emb, emb_lab = [], []
     quota = max(1, collect // len(class_names)) if collect else 0
@@ -597,10 +608,16 @@ def run_validation(model_inner, val_loader, x_anc, class_names, device, curv,
                 emb_lab.extend(idx_of[batch["generator"][j]] for j in keep)
         pred_idx = (predict(x_img, x_anc) if predict is not None
                     else predict_class(x_img, x_anc, curv=curv))
+        true_idx = torch.tensor([idx_of[g] for g in batch["generator"]],
+                                device=device, dtype=torch.long)
+        covered = inside(x_img, x_anc, true_idx) if inside is not None else None
         pred_names = [class_names[i] for i in pred_idx.tolist()]
-        for pred, gt in zip(pred_names, batch["generator"]):
+        covered_list = covered.tolist() if covered is not None else None
+        for j, (pred, gt) in enumerate(zip(pred_names, batch["generator"])):
             per_class_total[gt] += 1
             per_class_correct[gt] += int(pred == gt)
+            if covered_list is not None:
+                per_class_inside[gt] += int(covered_list[j])
 
     total = sum(per_class_total.values())
     correct = sum(per_class_correct.values())
@@ -609,7 +626,7 @@ def run_validation(model_inner, val_loader, x_anc, class_names, device, curv,
         for c in class_names
     }
     balanced = sum(per_class_acc.values()) / len(class_names)
-    return {
+    result = {
         "overall_acc":   correct / total if total else 0.0,
         "balanced_acc":  balanced,
         "per_class_acc": per_class_acc,
@@ -617,6 +634,17 @@ def run_validation(model_inner, val_loader, x_anc, class_names, device, curv,
         "emb":           torch.cat(emb).numpy() if emb else None,
         "emb_labels":    emb_lab,
     }
+    if per_class_inside is not None:
+        per_class_coverage = {
+            c: per_class_inside[c] / per_class_total[c] if per_class_total[c] else 0.0
+            for c in class_names
+        }
+        result.update({
+            "per_class_coverage": per_class_coverage,
+            "balanced_coverage": sum(per_class_coverage.values()) / len(class_names),
+            "min_coverage": min(per_class_coverage.values()),
+        })
+    return result
 
 
 @torch.no_grad()
@@ -650,8 +678,8 @@ def main():
         raise ValueError("--psi_range must satisfy 0 < MIN <= MAX < 90 degrees")
     if args.loss == "axis" and not 0 < args.nu < 1:
         raise ValueError("--nu must be in (0, 1) for the axis coverage objective")
-    if args.loss == "axis" and args.inside_margin >= args.psi_range[1]:
-        raise ValueError("--inside_margin must be smaller than the maximum --psi_range")
+    if args.loss == "axis" and args.inside_margin >= args.psi_range[0]:
+        raise ValueError("--inside_margin must be smaller than the minimum --psi_range")
     if args.fixed_psi and args.loss != "axis":
         raise ValueError("--fixed_psi is only defined for --loss axis")
     if args.fixed_psi and not (args.psi_range[0] <= args.fixed_psi <= args.psi_range[1]):
@@ -1063,11 +1091,18 @@ def main():
             separation_margin=args.separation_margin,
             inside_margin=args.inside_margin,
             lambda_ce=args.lambda_ce, ce_tau_init=args.ce_tau_init,
+            lambda_cover=args.lambda_cover, lambda_center=args.lambda_center,
         ).to(device)
         val_predict = lambda xi_, xa_: axis_cone_q(
             xi_, xa_, sin_psi_now().detach()).argmin(1)
+        def val_inside(xi_, xa_, labels_):
+            chord = axis_chord2(xi_, xa_).gather(1, labels_.unsqueeze(1)).squeeze(1)
+            wall = cone_inner_wall_chord2(
+                sin_psi_now().detach(), math.radians(args.inside_margin))
+            return chord <= wall[labels_]
     else:
         val_predict = None
+        val_inside = None
         cone_loss = EntailmentConeLoss(
             curv=args.curv, min_radius=args.min_radius,
             margin=args.margin, lambda_neg=args.lambda_neg,
@@ -1136,6 +1171,9 @@ def main():
     scaler = GradScaler("cuda")
     if args.lambda_ce > 0:
         print(f"CE ranking term: λ_ce={args.lambda_ce}  τ_init={args.ce_tau_init} (learned)")
+    if args.loss == "axis" and args.lambda_cover > 0:
+        print(f"Coverage term: λ_cover={args.lambda_cover}  "
+              f"λ_center={args.lambda_center}  effective wall=ψ-{args.inside_margin:g}°")
     if use_caps:
         print(f"Hierarchical mode: λ_cap_in_class={args.lambda_cap_in_class} "
               f"λ_img_in_cap={args.lambda_img_in_cap}")
@@ -1185,13 +1223,15 @@ def main():
               f"{Path(args.diag_plot_dir) / 'stats.csv'}")
 
     best_balanced = -1.0
+    best_min_coverage = -1.0
+    best_meets_coverage = False
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ── Training loop ─────────────────────────────────────────────────────────
     axis = args.loss == "axis"
     if axis:
-        base_keys = ["loss_pos", "loss_neg", "loss_ap", "q_pos", "inside_img",
+        base_keys = ["loss_pos", "loss_cover", "loss_neg", "loss_ap", "q_pos", "inside_img",
                      "viol_mass", "cone_acc", "loss_sep", "sep_overlap",
                      "psi_min_deg", "psi_deg", "psi_max_deg",
                      "sep_min_deg", "sep_mean_deg", "anc_norm"]
@@ -1409,6 +1449,7 @@ def main():
                 if axis:
                     post = {
                         "loss": f"{sums['loss']/step:.3f}",
+                        "cover": f"{sums['loss_cover']/step:.3f}",
                         "q":    f"{sums['q_pos']/step:.3f}",
                         "acc":  f"{sums['cone_acc']/step:.3f}",
                         "ψ":    f"{sums['psi_deg']/step:.1f}°",
@@ -1429,7 +1470,8 @@ def main():
         avg = {k: v / steps_per_epoch for k, v in sums.items()}
         if args.loss == "axis":
             print(f"\nEpoch {epoch}: train loss={avg['loss']:.4f}  "
-                  f"pos={avg['loss_pos']:.4f}  ap={avg['loss_ap']:+.4f}  "
+                  f"pos={avg['loss_pos']:.4f}  cover={avg['loss_cover']:.4f}  "
+                  f"ap={avg['loss_ap']:+.4f}  "
                   f"neg={avg['loss_neg']:.4f}  sep={avg['loss_sep']:.4f}  "
                   f"lr={scheduler.get_last_lr()[0]:.2e}")
             if ce_keys:
@@ -1519,11 +1561,17 @@ def main():
                 x_anc_val = exp_map0(t_anc_val.float(), curv=args.curv)
         val = run_validation(core, val_loader, x_anc_val, class_names, device, args.curv,
                              collect=4000 if plot_epoch_snapshot else 0,
-                             predict=val_predict)
-        print(f"  val: overall={100*val['overall_acc']:.1f}%  "
-              f"balanced={100*val['balanced_acc']:.1f}%  ({val['total']} samples)")
+                             predict=val_predict, inside=val_inside)
+        val_line = (f"  val: overall={100*val['overall_acc']:.1f}%  "
+                    f"balanced={100*val['balanced_acc']:.1f}%")
+        if "balanced_coverage" in val:
+            val_line += (f"  coverage={100*val['balanced_coverage']:.1f}%  "
+                         f"worst={100*val['min_coverage']:.1f}%")
+        print(val_line + f"  ({val['total']} samples)")
         for c, a in val["per_class_acc"].items():
-            print(f"    {c:10s}: {100*a:5.1f}%")
+            coverage = (f"  cover={100*val['per_class_coverage'][c]:5.1f}%"
+                        if "per_class_coverage" in val else "")
+            print(f"    {c:14s}: acc={100*a:5.1f}%{coverage}")
 
         if plot_epoch_snapshot is not None:
             # diag_state carries the HoroPCA fit and the Frechet-mean isometry from
@@ -1536,9 +1584,28 @@ def main():
                 psi=snap_psi(), state=diag_state, seed=args.seed,
                 title=f"epoch {epoch}")
 
-        # ── Save best checkpoint by balanced val accuracy ────────────────────
-        if val["balanced_acc"] > best_balanced:
+        # With an explicit coverage objective, accuracy alone can select a model that
+        # ranks classes correctly while every point remains outside every cone. Prefer
+        # the highest-accuracy feasible checkpoint; until one exists, advance the worst
+        # class's coverage and use balanced accuracy only to break ties.
+        coverage_selection = axis and args.lambda_cover > 0
+        meets_coverage = (coverage_selection
+                          and val["min_coverage"] >= 1.0 - args.nu - 1e-12)
+        if coverage_selection:
+            save_best = ((meets_coverage and not best_meets_coverage)
+                         or (meets_coverage and best_meets_coverage
+                             and val["balanced_acc"] > best_balanced)
+                         or (not meets_coverage and not best_meets_coverage
+                             and (val["min_coverage"] > best_min_coverage + 1e-12
+                                  or (abs(val["min_coverage"] - best_min_coverage) <= 1e-12
+                                      and val["balanced_acc"] > best_balanced))))
+        else:
+            save_best = val["balanced_acc"] > best_balanced
+        if save_best:
             best_balanced = val["balanced_acc"]
+            if coverage_selection:
+                best_min_coverage = val["min_coverage"]
+                best_meets_coverage = meets_coverage
             torch.save(
                 {
                     "lora_state":      core.clip.state_dict(),
@@ -1579,6 +1646,8 @@ def main():
                     # not an error.
                     "loss":            args.loss,
                     "lambda_aperture": args.lambda_aperture,
+                    "lambda_cover":    args.lambda_cover,
+                    "lambda_center":   args.lambda_center,
                     "nu":              args.nu,
                     "lr_min":          args.lr_min,
                     # The aperture is a free parameter now, not a function of the anchor
@@ -1619,11 +1688,16 @@ def main():
                     "generators":      args.generators,
                     "semantics":       args.semantics,
                     "val_balanced":    val["balanced_acc"],
+                    "val_balanced_coverage": val.get("balanced_coverage"),
+                    "val_min_coverage": val.get("min_coverage"),
                     "epoch":           epoch,
                 },
                 out_path,
             )
-            print(f"  ↳ saved checkpoint (balanced val={100*best_balanced:.1f}%) → {out_path}")
+            reason = (f", worst coverage={100*best_min_coverage:.1f}%"
+                      if coverage_selection else "")
+            print(f"  ↳ saved checkpoint (balanced val={100*best_balanced:.1f}%"
+                  f"{reason}) → {out_path}")
 
     if args.plot_all_train or args.calibrate_psi:
         # Calibrate and plot the checkpoint selected by validation, not whichever weights
@@ -1744,7 +1818,12 @@ def main():
         stat_csv.close()
         print(f"Step-level trace: {Path(args.diag_plot_dir) / 'stats.csv'}")
 
-    print(f"\nBest balanced val accuracy: {100*best_balanced:.1f}%  ({out_path})")
+    if axis and args.lambda_cover > 0:
+        status = "coverage target met" if best_meets_coverage else "best available coverage"
+        print(f"\nSelected checkpoint: balanced val={100*best_balanced:.1f}%  "
+              f"worst-class coverage={100*best_min_coverage:.1f}% ({status})  ({out_path})")
+    else:
+        print(f"\nBest balanced val accuracy: {100*best_balanced:.1f}%  ({out_path})")
 
 
 if __name__ == "__main__":

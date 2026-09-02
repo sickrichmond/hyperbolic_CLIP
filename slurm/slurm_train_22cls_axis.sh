@@ -39,6 +39,8 @@
 #                     Images stay at tangent radius 4 and cone walls keep a 2° gap.
 #   RUN=axis_simplex  fixed regular-simplex axes and fixed 45° cones train the image
 #                     classifier; the best checkpoint is then calibrated on all train data.
+#   RUN=axis_simplex_cover  revised simplex run: the encoder is explicitly penalised
+#                          outside the effective 43° wall, with lighter centre/CE terms.
 #
 # Read out of the epoch line, in order of importance:
 #   ψ∈[min,max]  must SPREAD. If the apertures stay equal then argmin q IS argmax cos,
@@ -63,6 +65,7 @@
 #          sbatch --export=ALL,RUN=axis_constrained slurm/slurm_train_22cls_axis.sh
 #          sbatch --export=ALL,RUN=axis_anchors slurm/slurm_train_22cls_axis.sh
 #          sbatch --export=ALL,RUN=axis_simplex slurm/slurm_train_22cls_axis.sh
+#          sbatch --export=ALL,RUN=axis_simplex_cover slurm/slurm_train_22cls_axis.sh
 # ==========================================================================
 
 #SBATCH --account=EUHPC_D35_189
@@ -98,6 +101,7 @@ MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 RUN=${RUN:-axis}
 PSI_RANGE="5.0 60.0"
 NEG_SAMPLES=8
+EPOCHS=10
 
 # peft re.fullmatch's this against the base model's module names, so one string
 # picks both the encoder and the layer range: vision blocks 12-23, q and v.
@@ -118,7 +122,12 @@ case "$RUN" in
     NEG_SAMPLES=0
     EXTRA="--optimizer sgd --lr 1e-3 --lr_min 1e-4 --anchor_init simplex --freeze_anchors --fixed_psi 45.0 --fixed_image_radius 4.0 --radial_margin 0.5 --inside_margin 2.0 --separation_margin 2.0 --lambda_aperture 0 --lambda_sep 0 --lambda_ce 1.0 --calibrate_psi --log_every 10 --snapshot_every 100 --plot_all_train"
     ;;
-  *) echo "RUN must be axis, axis_adam, axis_constrained, axis_anchors, or axis_simplex (got '$RUN')"; exit 2 ;;
+  axis_simplex_cover)
+    NEG_SAMPLES=0
+    EPOCHS=20
+    EXTRA="--optimizer sgd --lr 1e-3 --lr_min 1e-4 --anchor_init simplex --freeze_anchors --fixed_psi 45.0 --fixed_image_radius 4.0 --radial_margin 0.5 --inside_margin 2.0 --separation_margin 2.0 --lambda_aperture 0 --lambda_sep 0 --lambda_neg 0 --lambda_cover 5.0 --lambda_center 0.1 --lambda_ce 0.5 --calibrate_psi --log_every 10 --snapshot_every 100 --plot_all_train"
+    ;;
+  *) echo "RUN must be axis, axis_adam, axis_constrained, axis_anchors, axis_simplex, or axis_simplex_cover (got '$RUN')"; exit 2 ;;
 esac
 CKPT=$OUT/attribution_22cls_${RUN}_vitl14.pt
 
@@ -154,7 +163,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     $EXTRA \
     --no_captions \
     --batch_size      256 \
-    --num_epochs      10 \
+    --num_epochs      $EPOCHS \
     --num_workers     8 \
     --split_manifest  $MANIFEST \
     --output          $CKPT

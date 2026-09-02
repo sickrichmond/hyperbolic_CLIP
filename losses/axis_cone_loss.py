@@ -35,20 +35,26 @@ Write K = min_radius, a_k for the class anchor on the hyperboloid, x for an imag
 Loss — the goal is the NARROWEST cone per class that still holds its own samples, with a
 little slack so it does not memorise the training set:
 
-    L =  mean_i [ c_{i,y_i} / W_{y_i}.detach() ]                          pull
+    L =  λ_ctr · mean_i [ c_{i,y_i} / W_{y_i}.detach() ]                  centre
+      +  λ_cov · mean_k mean_{i:y_i=k}
+                    max(0, c_{i,y_i}/W_in(k).detach() − 1)            coverage
       +  λ_ap · mean_i [ log W_{y_i} + max(0, q_ap − 1)/ν ]               aperture
       +  λ_neg · mean_{k ∈ N_i} max(0, 1 − q_ik)²                         exclusion
       +  λ_sep · mean_{overlapping k<l}
                     max(0, ψ_k + ψ_l + m_sep − ∠(u_k,u_l))²           separation
       +  λ_ce · CE(−q_i / τ, y_i)                                      ranking
-    where q_ap = chord(θ_{i,y_i} + m_in)².detach() / W_{y_i}
+    where W_in(k) = chord(ψ_k − m_in)² and
+          q_ap = chord(θ_{i,y_i} + m_in)².detach() / W_{y_i}
 
-The pull is the squared normalised distance from the right axis: zero only ON the axis,
-gradient everywhere, never saturating. The exclusion term says "stay out of other people's
-cones". The separation term additionally makes the cones themselves disjoint: two angular
-caps cannot intersect when their axis angle is at least the sum of their half-apertures,
-with m_sep reserving optional empty space between their walls. Padding each positive angle
-by m_in keeps the covered training samples that far inside their own wall.
+The centre term is the squared normalised distance from the right axis: zero only ON the
+axis, gradient everywhere, never saturating. It improves the mean but, alone, lets easy
+samples dominate while the class tail remains outside. The coverage term fixes that exact
+failure: it is zero only after an image crosses the inner wall ψ-m_in, reaches image/axis
+directions but not ψ, and is averaged per class so a difficult class cannot be hidden by
+the others. The exclusion term says "stay out of other people's cones". The separation term
+additionally makes the cones themselves disjoint: two angular caps cannot intersect when
+their axis angle is at least the sum of their half-apertures, with m_sep reserving optional
+empty space between their walls.
 The optional cross-entropy directly trains the argmin-q decision rule; unlike exclusion it
 still has a gradient when an image is outside every wrong cone but ranks the wrong one first.
 
@@ -191,6 +197,14 @@ def cone_wall_chord2(sin_psi: torch.Tensor) -> torch.Tensor:
     return 2.0 * sin2 / (1.0 + cos_psi)
 
 
+def cone_inner_wall_chord2(sin_psi: torch.Tensor,
+                           inside_margin: float) -> torch.Tensor:
+    """Squared chord radius at ``psi - inside_margin`` (margin in radians)."""
+    psi = torch.arcsin(sin_psi.clamp(max=1.0))
+    inner_psi = (psi - inside_margin).clamp_min(1e-6)
+    return cone_wall_chord2(torch.sin(inner_psi))
+
+
 def sin_psi_from_depth(x_anc: torch.Tensor, min_radius: float) -> torch.Tensor:
     """(K,) the COUPLED parameterisation, sin ψ = min(1, 2K/‖a‖). Kept for checkpoints
     written before psi became a free parameter, and to convert a psi back to a depth."""
@@ -233,7 +247,8 @@ class AxisConeLoss(nn.Module):
                  neg_samples: int = 0, lambda_aperture: float = 1.0,
                  nu: float = 0.05, lambda_sep: float = 0.0,
                  separation_margin: float = 0.0, inside_margin: float = 0.0,
-                 lambda_ce: float = 0.0, ce_tau_init: float = 1.0):
+                 lambda_ce: float = 0.0, ce_tau_init: float = 1.0,
+                 lambda_cover: float = 0.0, lambda_center: float = 1.0):
         """neg_samples = 0 uses all K-1 negatives; k > 0 keeps k at random per sample.
         nu is the fraction of a class's own samples the cone is allowed to leave outside.
         lambda_aperture scales the whole aperture block; it cancels out of the equilibrium
@@ -248,6 +263,8 @@ class AxisConeLoss(nn.Module):
         self.nu = nu
         self.lambda_sep = lambda_sep
         self.lambda_ce = lambda_ce
+        self.lambda_cover = lambda_cover
+        self.lambda_center = lambda_center
         self.separation_margin = math.radians(separation_margin)
         self.inside_margin = math.radians(inside_margin)
         if lambda_ce > 0:
@@ -290,6 +307,20 @@ class AxisConeLoss(nn.Module):
         L_ap = (torch.log(w_pos + 1e-12)
                 + (q_ap - 1.0).clamp_min(0.0) / self.nu).mean()
 
+        # Unlike L_ap, this reaches the image/axis directions and holds psi fixed. It
+        # therefore cannot take the old "widen the cone" shortcut. The inner wall makes
+        # theta <= psi-inside_margin the exact zero-loss condition without differentiating
+        # through acos on the image path. Average per class: the requested coverage is a
+        # constraint on every class, not merely on the pooled batch.
+        psi = torch.arcsin(sin_psi.clamp(max=1.0))
+        inner_wall2 = cone_inner_wall_chord2(sin_psi, self.inside_margin)
+        q_inner = c_pos / (inner_wall2[labels].detach() + 1e-12)
+        cover_violation = (q_inner - 1.0).clamp_min(0.0)
+        present = labels.unique()
+        L_cover = torch.stack([
+            cover_violation[labels == k].mean() for k in present
+        ]).mean()
+
         neg_mask = torch.ones(B, K, device=device, dtype=torch.bool)
         neg_mask.scatter_(1, pos_idx, False)
         neg_mask = _subsample(neg_mask, self.neg_samples)
@@ -301,7 +332,6 @@ class AxisConeLoss(nn.Module):
         else:
             L_neg = torch.zeros((), device=device)
 
-        psi = torch.arcsin(sin_psi.clamp(max=1.0))
         if K > 1:
             d = F.normalize(x_anc, dim=-1)
             cos = (d @ d.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
@@ -324,7 +354,8 @@ class AxisConeLoss(nn.Module):
             tau = F.softplus(self.ce_tau_raw)
             L_ce = F.cross_entropy(-q / tau, labels)
 
-        loss = (L_pos + self.lambda_aperture * L_ap + self.lambda_neg * L_neg
+        loss = (self.lambda_center * L_pos + self.lambda_cover * L_cover
+                + self.lambda_aperture * L_ap + self.lambda_neg * L_neg
                 + self.lambda_sep * L_sep + self.lambda_ce * L_ce)
 
         with torch.no_grad():
@@ -339,6 +370,7 @@ class AxisConeLoss(nn.Module):
                 sep_min = sep_mean = torch.full((), float("nan"), device=device)
             stats = {
                 "loss_pos":     L_pos.detach(),
+                "loss_cover":   L_cover.detach(),
                 "loss_neg":     L_neg.detach(),
                 "loss_ap":      L_ap.detach(),
                 "loss_sep":     L_sep.detach(),

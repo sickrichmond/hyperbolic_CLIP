@@ -2,7 +2,7 @@
 
     python -m tests.test_axis_cone_loss
 
-Thirteen invariants. The first three pin down that q is the quantity we think it is; the
+Fourteen invariants. The first three pin down that q is the quantity we think it is; the
 rest pin down the failures that would be invisible in a training log — a dead gradient,
 a coupled parameter that hands the optimiser a shortcut, and a decision rule that has
 quietly become a cosine.
@@ -33,6 +33,8 @@ quietly become a cosine.
  10. overlapping cones pay exactly their squared angular violation, including the
      requested empty margin; disjoint cones pay zero.
  11. the inside margin is part of coverage, not the classification score.
+ 12. the encoder-facing coverage hinge fires at psi-inside_margin, moves image/axis
+     directions, and cannot widen psi.
 """
 import math
 
@@ -315,6 +317,29 @@ def test_inside_margin():
           "fails a 2° padded coverage constraint")
 
 
+def test_encoder_coverage_hinge():
+    psi = _sin(45.0).clone().requires_grad_(True)
+    labels = torch.zeros(1, dtype=torch.long)
+    x = _at_angle(math.radians(44.0)).clone().requires_grad_(True)
+    loss, stats = AxisConeLoss(
+        min_radius=K_R, lambda_neg=0.0, lambda_aperture=0.0,
+        lambda_center=0.0, lambda_cover=1.0, inside_margin=2.0,
+    )(x, _axis(), labels, psi)
+    loss.backward()
+    assert stats["q_pos"] < 1.0, "44° is inside the actual 45° cone"
+    assert stats["loss_cover"] > 0, "44° is outside the effective 43° wall"
+    assert x.grad.abs().max() > 0, "coverage must move the image direction"
+    assert psi.grad is None or abs(psi.grad.item()) < 1e-12, "coverage must not widen psi"
+
+    _, inside = AxisConeLoss(
+        min_radius=K_R, lambda_neg=0.0, lambda_aperture=0.0,
+        lambda_center=0.0, lambda_cover=1.0, inside_margin=2.0,
+    )(_at_angle(math.radians(42.0)), _axis(), labels, _sin(45.0))
+    assert inside["loss_cover"].item() == 0.0
+    print("12 ok coverage hinge: actual 45° wall stays fixed while the encoder is pulled "
+          "across the effective 43° wall")
+
+
 def test_simplex_and_exact_calibration():
     axes = regular_simplex(4, D)
     gram = axes @ axes.T
@@ -334,7 +359,7 @@ def test_simplex_and_exact_calibration():
     )
     assert torch.allclose(torch.rad2deg(psi), torch.tensor(angles) + 2, atol=1e-9)
     assert torch.equal(covered, torch.ones(4))
-    print("12 ok regular simplex has cos=-1/(K-1); exact calibration recovers each "
+    print("13 ok regular simplex has cos=-1/(K-1); exact calibration recovers each "
           "class radius plus its inside margin")
 
 
@@ -349,7 +374,7 @@ def test_q_cross_entropy_ranks_classes():
     )(x, anchors, labels, sp)
     assert ranked > plain
     assert stats["loss_ce"] > 0 and abs(stats["ce_tau"].item() - 1) < 1e-12
-    print("13 ok cross-entropy on -q penalises a wrong class ranking")
+    print("14 ok cross-entropy on -q penalises a wrong class ranking")
 
 
 if __name__ == "__main__":
@@ -364,6 +389,7 @@ if __name__ == "__main__":
     test_detaches_hold()
     test_overlap_penalty()
     test_inside_margin()
+    test_encoder_coverage_hinge()
     test_simplex_and_exact_calibration()
     test_q_cross_entropy_ranks_classes()
     print("\nall axis-cone invariants hold")
