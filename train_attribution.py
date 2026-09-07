@@ -21,7 +21,6 @@ Usage:
 """
 import argparse
 import math
-import os
 from pathlib import Path
 
 import torch
@@ -32,6 +31,7 @@ from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 from transformers import CLIPTokenizer
 
+from checkpoint_io import atomic_torch_save
 from data.iab_clip_dataset import IABCLIPDataset
 from geometry.lorentz import exp_map0, half_aperture, log_map0
 from models.attribution_clip import AttributionCLIP
@@ -564,9 +564,7 @@ def class_centroids(core, dataset, class_names, args, device,
 
     if cache is not None:
         cache.parent.mkdir(parents=True, exist_ok=True)
-        tmp = cache.with_suffix(cache.suffix + f".tmp{os.getpid()}")
-        torch.save({"class_names": class_names, "mean_clip": mean_clip}, tmp)
-        os.replace(tmp, cache)   # atomic: two jobs may race to build the cache
+        atomic_torch_save({"class_names": class_names, "mean_clip": mean_clip}, cache)
         print(f"Anchor centroids: cached → {cache}")
     return mean_clip
 
@@ -1606,7 +1604,7 @@ def main():
             if coverage_selection:
                 best_min_coverage = val["min_coverage"]
                 best_meets_coverage = meets_coverage
-            torch.save(
+            atomic_torch_save(
                 {
                     "lora_state":      core.clip.state_dict(),
                     "projection":      core.projection.state_dict(),
@@ -1800,7 +1798,7 @@ def main():
             else:
                 print("  NOT applied: coverage and non-overlap are jointly infeasible; "
                       "the fixed training aperture remains in the checkpoint")
-            torch.save(best_ckpt, out_path)
+            atomic_torch_save(best_ckpt, out_path)
 
         if args.plot_all_train:
             plot_epoch_snapshot(

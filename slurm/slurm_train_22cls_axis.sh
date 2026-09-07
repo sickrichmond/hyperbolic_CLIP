@@ -82,6 +82,9 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=richitrebbia@gmail.com
 
+# Propagate training/save failures to SLURM; never print Done after a failed run.
+set -e
+
 module load python/3.11.7
 module load cuda/12.6
 source $WORK/hyp_fine_tuning/bin/activate
@@ -95,7 +98,7 @@ export IAB_EXCLUDE_GENERATORS=dalle3      # <-- 22-class toggle (whole pipeline)
 REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
 DATA=$FAST/datasets/iab_dataset
 CAPS=$WORK/hyp_fine_tuning/iab_captions
-OUT=$WORK/hyp_fine_tuning/checkpoints
+OUT=${CHECKPOINT_DIR:-$WORK/hyp_fine_tuning/checkpoints}
 MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 
 RUN=${RUN:-axis}
@@ -131,8 +134,8 @@ case "$RUN" in
 esac
 CKPT=$OUT/attribution_22cls_${RUN}_vitl14.pt
 
-mkdir -p $OUT
-cd $REPO
+mkdir -p "$OUT"
+cd "$REPO"
 
 # No norm penalty: fixed-radius runs constrain image depth exactly in the projection.
 CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
@@ -166,6 +169,6 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --num_epochs      $EPOCHS \
     --num_workers     8 \
     --split_manifest  $MANIFEST \
-    --output          $CKPT
+    --output          "$CKPT"
 
 echo "Done: $CKPT"
