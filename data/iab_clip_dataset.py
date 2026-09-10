@@ -35,7 +35,6 @@ from typing import Optional
 import pandas as pd
 import torch
 from torch.utils.data import Dataset
-from PIL import Image
 from transformers import CLIPImageProcessor, CLIPTokenizer
 
 from data.degradations import AUG_POLICIES, apply_degradation
@@ -86,24 +85,6 @@ _SEMANTIC_DIR: dict[str, tuple[Optional[str], str]] = {
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".JPEG"}
 _FAKE_STEM_RE = re.compile(r"^(.+)_p(\d+)_i\d+$")
-
-
-def native_patch_grid(img: "Image.Image") -> list:
-    """PIL image → [whole image] + 3x3 grid of half-size overlapping windows.
-
-    Cut from the FULL-RESOLUTION image, before CLIP's resize, so each window keeps
-    ~2x the detail of the whole-image view — the opposite regime from cutting the
-    same grid out of the already-downscaled 224px tensor (see
-    patch_attribution.model.patch_views). Geometry is the same: windows of half the
-    side at offsets 0, quarter, half.
-    """
-    w, h = img.size
-    pw, ph = w // 2, h // 2
-    return [img] + [
-        img.crop((x, y, x + pw, y + ph))
-        for y in (0, ph // 2, ph)
-        for x in (0, pw // 2, pw)
-    ]
 
 
 # ── CSV loaders ───────────────────────────────────────────────────────────────
@@ -195,7 +176,6 @@ class IABCLIPDataset(Dataset):
         require_caption: bool = True,
         train_augment: bool = False,
         aug_policy: str = "corruption",
-        patch_grid: bool = False,
     ):
         """
         split_scheme: "caption" (default) | "stratified"
@@ -250,11 +230,6 @@ class IABCLIPDataset(Dataset):
             raise ValueError(f"aug_policy must be one of {sorted(AUG_POLICIES)}, "
                              f"got {aug_policy!r}")
         self.aug_policy = aug_policy
-        # patch_grid=True → 'pixel_values' is (10, 3, 224, 224): the whole image plus
-        # a 3x3 grid cut at FULL resolution (--patch_source native). One decode, ten
-        # resizes. Off by default: the multi-view models can also cut the grid out of
-        # the 224px tensor themselves, which costs nothing but keeps less detail.
-        self.patch_grid = patch_grid
         # Path filters (RELATIVE to root), for byte-fair training vs the baselines
         # (see comparison/training/scripts/dump_split_manifest.py):
         #   include_paths — allowlist: keep ONLY these images (e.g. the harness TRAIN
@@ -454,15 +429,9 @@ class IABCLIPDataset(Dataset):
         if self.degraded:
             img = apply_degradation(img, self.degraded)
         elif self.train_augment:
-            # Applied to the FULL-resolution image, so with patch_grid=True all ten
-            # views inherit one consistent augmentation instead of ten different ones.
             img = AUG_POLICIES[self.aug_policy](img)
 
-        if self.patch_grid:
-            pixel = self.processor(images=native_patch_grid(img),
-                                   return_tensors="pt")["pixel_values"]     # (10,3,H,W)
-        else:
-            pixel = self.processor(images=img, return_tensors="pt")["pixel_values"][0]
+        pixel = self.processor(images=img, return_tensors="pt")["pixel_values"][0]
 
         raw_cap = self._get_raw_caption(img_path, generator, semantic)
         if is_real:

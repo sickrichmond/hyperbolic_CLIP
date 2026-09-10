@@ -18,12 +18,6 @@
 #   sbatch --array=0-18%4 --export=ALL,NUM_EPOCHS=5,\
 # SWEEP_CONFIGS=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo/slurm/sweep_configs_22cls_v2.txt \
 #     slurm/slurm_sweep_22cls.sh
-#
-# Mixup sweep (6 configs) — alpha x mixing point. Its base line is sweep 1's winner, so
-# if sweep 2 moves the base, regenerate this file before running it:
-#   sbatch --array=0-5%3 --export=ALL,NUM_EPOCHS=5,\
-# SWEEP_CONFIGS=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo/slurm/sweep_configs_22cls_mixup.txt \
-#     slurm/slurm_sweep_22cls.sh
 # ============================================================================
 
 #SBATCH --account=EUHPC_D35_189

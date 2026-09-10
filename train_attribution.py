@@ -33,7 +33,7 @@ from transformers import CLIPTokenizer
 
 from checkpoint_io import atomic_torch_save
 from data.iab_clip_dataset import IABCLIPDataset
-from geometry.lorentz import exp_map0, half_aperture, log_map0
+from geometry.lorentz import exp_map0, half_aperture
 from models.attribution_clip import AttributionCLIP
 from losses.attribution_loss import EntailmentConeLoss, _pairwise_xi, predict_class
 from losses.axis_cone_loss import (AxisConeLoss, axis_chord2, axis_cone_q,
@@ -208,30 +208,6 @@ def parse_args():
                         "RandAugment (no shear/translate), blur sigma 0.1-2.0. The omnidfa ranges "
                         "cover only DS0.5 of the seven test levels, so its asterisk is much "
                         "weaker than 'corruption''s.")
-    p.add_argument("--mixup_alpha",    type=float, default=0.0,
-                   help="Manifold mixup in the tangent space at the origin (0 disables it). "
-                        "λ~Beta(α,α) mixes the batch with a permutation of itself and the cone "
-                        "loss is evaluated twice, weighted λ / 1-λ. Unlike --train_augment this "
-                        "shows the model NO corruption, so a run stays head-to-head comparable "
-                        "with the baselines: it is the mechanism repmix uses (its ImageNet-C "
-                        "perturbation is commented out in dataset_repmix.py) and repmix is the "
-                        "only method that holds up under JPEG without seeing degradations.")
-    p.add_argument("--mixup_at", choices=["clip", "tangent"], default="clip",
-                   help="WHERE the batch is mixed. Mixup only regularises the layers ABOVE the "
-                        "mixing point, since they are the ones that receive a mixed vector. "
-                        "'clip' mixes the CLIP embedding, so the projection head is trained on "
-                        "mixed inputs. 'tangent' mixes after the head, where the only thing left "
-                        "is the parameter-free exp_map0 — it reshapes the loss surface but no "
-                        "layer ever processes a mixed vector. 'tangent' reproduces the "
-                        "attribution_22cls_mixup0.2 checkpoint; 'clip' is the better default.")
-    p.add_argument("--blackout_max",   type=float, default=0.0,
-                   help="Random pixel blackout on the TRAIN split (0 disables it). Per sample "
-                        "λ~U(0, blackout_max) of the pixels are set to BLACK, drawn i.i.d. and "
-                        "shared across the 3 channels. Unlike --train_augment none of the three "
-                        "test corruption families (JPEG/blur/downsample) is involved → no "
-                        "asterisk. Unlike --mixup_alpha the label stays single, so the cone loss "
-                        "is called ONCE: no double positive hinge, and λ is a true intensity "
-                        "instead of a choice of dominant class.")
     p.add_argument("--lambda_norm",    type=float, default=0.0,
                    help="Weight of the anchor-norm regulariser (0 disables it).")
     p.add_argument("--target_norm",    type=float, default=0.0,
@@ -506,25 +482,17 @@ def encode_anchors(model, anchor_texts: list[str], tokenizer, device: str) -> to
 
 
 @torch.no_grad()
-def class_centroids(core, dataset, class_names, args, device,
-                    feat_fn=None, cache_path=None) -> torch.Tensor:
+def class_centroids(core, dataset, class_names, args, device) -> torch.Tensor:
     """Per-class mean of the CLIP-space training image embeddings → (K, D_clip).
 
     Text-free anchor initialisation: one forward pass over the whole train split
     through the vision encoder. LoRA is zero-initialised, so at this point the
     features are exactly the frozen CLIP ones — the result depends only on the
     backbone and the data, which is why it can be cached across runs.
-
-    feat_fn/cache_path override the CLIP-space encoder and the cache file, so a
-    second branch (e.g. the spectral one of patch_freq_attribution) can build its
-    own anchors with the same machinery.
     """
     name_to_idx = {n: i for i, n in enumerate(class_names)}
     K = len(class_names)
-    feat_fn = feat_fn or core._clip_image
-
-    cache_path = cache_path or args.anchor_init_cache
-    cache = Path(cache_path) if cache_path else None
+    cache = Path(args.anchor_init_cache) if args.anchor_init_cache else None
     if cache is not None and cache.exists():
         blob = torch.load(cache, map_location="cpu", weights_only=False)
         if blob["class_names"] != class_names:
@@ -547,7 +515,7 @@ def class_centroids(core, dataset, class_names, args, device,
     counts = torch.zeros(K, dtype=torch.long, device=device)
     for batch in tqdm(loader, desc="anchor centroids"):
         with autocast("cuda"):
-            feats = feat_fn(batch["pixel_values"].to(device))
+            feats = core._clip_image(batch["pixel_values"].to(device))
         labels = torch.tensor([name_to_idx[g] for g in batch["generator"]],
                               device=device, dtype=torch.long)
         sums.index_add_(0, labels, feats.double())
@@ -817,13 +785,6 @@ def main():
                 else "OmniDFA Table 8 (JPEG 75-95 / resize / hflip / RandAugment / blur)")
         print(f"Train-time augmentation: ON  policy={args.aug_policy}  ({what}) — "
               "results are NOT head-to-head comparable with the baselines.")
-
-    # "Black" AFTER the CLIP normalisation is (0 − mean)/std ≈ −1.79, not 0 — zeroing
-    # the normalised tensor would paint the CLIP mean colour (grey) instead.
-    black = -(torch.tensor(train_ds.processor.image_mean, device=device)
-              / torch.tensor(train_ds.processor.image_std, device=device)).view(1, 3, 1, 1)
-    if args.blackout_max > 0:
-        print(f"Blackout: λ~U(0,{args.blackout_max}) per sample")
 
     sampler = make_balanced_sampler(train_ds)
     train_loader = DataLoader(
@@ -1178,14 +1139,6 @@ def main():
     else:
         print("Base attribution loss only (no caption terms).")
 
-    if args.mixup_alpha > 0:
-        if use_caps:
-            raise ValueError("--mixup_alpha needs --no_captions: mixing images but not their "
-                             "captions makes L_img_in_cap meaningless.")
-        mixup_beta = torch.distributions.Beta(args.mixup_alpha, args.mixup_alpha)
-        print(f"Mixup: α={args.mixup_alpha} at '{args.mixup_at}'")
-    mix_at_clip = args.mixup_alpha > 0 and args.mixup_at == "clip"
-
     # Resolved here, not inside the loop: a missing HoroPCA clone should kill the job
     # in the first second, not after the first epoch of training. The import alone is
     # not enough — HoroPCA is located lazily, so probe it now.
@@ -1307,23 +1260,9 @@ def main():
             labels   = torch.tensor([name_to_idx[g] for g in batch["generator"]],
                                     device=device, dtype=torch.long)
 
-            if args.blackout_max > 0:
-                # One λ per sample, so a batch carries the whole spectrum of occlusion.
-                # The mask is (B,1,H,W) → broadcast over the channels, i.e. the whole
-                # pixel goes black. Applied on the full batch, before the DataParallel
-                # scatter. The label is untouched: the cone loss below runs once.
-                lam  = torch.rand(pixel.size(0), 1, 1, 1, device=device) * args.blackout_max
-                mask = torch.rand(pixel.size(0), 1, *pixel.shape[-2:], device=device) < lam
-                pixel = torch.where(mask, black.to(pixel.dtype), pixel)
-
             with autocast("cuda"):
                 if use_caps:
                     x_img, x_cap = model(pixel, cap_ids, cap_mask)
-                elif mix_at_clip:
-                    # Stop before the projection head; the mix happens below and
-                    # to_hyperbolic finishes the job on the primary GPU.
-                    clip_emb = model(pixel, return_clip_emb=True)
-                    x_cap = None
                 else:
                     x_img = model(pixel)
                     x_cap = None
@@ -1337,41 +1276,9 @@ def main():
                 # (same reason AttributionCLIP.to_hyperbolic disables autocast).
                 with autocast("cuda", enabled=False):
                     x_anc = exp_map0(t_anc.float(), curv=args.curv)
-            if args.mixup_alpha > 0:
-                # EntailmentConeLoss is untouched — the mixed target is expressed by
-                # calling it twice, exactly as the multi-view trainer folds views into
-                # the batch. Only the mixing POINT differs between the two modes.
-                with autocast("cuda", enabled=False):
-                    lam = mixup_beta.sample().item()
-                    if mix_at_clip:
-                        e = clip_emb.float()
-                        perm = torch.randperm(e.size(0), device=device)
-                        # Re-normalise: _clip_image only ever emits unit vectors, and
-                        # a convex combination of two of them is SHORTER. Without this
-                        # every mixed sample would get a smaller tangent and land closer
-                        # to the origin, turning mixup into a norm regulariser as well.
-                        mixed = F.normalize(lam * e + (1 - lam) * e[perm], dim=-1)
-                        x_mix, _ = core.to_hyperbolic(mixed, core.image_radius)
-                    else:
-                        # Tangent space at the origin: exp_map0 is radial, so a convex
-                        # combination there is the manifold-mixup analogue (mixing on
-                        # the hyperboloid itself would need a geodesic).
-                        perm = torch.randperm(x_img.size(0), device=device)
-                        t = log_map0(x_img.float(), curv=args.curv)
-                        mixed_t = lam * t + (1 - lam) * t[perm]
-                        if core.image_radius > 0:
-                            mixed_t = F.normalize(mixed_t, dim=-1) * core.image_radius
-                        x_mix = exp_map0(mixed_t, curv=args.curv)
-                sp = sin_psi_now()
-                loss_a, stats = (cone_loss(x_mix, x_anc, labels, sp) if axis
-                                 else cone_loss(x_mix, x_anc, labels))
-                loss_b, _     = (cone_loss(x_mix, x_anc, labels[perm], sp) if axis
-                                 else cone_loss(x_mix, x_anc, labels[perm]))
-                loss = lam * loss_a + (1 - lam) * loss_b
-            else:
-                loss, stats = (cone_loss(x_img, x_anc, labels, sin_psi_now()) if axis
-                               else cone_loss(x_img, x_anc, labels,
-                                              x_cap=x_cap, x_fam=x_fam))
+            loss, stats = (cone_loss(x_img, x_anc, labels, sin_psi_now()) if axis
+                           else cone_loss(x_img, x_anc, labels,
+                                          x_cap=x_cap, x_fam=x_fam))
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -1431,12 +1338,9 @@ def main():
                 # The current TRAINING batch, so a frame costs no extra forward pass.
                 # diag_state carries the basis fit before step 1, so every frame —
                 # intra-epoch and per-epoch alike — lands in the SAME 2-D frame.
-                # --mixup_at clip never materialises the unmixed x_img (the mix happens
-                # before the projection head), so the mixed points are all there is.
-                x_snap = x_mix if mix_at_clip else x_img
                 with torch.no_grad():
                     diag_state = plot_epoch_snapshot(
-                        x_snap.detach().float().cpu().numpy(), labels.tolist(),
+                        x_img.detach().float().cpu().numpy(), labels.tolist(),
                         x_anc.detach(), class_names,
                         Path(args.diag_plot_dir) / f"step_{global_step:07d}.png",
                         curv=args.curv, min_radius=args.min_radius,
@@ -1680,9 +1584,6 @@ def main():
                                           if args.lambda_family > 0 else None),
                     "train_augment":   args.train_augment,
                     "aug_policy":      args.aug_policy,
-                    "mixup_alpha":     args.mixup_alpha,
-                    "mixup_at":        args.mixup_at,
-                    "blackout_max":    args.blackout_max,
                     "generators":      args.generators,
                     "semantics":       args.semantics,
                     "val_balanced":    val["balanced_acc"],

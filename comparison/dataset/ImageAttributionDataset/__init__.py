@@ -25,7 +25,6 @@ _DATASET_MODULES = [
     "dataset_hifi_net",
     "dataset_defl",
     "dataset_hypclip",
-    "dataset_hypclip_patch",
     "dataset_dna",
     "dataset_repmix",
     "dataset_patch",
