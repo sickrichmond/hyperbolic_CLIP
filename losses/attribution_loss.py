@@ -1,106 +1,12 @@
-"""
-Hierarchical entailment-cone loss for attribution (HySAC-style).
+"""Exterior-angle entailment-cone loss and prediction for attribution.
 
-Hierarchy:
-    class anchor (e.g. "A real image")               — broadest cone
-        ⊃ augmented caption ("Real image of ...")    — narrower cone, content-specific
-            ⊃ image embedding                         — leaf
+For each positive pair, use max(0, xi-psi) or xi squared. Negative pairs pay
+max(0, psi+margin-xi), optionally subsampled per row. Inference minimizes xi.
 
-Loss terms (all use the same cone-violation primitive):
-
-  L_img_in_class:  image i must lie inside the cone of its class anchor y_i,
-                   and outside the cones of all other class anchors.
-                   (this is the term used at inference)
-
-  L_cap_in_class:  caption i must lie inside the cone of its class anchor y_i,
-                   and outside the cones of all other class anchors.
-
-  L_img_in_cap:    image i must lie inside the cone of its OWN augmented caption,
-                   and outside the cones of all other captions in the batch
-                   (which differ in content and/or class).
-
-For each term:
-  L_pos = max(0, ξ_pos - ψ_pos)          pos_mode="hinge"  (default)
-  L_pos = ξ_pos²                          pos_mode="axis"
-  L_neg = max(0, ψ_neg + margin - ξ_neg)
-where ξ = oxy_angle(apex, point) and ψ = half_aperture(apex).
-
-pos_mode="axis" is an MSE from the cone AXIS rather than from its boundary. The
-hinge goes to zero gradient the moment the point is inside the cone, which is the
-measured reason the projection head is free to collapse the class geometry the
-LoRA built (centroid ARI 0.253 -> -0.007); ξ² keeps pulling with gradient 2ξ
-everywhere and vanishes only on the axis itself. ψ does not appear in it, so the
-loss cannot be lowered by widening the cone — the aperture survives only in L_neg
-and L_sep, where it is a constraint rather than a target.
-
-neg_samples > 0 keeps a random subset of that many negatives per row instead of
-all K-1. Note this does NOT save compute: xi is computed against every anchor
-anyway (cone_acc and the CE term read the full row). It changes the OBJECTIVE —
-dropout on the negative term.
-
-Optional ranking term (λ_ce > 0):
-  L_ce = CE(softmax(-ξ_img_anc / τ), y),  τ = softplus(param), LEARNED.
-Why it is not redundant with the hinges: L_pos saturates the moment the image is
-inside its own cone, and L_neg is averaged over K-1 classes so a single wrong class
-carries λ_neg/(K-1). Neither optimises the ORDER of the ξ across classes, which is
-exactly what inference (argmin ξ) reads. Inference stays untouched — argmin is
-scale-invariant, so τ never leaves training.
-
-Phase B adds three things, all aimed at one measured failure: the projection head
-zeroes the class geometry the LoRA built (centroid ARI 0.253 -> -0.007 against the
-generator taxonomy), and it does so because a SATURATING hinge gives it permission —
-the same head trained with a plain CE keeps 0.119 of it.
-
-  lambda_hinge      scale on L_img_in_class, so the hinge can be turned OFF and
-                    replaced by the CE ranking term rather than mixed with it. Pure CE
-                    produces well-conditioned anchors; CE grafted onto a hinge does not
-                    (Run C: pairs at 8.8 deg AND pairs at 179 deg).
-  norm_mode         'bilateral' makes the anchor norm a TARGET instead of a floor. The
-                    floor is satisfied at any norm above it, which is how Run C drifted
-                    to 8.18 with L_norm=0 while sweepwin sat at 4.11.
-  lambda_sep        anchors must be at least psi_c + psi_c' apart (cones disjoint) and
-                    at most theta_max apart (no antipodal waste). Imposed on the
-                    PROJECTED anchors, i.e. downstream of the head, which is where the
-                    separation is destroyed.
-  lambda_family     family anchors, shallower and therefore wider, containing the model
-                    anchors. This is the only construction in which psi varies across
-                    anchors -- and with equal psi, argmin xi IS argmax cos, which is why
-                    the cone rule has never differed from a cosine.
-
-lambda_axis > 0 adds the AXIS-RAY regulariser, the always-on companion to the hinge:
-
-  L_axis = mean_i d_ray(x_i, axis of a_{y_i})
-
-d_ray is the geodesic distance to the cone's axis RAY — the geodesic from the origin
-through the apex, restricted to the side the cone opens toward (geometry/lorentz.py).
-It answers the standing objection to the hinge, which is that its gradient is exactly
-zero the moment a point is inside its cone: d_ray keeps pulling all the way to the axis
-and vanishes only ON it. Unlike pos_mode="axis" (L_pos = ξ²) it is a genuine hyperbolic
-distance rather than an angle, and unlike the origin-angle score in axis_cone_loss it
-READS THE RADIUS — so it cannot report a point as on-axis when that point is nowhere
-near the cone.
-
-Two properties it is chosen for, both asserted in tests/test_axis_ray_dist.py:
-  - it is strictly monotone in the angle over all of [0, pi]. Measuring to the full
-    geodesic instead is bilateral and makes the antipode an attractor;
-  - its apex branch moves the anchor RADIALLY, which is the only term here that does.
-    With psi coupled to depth (psi = asin(2K/‖a‖)) that is what lets each class find its
-    own aperture, instead of L_norm pinning all K anchors to one norm and hence to one
-    psi — and with equal psi, argmin xi IS argmax cos algebraically.
-  The apex branch also pulls an image that is SHALLOWER than its anchor back outward,
-  which is the one configuration where oxy_angle saturates at pi and the hinge has no
-  gradient at all.
-
-Total:
-  L = lambda_hinge * L_img_in_class
-      + λ_cap_in_class * L_cap_in_class
-      + λ_img_in_cap   * L_img_in_cap
-      + λ_norm         * L_norm   (anchor norm regulariser)
-      + λ_axis         * L_axis   (distance to the cone axis ray)
-      + λ_ce           * L_ce     (ranking / calibration term)
-      + λ_sep          * L_sep    (cone disjointness, floor and ceiling)
-      + λ_family       * L_family (model anchor in family cone + image in family cone)
-"""
+The weighted objective combines image-in-class terms with optional caption
+containment, spatial anchor-norm regularization, hyperbolic axis-ray distance,
+pairwise angular separation, image-class CE, and family containment/CE.
+Temperatures are learned through softplus. Returned statistics are detached."""
 from __future__ import annotations
 
 import math
@@ -156,22 +62,11 @@ class EntailmentConeLoss(nn.Module):
         pos_mode: str = "hinge",
         neg_samples: int = 0,
     ):
-        """
-        lambda_cap_in_class > 0 and lambda_img_in_cap > 0 enable the hierarchical
-        terms. They require x_cap to be passed to forward(). With both at 0
-        (default) the loss reduces to image-in-class-anchor only.
+        """Configure loss weights and geometry.
 
-        lambda_norm, target_norm: anchor-norm regulariser.
-          L_norm = mean_c max(0, target_norm - ‖t_c‖)²
-
-        lambda_ce > 0 adds the CE ranking term with a LEARNED temperature. The
-        parameter is created only in that case, so at lambda_ce=0 the module still
-        has no parameters at all and returns the same value it did before.
-
-        pos_mode: "hinge" (default, unchanged) or "axis" (L_pos = ξ²).
-        neg_samples: 0 (default, all K-1 negatives) or k random negatives per row.
-        Both defaults are inert — every earlier run reproduces bit for bit.
-        """
+        Norm targets apply to Lorentz spatial coordinates. Caption terms require
+        x_cap; family terms require x_fam and class-to-family indices. Positive
+        CE/family weights create learned temperature parameters."""
         super().__init__()
         self.curv = curv
         self.min_radius = min_radius
@@ -194,12 +89,9 @@ class EntailmentConeLoss(nn.Module):
         self.neg_samples = neg_samples
         self.register_buffer("family_of", family_of)
         if lambda_ce > 0:
-            # τ = softplus(raw) keeps the temperature positive without a clamp.
             raw = torch.tensor(float(ce_tau_init)).expm1().clamp(min=1e-6).log()
             self.ce_tau_raw = nn.Parameter(raw)
         if lambda_family > 0:
-            # Its own temperature: family anchors sit closer to the origin, so their
-            # exterior angles live on a different scale than the model anchors'.
             raw = torch.tensor(float(ce_tau_init)).expm1().clamp(min=1e-6).log()
             self.fam_tau_raw = nn.Parameter(raw)
 
@@ -213,8 +105,6 @@ class EntailmentConeLoss(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Returns (L_pos, L_neg) — both scalars."""
         if self.pos_mode == "axis":
-            # MSE from the axis: gradient 2ξ everywhere, zero only ON the axis.
-            # psi is absent, so the cone cannot be widened to lower the loss.
             L_pos = xi_pos.pow(2).mean()
         else:
             L_pos = torch.clamp(xi_pos - psi_pos, min=0.0).mean()
@@ -225,25 +115,18 @@ class EntailmentConeLoss(nn.Module):
             L_neg = torch.tensor(0.0, device=xi_pos.device)
         return L_pos, L_neg
 
-    def _sep_term(self, x_anc: torch.Tensor, psi_anc: torch.Tensor):
-        """Cones disjoint, and no antipodal waste. Returns (loss, stats).
+    def _sep_term(self, x_anc: torch.Tensor, psi_anc: torch.Tensor,
+                  ang=None, iu=None):
+        """Penalize pair angles below aperture sums plus margin or above theta_max.
 
-        floor:   ∠(a_c, a_c') ≥ ψ_c + ψ_c'. This is the disjointness criterion the
-                 trainer already checks at init (train_attribution.py:517) — and every
-                 text-anchor run measured violates it by 12-17x, so no containment
-                 statement the cones make is worth anything today.
-        ceiling: ∠ ≤ theta_max. Run C reached CE-like spread but put one pair at 179°,
-                 which wastes the sphere with 22 anchors in 128 dimensions. The
-                 euclidean model — the one healthy configuration measured — has mean
-                 92.6° (the simplex ideal arccos(-1/21) is 92.7°) and its widest pair at
-                 132.2°, so a 150° ceiling is inert on a healthy set and fires only on
-                 that pathology.
-        """
-        K = x_anc.shape[0]
-        d = F.normalize(x_anc, dim=-1)
-        cos = (d @ d.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
-        iu = torch.triu_indices(K, K, offset=1, device=x_anc.device)
-        ang = torch.arccos(cos[iu[0], iu[1]])
+        Optional precomputed angles and pair indices avoid repeated geometry in
+        forward(); standalone callers can omit both."""
+        if ang is None:
+            K = x_anc.shape[0]
+            d = F.normalize(x_anc, dim=-1)
+            cos = (d @ d.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)
+            iu = torch.triu_indices(K, K, offset=1, device=x_anc.device)
+            ang = torch.arccos(cos[iu[0], iu[1]])
         need = psi_anc[iu[0]] + psi_anc[iu[1]] + self.separation_margin
         floor = torch.clamp(need - ang, min=0.0).pow(2).mean()
         ceiling = torch.clamp(ang - self.theta_max, min=0.0).pow(2).mean()
@@ -263,6 +146,11 @@ class EntailmentConeLoss(nn.Module):
         x_cap: torch.Tensor | None = None,       # (B, D) augmented captions, optional
         x_fam: torch.Tensor | None = None,       # (F, D) family anchors, optional
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Return the weighted loss and detached per-batch diagnostics.
+
+        Inputs use Lorentz spatial coordinates. Captions pair row-wise with
+        images; family_of maps each class anchor to its family anchor.
+        """
         B, _ = x_img.shape
         K, _ = x_anc.shape
         device = x_img.device
@@ -275,8 +163,6 @@ class EntailmentConeLoss(nn.Module):
         neg_mask_anc = torch.ones(B, K, device=device, dtype=torch.bool)
         neg_mask_anc.scatter_(1, pos_idx, False)
 
-        # ───── 1) L_img_in_class ─────────────────────────────────────────────
-        # xi_ia[i, c] = oxy_angle(anchor_c, img_i)
         xi_ia = _pairwise_xi(x_anc, x_img, curv=self.curv).T                          # (B, K)
         xi_ia_pos = xi_ia.gather(1, pos_idx).squeeze(1)                               # (B,)
         L_imgcls_pos, L_imgcls_neg = self._cone_term(
@@ -287,13 +173,9 @@ class EntailmentConeLoss(nn.Module):
         with torch.no_grad():
             inside_img = (xi_ia_pos < psi_anc_pos).float().mean()
             cone_acc   = (xi_ia.argmin(dim=1) == labels).float().mean()
-            # Fraction of the xi matrix sitting at oxy_angle's acos clamp. xi = pi means
-            # the image is SHALLOWER than the anchor — the far side of the cone — and the
-            # clamp makes the gradient there exactly zero, not merely small. Anything
-            # above a few percent and the run is not learning, whatever the lr says.
             xi_sat = (xi_ia > math.pi - 5e-3).float().mean()
 
-        # ───── 2 & 3) hierarchical caption-based terms (optional) ────────────
+        # Optional caption-to-class and image-to-caption objectives.
         L_cap_in_class = torch.tensor(0.0, device=device)
         L_img_in_cap   = torch.tensor(0.0, device=device)
         stats_extra = {}
@@ -303,7 +185,6 @@ class EntailmentConeLoss(nn.Module):
             and (self.lambda_cap_in_class > 0 or self.lambda_img_in_cap > 0)
         )
         if use_caps:
-            # 2) L_cap_in_class — caption inside its class anchor's cone
             xi_ca = _pairwise_xi(x_anc, x_cap, curv=self.curv).T                      # (B, K)
             xi_ca_pos = xi_ca.gather(1, pos_idx).squeeze(1)
             L_capcls_pos, L_capcls_neg = self._cone_term(
@@ -311,10 +192,7 @@ class EntailmentConeLoss(nn.Module):
             )
             L_cap_in_class = L_capcls_pos + self.lambda_neg * L_capcls_neg
 
-            # 3) L_img_in_cap — image inside its OWN caption's cone; other batch
-            #    captions act as negatives.
             psi_cap = half_aperture(x_cap, curv=self.curv, min_radius=self.min_radius)  # (B,)
-            # xi_ic[i, j] = oxy_angle(cap_j, img_i)
             xi_ic = _pairwise_xi(x_cap, x_img, curv=self.curv).T                       # (B, B)
             xi_ic_pos = xi_ic.diagonal()                                               # (B,)
             psi_cap_b = psi_cap.unsqueeze(0).expand(B, B)                              # (B, B)
@@ -336,7 +214,7 @@ class EntailmentConeLoss(nn.Module):
                     "mean_cap_norm":   x_cap.norm(dim=-1).mean().detach(),
                 }
 
-        # ───── 4) Anchor-norm regulariser ────────────────────────────────────
+        # Norm targets are spatial-coordinate norms, not tangent radii.
         anc_norms = x_anc.norm(dim=-1)
         if self.lambda_norm > 0 and self.target_norm > 0:
             if self.norm_mode == "bilateral":
@@ -350,51 +228,36 @@ class EntailmentConeLoss(nn.Module):
         else:
             L_norm = torch.tensor(0.0, device=device)
 
-        # ───── 4b) Axis-ray regulariser ──────────────────────────────────────
-        # The hinge above is exactly flat inside the cone; this is not. d_ray vanishes
-        # only ON the axis and reads the RADIUS, so unlike an origin-angle score it
-        # cannot call a point on-axis while that point sits nowhere near the cone.
+        # Hyperbolic distance to the outward ray starting at the correct anchor.
         L_axis = torch.tensor(0.0, device=device)
         if self.lambda_axis > 0:
             a_pos = x_anc[labels]                                            # (B, D)
             L_axis = axis_ray_dist(x_img, a_pos, curv=self.curv).mean()
             with torch.no_grad():
-                # The direct monitor for the failure this term exists to prevent: an
-                # entailment cone holds the points DEEPER than its apex, so any image
-                # shallower than its own anchor is outside every cone by construction and
-                # sits in oxy_angle's acos clamp, where the hinge gradient is zero. A run
-                # with this above a few percent is not training, whatever `inside` says.
                 frac_shallow = (x_img.norm(dim=-1) <= a_pos.norm(dim=-1)).float().mean()
                 stats_extra.update({
                     "loss_axis":    L_axis.detach(),
                     "frac_shallow": frac_shallow.detach(),
                 })
 
-        # ───── 6) Anchor separation ──────────────────────────────────────────
+        # Share pairwise geometry between separation loss and diagnostics.
         _d = F.normalize(x_anc, dim=-1)
         _iu = torch.triu_indices(x_anc.shape[0], x_anc.shape[0], offset=1, device=device)
         sep_ang = torch.arccos((_d @ _d.T).clamp(-1.0 + 1e-6, 1.0 - 1e-6)[_iu[0], _iu[1]])
 
         L_sep = torch.tensor(0.0, device=device)
         if self.lambda_sep > 0:
-            L_sep, sep_stats = self._sep_term(x_anc, psi_anc)
+            L_sep, sep_stats = self._sep_term(x_anc, psi_anc, sep_ang, _iu)
             stats_extra.update(sep_stats)
 
-        # ───── 7) Hierarchy: family cones containing the model cones ─────────
+        # Model-anchor containment and image-to-family cross-entropy.
         L_family = torch.tensor(0.0, device=device)
         if self.lambda_family > 0 and x_fam is not None:
             psi_fam = half_aperture(x_fam, curv=self.curv, min_radius=self.min_radius)
             fam_of = self.family_of
             fam_labels = fam_of[labels]
-            # (a) each model anchor inside its family's cone. A hinge is the right
-            #     shape HERE: it is a containment constraint on 22 anchors that should
-            #     be met and then stop pulling.
             xi_mf = oxy_angle(x_fam[fam_of], x_anc, curv=self.curv)              # (K,)
             L_mf = torch.clamp(xi_mf - psi_fam[fam_of], min=0.0).mean()
-            # (b) each image inside its family's cone. CE, NOT a hinge: the whole point
-            #     of turning the hinge off is that saturation lets the projection head
-            #     collapse the class geometry (centroid ARI 0.253 -> -0.007), and a
-            #     hinge here would reintroduce exactly that on the level that matters.
             xi_if = _pairwise_xi(x_fam, x_img, curv=self.curv).T                 # (B, F)
             L_if = F.cross_entropy(-xi_if / F.softplus(self.fam_tau_raw), fam_labels)
             L_family = L_mf + L_if
@@ -418,9 +281,6 @@ class EntailmentConeLoss(nn.Module):
             + self.lambda_family       * L_family
         )
 
-        # ───── 5) CE ranking term (optional) ─────────────────────────────────
-        # -xi_ia is exactly the logit matrix the eval builds (test_hypclip.py:155),
-        # so this trains the quantity inference actually ranks.
         if self.lambda_ce > 0:
             tau = F.softplus(self.ce_tau_raw)
             L_ce = F.cross_entropy(-xi_ia / tau, labels)
@@ -430,8 +290,6 @@ class EntailmentConeLoss(nn.Module):
 
         stats = {
             "loss_img_in_cls": L_img_in_class.detach(),
-            # Split out: with pos_mode="axis" the two halves live on different
-            # scales and the sum alone is unreadable.
             "xi_sat":          xi_sat.detach(),
             "loss_pos":        L_imgcls_pos.detach(),
             "loss_neg":        L_imgcls_neg.detach(),
@@ -442,20 +300,12 @@ class EntailmentConeLoss(nn.Module):
             "inside_img":      inside_img.detach(),
             "cone_acc":        cone_acc.detach(),
             "mean_psi_anc":    psi_anc.mean().detach(),
-            # psi SPREAD, not just its mean: with every leaf at the same depth psi is
-            # uniform and argmin xi IS argmax cos algebraically. A spread is the
-            # necessary condition for the cone rule to differ from a cosine at all.
             "psi_min_deg":     torch.rad2deg(psi_anc.min()).detach(),
             "psi_max_deg":     torch.rad2deg(psi_anc.max()).detach(),
-            # Pairwise anchor separation, logged ALWAYS and not only under lambda_sep:
-            # this is the collapse number (78.7 deg at random init -> 41.2 within one
-            # epoch in the previous run) and the 2-D snapshots cannot show it, since 22
-            # near-orthogonal directions in 128-d project to one blob whatever they do.
             "sep_min_deg":     torch.rad2deg(sep_ang.min()).detach(),
             "sep_mean_deg":    torch.rad2deg(sep_ang.mean()).detach(),
             "mean_xi_img_anc": xi_ia_pos.mean().detach(),
             "mean_anc_norm":   anc_norms.mean().detach(),
-            # a pair overlaps when its axes are closer than the sum of its apertures
             "sep_overlap":     (sep_ang < psi_anc[_iu[0]] + psi_anc[_iu[1]]
                                  + self.separation_margin
                                 ).float().mean().detach(),

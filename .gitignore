@@ -44,3 +44,6 @@ external/
 
 # experimental results
 *.csv
+
+# codex files
+AGENTS.md

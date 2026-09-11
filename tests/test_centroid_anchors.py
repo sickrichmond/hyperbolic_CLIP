@@ -25,7 +25,7 @@ from PIL import Image, ImageDraw
 
 from comparison.training.test_hypclip import harness_class_names, load_anchors
 from data.degradations import random_degradation
-from train_attribution import build_anchors
+from training.anchors import build_anchors
 
 PROMPTS = Path(__file__).resolve().parent.parent / "data" / "anchor_prompts_structural.json"
 
@@ -36,7 +36,7 @@ def test_anchor_reordering():
     K = len(harness)
     assert K == 22, f"IAB_EXCLUDE_GENERATORS=dalle3 should give 22 classes, got {K}"
 
-    # Checkpoint order = train_attribution.build_anchors(): 'real' first.
+    # Checkpoint order = training.anchors.build_anchors(): 'real' first.
     ckpt_names = ["real"] + [n for n in harness if n != "real"]
     # Row i is the i-th scaled basis vector → the class it belongs to is recoverable
     # from argmax, so a wrong permutation cannot pass.

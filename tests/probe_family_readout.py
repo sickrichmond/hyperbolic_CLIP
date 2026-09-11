@@ -48,7 +48,7 @@ from tests.probe_degradation_shift import paired_datasets
 def family_texts(names):
     """Regenerated from the checkpoint's family NAMES, byte-identical to training.
 
-    train_attribution.build_family_anchors is deterministic in the names, so the
+    training.anchors.build_family_anchors is deterministic in the names, so the
     checkpoint does not need to carry the sentences.
     """
     return ["A real image" if n == "real"

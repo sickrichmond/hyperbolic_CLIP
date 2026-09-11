@@ -39,7 +39,7 @@ from models.euclidean_attribution_clip import EuclideanAttributionCLIP
 from losses.euclidean_attribution_loss import PrototypeCELoss, predict_class
 # Reuse the exact anchor construction and balanced sampler from the hyperbolic
 # trainer so the two runs are sampling-identical.
-from train_attribution import build_anchors, make_balanced_sampler
+from training.anchors import build_anchors, make_balanced_sampler
 
 
 def parse_args():

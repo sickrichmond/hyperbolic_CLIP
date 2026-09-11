@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from transformers import CLIPModel, CLIPTokenizer
 
 from comparison.training.test_hypclip import harness_class_names
-from train_attribution import build_anchors
+from training.anchors import build_anchors
 
 DEFAULT_CANDIDATES = [None, "data/anchor_prompts_structural.json"]
 
