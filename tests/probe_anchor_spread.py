@@ -1,29 +1,15 @@
-"""How much of the sphere do the class anchors actually occupy — hyperbolic or euclidean?
+"""Report anchor-direction similarities for hyperbolic and Euclidean checkpoints.
 
-This is the mechanism behind the robustness gap. On the cone model every image sits
-within 0.4° of its nearest anchor (max_c cos median 0.999976), which sounds like a
-clean collapse onto 22 well-separated rays — but only if the anchors themselves are
-spread apart. They are not: all 22 fit inside 9°, with the closest pair 2.1° apart.
-A perturbation of one degree crosses into the neighbouring class, which is exactly
-what JPEG does to the cone model (AUC 0.64) and not to the euclidean one (0.94).
+Load model weights and anchors through the comparison harness, preserving its
+class order. Print pairwise cosine/angle statistics and optionally write the
+angle matrix as JSON for extract_tree. No image dataset is needed; text-anchor
+checkpoints still require CLIP weights and tokenization.
 
-So the question this answers is: does the euclidean model spread its anchors, or is
-it packed just as tightly and the difference lies elsewhere?
+Hyperbolic aperture diagnostics use depth-coupled half_aperture. The ratio
+2*mean(psi)/closest_angle is a summary, not a pairwise overlap test when widths
+differ. IAB_EXCLUDE_GENERATORS must match the checkpoint's class set.
 
-Anchors are compared by DIRECTION in the projected space — the space the classifier
-actually decides in. For the hyperbolic model that is the hyperboloid's space
-component (exp_map0 is radial, so direction is preserved from the tangent space); for
-the euclidean model it is the unit-sphere embedding. Both are read through the same
-`load_anchors` the evaluators use, so the checkpoint's own prompts are honoured.
-
-    IAB_EXCLUDE_GENERATORS=dalle3 python -m tests.probe_anchor_spread \\
-        $CK/attribution_22cls_sweepwin_vitl14.pt \\
-        $CK/attribution_22cls_promptsA_vitl14.pt \\
-        $CK/attribution_22cls_euclidean_d128_vitl14.pt
-
-No images, no GPU needed: it only encodes 22 sentences per checkpoint. IAB_EXCLUDE_GENERATORS
-must select the same label space the checkpoint was trained on (e.g. `dalle3,infinity`
-for a held-out run), otherwise load_anchors says so and stops.
+Usage: python -m tests.probe_anchor_spread --help
 """
 import argparse
 import gc
@@ -62,8 +48,7 @@ def load_any(path, device):
         model.logit_scale.data = ckpt["logit_scale"].to(device)
         model.eval()
         x_anc = load_anchors(ckpt, model, device)
-        # The CE turns cosine gaps into logit gaps by this factor, so it is what says
-        # whether tight packing is actually a problem for THIS model.
+        # Convert cosine similarities to the loss's capped logit scale.
         scale = min(model.logit_scale.exp().item(), 100.0)
         return model, x_anc, None, f"euclidean, logit_scale={scale:.1f}", ckpt["clip_name"]
 
@@ -105,10 +90,7 @@ def report(path, device, names, dump=None):
     if psi is not None:
         print(f"  ψ                 : mean={psi.mean():.4f} rad ({math.degrees(psi.mean()):.1f}°)  "
               f"spread={psi.max() - psi.min():.4f}")
-        # Entailment cones are disjoint only where the apexes are further apart than
-        # ψ_c + ψ_c'. The trainer checks this at init, but only for free anchors
-        # (train_attribution.py:494 gates the whole block on anchor_init != "text"),
-        # so no text-anchor run has ever printed it. Ratio > 1 = nominally overlapping.
+        # Aggregate angular-cap diagnostic; pair-specific widths are not tested.
         closest = deg(off.max())
         ratio = f"{2 * math.degrees(psi.mean()) / closest:.1f}" if closest else "inf"
         print(f"  2ψ / closest pair : {ratio}"

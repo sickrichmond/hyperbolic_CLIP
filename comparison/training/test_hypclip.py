@@ -1,26 +1,18 @@
-"""
-Fair evaluation of the hyperbolic-CLIP attributor on ImageAttributionBench,
-under a protocol BYTE-IDENTICAL to the comparison baselines.
+"""Evaluate hyperbolic checkpoints through the ImageAttributionBench harness.
 
-It reuses the baselines' own machinery so nothing about the protocol can drift:
-  - `get_dataloader(model_name='hypclip', ...)` → same enumeration, same
-    stratified 80/10/10 split (seed 42), same 2000/semantic cap, same
-    test-time degradation as resnet50/dct/hifi_net/defl (→ identical test images).
-  - `calculate_metrics_for_test(...)` → identical acc / macro-AUC / macro-AP /
-    confusion matrix / per-semantic acc / precision-recall-F1.
+Reuse the harness image enumeration, configured split, degradations and metrics
+through the hypclip dataset adapter. The active class map is controlled by
+IAB_EXCLUDE_GENERATORS; saved anchors are reordered into that map.
 
-The only model-specific part is turning the hyperbolic cone geometry into
-per-class logits: for anchor c and image i we use logits[i, c] = -xi(anchor_c, img_i),
-where xi = oxy_angle (exterior angle to the cone apex). Since the model's decision
-rule is argmin_c xi (see losses.attribution_loss.predict_class), argmax over these
-logits reproduces EXACTLY the model's own prediction, and softmax(-xi) feeds AUC/AP.
+For loss=axis, logits are -q with apertures recovered from spatial anchor depths.
+Otherwise logits are -oxy_angle. Neither branch applies the learned training
+CE temperature. Argmax selects the class; the metric helper applies softmax
+for AUC/AP. Result files contain per-level metrics and confusion matrices.
 
-Usage (on CINECA, via SLURM):
-    python -m comparison.training.test_hypclip \\
-        --checkpoint $WORK/hyp_fine_tuning/checkpoints/attribution_23cls_vitl14.pt \\
-        --root_dir   $FAST/datasets/iab_dataset \\
-        --level_start 0 --level_end 7 \\
-        --log_dir    $WORK/outputs/hypclip_fair
+--pre_resize optionally resizes the shortest edge before CLIP preprocessing,
+preserving aspect ratio. Record it as a separate preprocessing control.
+
+Usage: python -m comparison.training.test_hypclip --help
 """
 import os
 import argparse
@@ -55,17 +47,10 @@ def parse_args():
     p.add_argument('--task_id', type=int, default=1)
     p.add_argument('--log_dir', type=str, default='./logs_test_hypclip')
     p.add_argument('--pre_resize', type=int, default=0,
-                   help='CONTROL, off by default. Resize every test image to a shortest '
-                        'edge of N (aspect preserved) before the CLIP processor. Normally '
-                        'the processor takes the shortest edge to 224, so the native->224 '
-                        'ratio differs per class — and tests/audit_shortcuts.py shows 20 of '
-                        'the 22 classes emit at ONE native resolution, so that ratio is a '
-                        'candidate shortcut. Pre-resizing makes it the SAME for every image. '
-                        'A large accuracy drop means we were reading resolution; a small one '
-                        'means the fingerprints are real. Suggested: 512 — FLUX and SD1_5 are '
-                        'natively 512, so for them the whole control is a no-op and their '
-                        'recall is the built-in null. Runs marked with it are a control, '
-                        'never a headline number.')
+                   help='Preprocessing control: resize the shortest edge to N, preserving '
+                        'aspect ratio, before CLIP processing (0 disables). Report this '
+                        'setting separately; an accuracy change alone does not establish '
+                        'whether the model uses native-resolution cues.')
     return p.parse_args()
 
 

@@ -3,9 +3,9 @@ Parse the baselines' per-level test metrics straight from their SLURM .out logs
 (each job streams `Test metrics: {...}` to stdout via the logger's StreamHandler),
 and print a method x level table + optional CSV. Pure stdlib.
 
-Use when the test_results_degraded_*.txt files aren't reachable but the job .out
-logs are. Filters by job id so you don't mix pre-fix (old protocol) and post-fix
-(leakage-free / same-images) runs.
+Use when test_results_degraded_*.txt files are unavailable but job stdout is
+available. --min_jobid filters the selected logs; it does not validate their
+dataset splits or evaluation configuration.
 
 Run from wherever the iab_*_test_*.out files live, e.g.:
     cd $WORK/hyp_fine_tuning/hyperbolic_CLIP

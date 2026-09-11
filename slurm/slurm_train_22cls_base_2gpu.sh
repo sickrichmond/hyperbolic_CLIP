@@ -1,31 +1,17 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — ours @ 22 CLASSES, PURE BASE LOSS (no captions) — 2-GPU VARIANT
+# CINECA Leonardo — 22-class cone training without caption terms, two GPUs.
 #
-# Same experiment as slurm_train_22cls_base.sh but on 2 GPUs instead of 4.
-# WHY: the 4-GPU version asks for a WHOLE node; on a congested boost_usr_prod
-# with low fairshare priority it gets no reservation (StartTime=N/A) and can
-# wait indefinitely. A 2-GPU job is half a node → backfills like the 1-GPU
-# baselines that schedule fine.
+# Uses the same training arguments and checkpoint path as
+# slurm_train_22cls_base.sh, with different resource requests. Do not run both
+# against that output path concurrently. The total batch size remains 256;
+# GPU count can affect numerical results, memory use and elapsed time.
 #
-# RESULTS ARE IDENTICAL: train_attribution.py wraps in nn.DataParallel and the
-# total --batch_size (256) is unchanged, so 2 GPUs just split 128/GPU instead of
-# 64/GPU — gradients are averaged the same way (no BatchNorm in the model, only
-# LayerNorm) → same optimization, only ~2x wall time. Hence QOS=boost_qos_lprod
-# (4-day max) and --time=48:00:00.
-#
-# ⚠️ 128 img/GPU may OOM on a 64GB A100 (4-GPU run was 64/GPU). If it OOMs it
-# fails within minutes at the first step — then add gradient accumulation to
-# run 64/GPU at effective batch 256 (train_attribution.py has no --grad_accum
-# yet; ask and it's a small change).
-#
-# PREREQUISITE — 22-class manifest (login node, once):
+# Create the 22-class manifest before submission:
 #   IAB_EXCLUDE_GENERATORS=dalle3 python -m comparison.training.scripts.dump_split_manifest \
 #       --root_dir $FAST/datasets/iab_dataset \
 #       --out $WORK/hyp_fine_tuning/split_manifest_22cls.json
 #
-# Submit:  sbatch slurm/slurm_train_22cls_base_2gpu.sh
-# ============================================================================
+# Submit: sbatch slurm/slurm_train_22cls_base_2gpu.sh
 
 #SBATCH --account=EUHPC_D35_189          # verify with `saldo -b`
 #SBATCH --partition=boost_usr_prod
@@ -66,10 +52,8 @@ if [ ! -f "$MANIFEST" ]; then
     exit 1
 fi
 
-# 22 generatori (dalle3 escluso) + real, pure base loss (--no_captions), tutte le immagini,
-# selezione sulla val dell'harness. Iperparametri = quelli tuned (poi lo sweep li cerca).
-# CUDA_VISIBLE_DEVICES left to SLURM (2 GPUs → exposed as 0,1). Do NOT hardcode 0,1,2,3:
-# with only 2 GPUs allocated it would reference devices the cgroup doesn't grant.
+# Train 21 generator classes plus real without captions; select on harness val.
+# DataParallel uses the two visible devices with a total batch size of 256.
 CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --dataset_path    $DATA \
     --captions_dir    $CAPS \

@@ -1,29 +1,15 @@
-"""The styled comparison, read out of the metrics.json the harness already wrote.
+"""Summarize saved styled-dataset metrics without running models.
 
-The headline table (HiFi-Net 99.19 ... HypCLIP 83.31) invites one reading: CLIP-based
-methods lose ~16 points under a content shift. But two of the four target generators
-are SD3 and SD3_5 — the pair every model confuses on clean IAB too — so part of that
-gap is pre-existing twin confusion and not style at all. Splitting the two is the
-whole point of this script, and it needs no GPU: per_class.recall is in every file.
+Read <root>/<model>/<dataset>/metrics.json for the configured style names.
+Report full-label and restricted four-class accuracy, per-class recall,
+separate mean recalls for FLUX/SDXL and SD3/SD3_5, off-target predictions,
+and family-correct recall from the full-label confusion matrix.
 
-Reports, per model and style:
-  * 22-way and restricted 4-way accuracy (the published columns)
-  * per-class recall for the four targets
-  * TWIN-FREE accuracy: the mean over FLUX and SDXL alone, next to the mean over
-    SD3 and SD3_5. If the twin-free number is flat across styles, the styled gap is a
-    twin problem wearing a style costume.
-  * where the off-target mass goes — under JPEG everything drifts to `real`, and this
-    says whether a semantic shift does the same or something else.
-  * FAMILY-level accuracy from the same confusion matrix: a prediction counts as
-    correct if it lands anywhere in the true generator's family. This is the
-    "graceful degradation" claim measured on data already on disk — if a method keeps
-    the family while losing the leaf, a nested-cone readout would turn those errors
-    into correct coarser answers, and today it has no way to say so.
+Family groups come from --tree or the HiFi level-3 mapping. Compare in-family
+errors with the family-size uniform-error reference. These are descriptive
+aggregations, not evidence that style or model lineage caused the errors.
 
-    python -m comparison.training.scripts.styled_summary $R
-    python -m comparison.training.scripts.styled_summary $R --model hypclip --verbose
-
-Pure stdlib, login node. $R is the directory holding <model>/<dataset>/metrics.json.
+Usage: python -m comparison.training.scripts.styled_summary ROOT --help
 """
 import argparse
 import json

@@ -1,23 +1,15 @@
-"""
-Dump image embeddings of a checkpoint to a .npz file.
+"""Export image and anchor embeddings to an NPZ file.
 
-Runs the val split through the image encoder (image-only — no captions needed
-at inference) and writes:
-  - lorentz:     (N, D)  image embeddings, space components on the hyperboloid
-  - anchors:     (K, D)  class-anchor embeddings (same Lorentz space)
-  - labels:      (N,)    int class labels in [0, K)
-  - class_names: list[str]  e.g. ["real", "FLUX"]
-  - generators:  list[str]  per-sample generator string
-  - semantics:   list[str]  per-sample semantic class string
+Use IABCLIPDataset's internal train/val/all split (val by default); this CLI
+does not accept a comparison split manifest. Restore stored anchor tangents
+when present, otherwise encode checkpoint prompts in checkpoint class order.
+Generator enumeration is selected by CLI arguments, not inferred from the file.
 
-The downstream HoroPCA + UMAP visualisation works on these.
+Save lorentz (N,D), anchors (K,D), labels, class_names, anchor_texts, per-image
+generators/semantics and curv. This exporter is separate from training.poincare,
+which performs its own extraction and does not consume this NPZ.
 
-Usage:
-    python -m tests.extract_embeddings \\
-        --checkpoint   $WORK/hyp_fine_tuning/checkpoints/attribution_FLUX_vitl14_hier.pt \\
-        --dataset_path $WORK/hyp_fine_tuning/iab_dataset \\
-        --captions_dir $WORK/hyp_fine_tuning/iab_captions \\
-        --output       $WORK/hyp_fine_tuning/embeddings/val_hier.npz
+Usage: python -m tests.extract_embeddings --help
 """
 import argparse
 import warnings

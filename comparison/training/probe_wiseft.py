@@ -1,33 +1,16 @@
-"""
-WiSE-FT probe for the hyperbolic-CLIP attributor — NO training.
+"""Measure clean/degraded accuracy while scaling LoRA adapter contributions.
 
-Hypothesis under test (from diag_frequency.py): ours tolerates a pure low-pass
-well (blur sigma 1.5 costs 4 points) but collapses under near-lossless JPEG
-(q=90 halves accuracy). Since CLIP is pre-trained on web images that are largely
-JPEG already, its FROZEN features ought to be JPEG-robust — so the fragility was
-probably introduced by the LoRA fine-tuning latching onto the pristine-PNG
-statistics of the training set (a shortcut).
+For selected layers, use W_base + alpha*scaling*B@A and keep the projection
+head fixed. Re-encode default text templates at each alpha, score with
+-oxy_angle, and save accuracy/AUC and degraded/clean accuracy ratios.
 
-WiSE-FT (Wortsman et al., 2022) tests exactly this by interpolating in weight
-space between the zero-shot and the fine-tuned model. With LoRA the interpolation
-is exact and free: the adapter is additive, W(alpha) = W_base + alpha * scaling * B@A,
-so scaling every LoraLayer's `scaling` by alpha walks the straight path from the
-frozen CLIP (alpha=0) to the fine-tuned model (alpha=1). No retraining, no merge.
+This is adapter interpolation, not a zero-shot classifier at alpha=0.
+The diagnostic does not restore custom prompts/free anchors or axis scoring.
+It reuses the frequency diagnostic's degradation overrides, which require
+workers to inherit globals through fork. Accuracy ratios alone do not
+identify learned shortcuts.
 
-CAVEAT (read before interpreting): the hyperbolic `projection` head was trained
-jointly with the adapter at alpha=1, so alpha=0 is NOT a valid zero-shot model —
-the head expects LoRA-adapted features. Absolute accuracy is therefore expected
-to fall as alpha decreases, for reasons unrelated to robustness. The meaningful
-signal is the RETENTION ratio acc(degraded)/acc(clean) at each alpha: if retention
-RISES as alpha falls, the shortcut hypothesis is supported, and a less aggressive
-adapter (lower rank / fewer target modules / explicit WiSE-FT) becomes a real,
-augmentation-free architectural fix.
-
-Usage (CINECA, via SLURM — see slurm/slurm_probe_wiseft.sh):
-    python -m comparison.training.probe_wiseft \\
-        --checkpoint $WORK/hyp_fine_tuning/checkpoints/attribution_22cls_base_vitl14.pt \\
-        --root_dir   $FAST/datasets/iab_dataset \\
-        --log_dir    $WORK/outputs/hypclip_wiseft_22cls
+Usage: python -m comparison.training.probe_wiseft --help
 """
 import os
 import json
@@ -50,8 +33,7 @@ from geometry.lorentz import oxy_angle
 from transformers import CLIPTokenizer
 
 
-# (name, kind, param) — clean plus the JPEG ramp that exposed the collapse,
-# with one blur point as the "low-pass is fine" control.
+# (name, kind, parameter): clean images, three JPEG qualities and one blur level.
 CONDITIONS = [
     ('clean',   'identity', 0.0),
     ('jpeg90',  'jpeg',     90),

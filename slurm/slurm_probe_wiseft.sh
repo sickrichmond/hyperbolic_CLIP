@@ -1,24 +1,13 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — WiSE-FT PROBE (no training).
-# Walks the weight-space path between the frozen CLIP (alpha=0) and the LoRA
-# fine-tuned model (alpha=1) by scaling every LoraLayer's `scaling`, and measures
-# clean + JPEG accuracy at each alpha. Tests whether the JPEG fragility was
-# introduced by the adapter (shortcut on pristine-PNG statistics) rather than
-# being intrinsic to CLIP features.
+# CINECA Leonardo — adapter-scaling diagnostic without training.
 #
-# Read the RETENTION table (acc_degraded / acc_clean), not absolute accuracy:
-# the projection head was trained at alpha=1, so absolutes necessarily fall as
-# alpha decreases. Rising retention = hypothesis supported.
+# Scale LoRA contributions from alpha=1 to alpha=0 with the projection head
+# fixed. Compare clean and JPEG accuracy and their ratio at each alpha.
+# The probe uses exterior-angle scores; it is not an axis-loss evaluator.
+# CKPT overrides the checkpoint path.
 #
-# NOTE: this probes the CURRENT (pre-bugfix) 22-class checkpoint, which was
-# trained without the `real` class. That is fine for this question — it is about
-# feature fragility, not about the label space — but re-run it on the corrected
-# checkpoint once the 22-class retrainings finish.
-#
-# Submit:  sbatch slurm/slurm_probe_wiseft.sh
-# Override the checkpoint with:  CKPT=/path/to.pt sbatch slurm/slurm_probe_wiseft.sh
-# ============================================================================
+# Submit: sbatch slurm/slurm_probe_wiseft.sh
+
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --job-name=wiseft_22cls

@@ -1,27 +1,14 @@
-"""
-Quality-check (and optionally clean) the re-generated caption CSVs.
+"""Inspect caption CSVs and optionally write deduplicated copies.
 
-Does two jobs:
+Keep the last row per image stem and remove header rows. Report duplicate
+counts, empty captions and word lengths against the 40–80-word target.
+The coverage column divides unique caption stems by the count of real image
+files; it does not check that each stem exists on disk.
 
-1. **Dedup / clean** — the two overlapping SLURM jobs wrote to the same CSVs, so
-   each image may appear more than once and a stray header line ("ImgPath,...")
-   may be interleaved. This drops duplicate stems (keeping the last caption) and
-   removes stray headers. With --write_clean it writes the cleaned CSVs out
-   (non-destructive: to a separate directory).
+Read-only unless --write_clean is supplied. Choose a different output directory
+to preserve input CSVs; existing destination files are overwritten.
 
-2. **Validate** — per semantic class it reports:
-     - rows raw vs unique stems (how many duplicates were removed)
-     - coverage vs the real images on disk (should be 100% / 2000 per class)
-     - empty/failed captions
-     - caption word-count stats and the % inside the 40-80 word target.
-
-Read-only by default. Example:
-
-    python dataset_rebuilding/check_captions.py \\
-        --captions_dir $WORK/hyp_fine_tuning/iab_captions_detailed \\
-        --dataset_path $WORK/hyp_fine_tuning/iab_dataset \\
-        --samples 3 \\
-        --write_clean $WORK/hyp_fine_tuning/iab_captions_detailed_clean
+Usage: python dataset_rebuilding/check_captions.py --help
 """
 import argparse
 import csv

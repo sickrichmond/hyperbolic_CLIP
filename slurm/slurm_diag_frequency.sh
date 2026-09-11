@@ -1,19 +1,14 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — FREQUENCY / DEGRADATION DIAGNOSTIC (no training).
-# Runs comparison.training.diag_frequency on the current 22-class base-loss
-# checkpoint: a Gaussian-blur sweep (sigma 0.5..5) + a JPEG-quality ramp
-# (q 90..30) over the SAME clean test images, plus error-routing analysis
-# (-> real / -> same family / -> cross family) via the HiFi family hierarchy.
+# CINECA Leonardo — blur/JPEG diagnostic using harness test images.
 #
-# Built-in sanity check: blur3.0/blur5.0 and jpeg65/jpeg30 must reproduce the
-# benchmark eval numbers (~0.531 / 0.203 / 0.125 / 0.096). If they instead equal
-# the clean accuracy, the degradation monkeypatch/globals didn't propagate to the
-# DataLoader workers (needs the Linux 'fork' start method — the default here).
+# Runs comparison.training.diag_frequency with a blur-sigma sweep and JPEG
+# quality sweep, plus family-based error routing. The evaluator uses exterior
+# angles with default text anchors, not stored free anchors or axis-loss scoring.
+# Worker degradation overrides require the fork start method.
+# CKPT overrides the checkpoint path.
 #
-# CKPT defaults to the 22-class base-loss run; override with CKPT=... sbatch ...
-# Submit:  sbatch slurm/slurm_diag_frequency.sh
-# ============================================================================
+# Submit: sbatch slurm/slurm_diag_frequency.sh
+
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --job-name=diag_freq_22cls

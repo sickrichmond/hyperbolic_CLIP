@@ -1,27 +1,11 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — ours @ 22 CLASSES, IMAGE-CENTROID ANCHORS (no text, no captions)
+# CINECA Leonardo — image-centroid initialization for 22-class cone training.
 #
-# Anchors are NOT the encoded text templates any more: a single forward pass over
-# the train split gives the per-class mean CLIP embedding, the projection head
-# maps it to tangent space, and from there each anchor is a free parameter. Where
-# SD3 and SD3.5 images actually land decides how far apart their anchors start,
-# instead of what the text encoder makes of the two strings.
+# Compute or load clean per-class CLIP means, project them to tangent space,
+# and train the resulting free anchors. No caption terms or norm penalty.
+# The shared cache must match the backbone and training data.
 #
-# Hyperparameters = the sweep winners (slurm/sweep_configs_22cls.txt): lr 3e-4 is
-# the dominant axis (+5pt over 5e-5) and the anchor-norm regulariser hurts
-# (λ_norm 0 was 2nd overall) — the two have never been combined before. λ_neg
-# stays at 1.0: 2.0 collapses training to ~random.
-#
-# 2 GPUs + boost_qos_lprod: whole-node jobs starve on this cluster (see the
-# 4-GPU→2-GPU note in slurm_train_22cls_base_2gpu.sh). Results are unaffected —
-# DataParallel splits the same total batch of 256.
-#
-# The first run pays the ~20 min centroid pre-pass and writes ANCHOR_CACHE; the
-# augmented run reuses it. Launch this one first.
-#
-# Submit:  sbatch slurm/slurm_train_22cls_centroid.sh
-# ============================================================================
+# Submit: sbatch slurm/slurm_train_22cls_centroid.sh
 
 #SBATCH --account=EUHPC_D35_189          # verify with `saldo -b`
 #SBATCH --partition=boost_usr_prod

@@ -1,22 +1,15 @@
-"""Can the 22 classes be told apart from FILE METADATA alone?
+"""Measure class predictability from sampled image-file metadata.
 
-We get 0.993 clean accuracy from a two-term hinge loss. Before that goes in a paper,
-rule out the boring explanation: that the benchmark leaks the label outside the
-pixels. One leak is already known and documented — dataset.py:161 accepts .jpg/.jpeg
-ONLY for `real`, every synthetic is .png, so "has JPEG artifacts ⇒ real" is free on
-clean data — but nobody has ever measured how much the rest of the bookkeeping
-(native resolution, aspect ratio, file size, PNG bit depth) gives away.
+Use the harness class/path conventions to sample files, reading image headers
+and PNG IHDR fields without decoding pixels. Fit depth-limited decision trees
+on metadata subsets with a stratified 70/30 split; report generator and
+real-vs-fake balanced accuracy, feature importance and resolution frequencies.
 
-No pixels are decoded: PIL opens the header lazily and we read the PNG IHDR bytes
-directly. A few thousand stat+header reads, no GPU, runs on the login node.
+The aspect and scale_to_224 subset describes preprocessing-related covariates.
+Metadata predictability identifies possible confounds, not proof that an image
+classifier uses them. This is not the harness model-evaluation split.
 
-    IAB_EXCLUDE_GENERATORS=dalle3 python -m tests.audit_shortcuts \\
-        --root_dir $FAST/datasets/iab_dataset --per_class 500
-
-Read the SECOND accuracy line (geometry only, format features dropped): the first
-one is high by construction because of the .jpg leak. If geometry-only is near
-chance (4.5%), the shortcut is confined to real-vs-fake and the 22-way result is
-about pixels. If it is 0.5+, a slice of our accuracy is bookkeeping.
+Usage: python -m tests.audit_shortcuts --help
 """
 import argparse
 import os
@@ -30,16 +23,12 @@ from PIL import Image
 from comparison.dataset.ImageAttributionDataset.dataset import (
     model_class_to_label, semantic_to_relpath)
 
-# Format features: the known leak. Reported separately so the interesting number
-# (everything else) is not drowned by it.
+# Report file-format covariates separately from the other metadata features.
 FORMAT_FEATS = ["is_png", "is_jpeg", "png_bit_depth", "png_color_type", "png_interlace"]
 GEOM_FEATS = ["width", "height", "aspect", "area", "filesize", "bytes_per_pixel"]
 FEATS = GEOM_FEATS + FORMAT_FEATS
-# What actually SURVIVES CLIPImageProcessor (Resize shortest-edge 224 + CenterCrop 224):
-# not area, not filesize, not bytes_per_pixel — the model never sees a number. Only
-#   aspect       — decides how much of the frame the centre crop throws away;
-#   scale_to_224 — the native→224 ratio, whose resampling signature stays in the pixels.
-# A leak that scores high here is one the model could plausibly be reading.
+# Aspect and native-to-224 scale can affect pixels after CLIP preprocessing.
+# Metadata predictability does not establish that the image model uses it.
 SURVIVING = ["aspect", "scale_to_224"]
 
 
@@ -83,13 +72,7 @@ def features(path):
 
 
 def resolution_table(rows, labels):
-    """Per class: how many distinct native sizes, and the three most common.
-
-    This is what decides whether the geometry leak is a real confound. If a
-    generator emits at ONE resolution, its native→224 resampling ratio is a
-    constant, and the resampling signature becomes a per-class channel that
-    survives the preprocessing even though the numbers themselves do not.
-    """
+    """Print native-size frequencies and classes dominated by one resolution."""
     per_cls = defaultdict(Counter)
     for r, y in zip(rows, labels):
         per_cls[y][(r["width"], r["height"])] += 1

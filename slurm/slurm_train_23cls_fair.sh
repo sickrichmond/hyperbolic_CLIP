@@ -1,20 +1,16 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — Attribution-CLIP fine-tuning, 23-CLASS FAIR run
-# CLIP ViT-L/14, LoRA on both encoders, hyperbolic entailment-cone loss.
+# CINECA Leonardo — 23-class cone training with caption containment terms.
 #
-# Trains ours on ALL 23 IAB classes (22 generators + real), STRICTLY on the
-# baselines' train split (via --split_manifest → include-only), so the head-to-head
-# with resnet50/dct/hifi_net/defl is on identical data and (via test_hypclip.py)
-# identical test images. See NEXT_STEPS.md / test_hypclip.py.
+# Uses the train/val lists from the comparison manifest, including dalle3.
+# Caption filtering can reduce the train rows; this is not an all-image recipe.
+# The active harness class map must contain all 23 classes.
 #
-# PREREQUISITE — dump the split manifest once (cheap, login node is fine):
+# Create the manifest with all classes enabled:
 #   python -m comparison.training.scripts.dump_split_manifest \
 #       --root_dir $FAST/datasets/iab_dataset \
 #       --out $WORK/hyp_fine_tuning/split_manifest_default.json
 #
-# Submit:  sbatch slurm/slurm_train_23cls_fair.sh
-# ============================================================================
+# Submit: sbatch slurm/slurm_train_23cls_fair.sh
 
 #SBATCH --account=EUHPC_D35_189          # matches $WORK=/leonardo_work/EUHPC_D35_189 — verify
 #SBATCH --partition=boost_usr_prod       # A100 partition on Leonardo
@@ -54,11 +50,8 @@ if [ ! -f "$MANIFEST" ]; then
     exit 1
 fi
 
-# ── Training (all 23 IAB classes, strict train-set parity) ────────────────────
-# --split_manifest: ours is trained ONLY on the manifest's 'train' images (∩ captioned)
-# and never on the baselines' val/test → leakage-free + identical eval images.
-# Watch the startup log for "Split manifest: train ours on N ..." with N > 0, and
-# per-split "filtered out X (outside split manifest)".
+# Train on captioned rows in the manifest's train split; select on manifest val.
+# Check the startup split counts and filtered-row counts before comparing runs.
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --dataset_path    $DATA \

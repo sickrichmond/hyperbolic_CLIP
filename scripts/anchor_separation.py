@@ -1,11 +1,10 @@
-"""Pairwise anchor angles from a checkpoint.
+"""Report high-dimensional anchor angles and angular cone-overlap diagnostics.
 
-The Poincare snapshots cannot answer "do the cones overlap": 22 near-orthogonal
-directions in 128-d all project onto ~one point of any 2-D basis, which is why the
-INIT frame — known mean angle 89.9 deg — already looks like a single blob with fully
-overlapping cones. The angles have to be read from the anchors themselves.
+Read saved anchor tangents and apertures, deriving depth-coupled apertures when
+needed. Angular-cap overlap is tested against the sum of pairwise half-apertures;
+it is not inferred from a 2-D projection.
 
-Usage:  python scripts/anchor_separation.py <ckpt.pt> [more.pt ...]
+Usage: python scripts/anchor_separation.py checkpoint.pt [more.pt ...]
 """
 import sys
 import torch
@@ -41,11 +40,8 @@ for path in sys.argv[1:]:
     need = psi[iu[0]] + psi[iu[1]]
     print(f"  overlapping pairs: {(ang < need).sum()}/{len(ang)}"
           f"   worst deficit {(need - ang).max():.1f} deg")
-    # Stop criterion 1a, both forms. The PAIRWISE max(need/ang) is the exact
-    # disjointness ratio; 2*mean(psi)/min(ang) is what the epoch line and every
-    # recorded number use (sweepwin 12.8, Phase B `flat` 1.2), so it stays for
-    # comparability. They coincide only while psi is uniform — which it is today,
-    # and stops being the moment the aperture actually spreads.
+    # The pairwise ratio tests angular-cap separation. The aggregate ratio
+    # agrees with it only for equal apertures.
     print(f"  criterion 1a (< 1):  pairwise {(need / ang).max():.1f}"
           f"   legacy 2psi/min-angle {2 * psi.mean() / ang.min():.1f}")
 

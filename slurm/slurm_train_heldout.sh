@@ -1,29 +1,15 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — OPEN-SET setup: the sweepwin recipe with ONE GENERATOR HELD OUT
-# of training entirely, so it can serve as a genuine unknown at evaluation time.
+# CINECA Leonardo — omit one generator from 22-class training.
 #
-# Why this run has to exist: IAB ships 23 generators, but `dalle3` is a duplicate of
-# `4o` (measured: a 22-class model sends 99.8% of dalle3 to 4o), so the benchmark
-# offers no unknown at all. The only honest open-set test is to make one.
+# HELDOUT defaults to infinity. Exclude both dalle3 and HELDOUT from the active
+# class map, and train the remaining 21 classes using the 22-class manifest.
+# The held-out generator's images are not enumerated for training.
 #
-# HELDOUT=infinity is the default and the right default: no twin, a genuinely
-# different family (autoregressive, not diffusion), and it sits in the 1024px
-# resolution group — so the resampling channel cannot hand over the separation and
-# inflate the AUROC. janus-pro would be more convenient and much worse: it is the
-# only class at 384px, and the score would largely measure resampling.
+# The optional tests.probe_open_set diagnostic uses the cone decision rule.
+# For a matching probe, set IAB_EXCLUDE_GENERATORS=dalle3,HELDOUT and pass
+# --unknown HELDOUT. Dataset similarity must be assessed separately.
 #
-# Everything else is byte-identical to slurm_train_22cls_sweepwinner.sh. The 22-class
-# manifest is reused as-is: the held-out generator is simply never enumerated, so the
-# remaining 21 classes train on exactly the images they trained on before.
-#
-# Then, on a GPU node:
-#   IAB_EXCLUDE_GENERATORS=dalle3,infinity \
-#   python -m tests.probe_open_set --unknown infinity <checkpoint>
-#
-# Submit:  sbatch slurm/slurm_train_heldout.sh
-#          sbatch --export=ALL,HELDOUT=kling slurm/slurm_train_heldout.sh
-# ============================================================================
+# Submit: sbatch --export=ALL,HELDOUT=infinity slurm/slurm_train_heldout.sh
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -50,8 +36,7 @@ export HF_DATASETS_OFFLINE=1
 
 HELDOUT=${HELDOUT:-infinity}
 
-# dalle3 was never in the label space; the held-out class leaves it now, so the whole
-# pipeline (eval, anchors, probe_open_set) sees the same 21 classes the model knows.
+# Keep dataset enumeration, anchors and evaluation on the same 21-class map.
 export IAB_EXCLUDE_GENERATORS=dalle3,$HELDOUT
 
 REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
@@ -65,8 +50,7 @@ ALL="real 4o CogView3_PLUS FLUX KANDINSKY PIXART PLAYGROUND_2_5 SD1_5 SD2_1 SD3 
      SDXL gemini grok3 hidream hunyuan ideogram infinity janus-pro kling mid-5.2 mid-6.0"
 GENS=$(echo $ALL | tr ' ' '\n' | grep -vxF "$HELDOUT")   # -F: 'mid-5.2' is not a regex
 
-# A typo in HELDOUT would silently train on all 22 and the run would be worthless —
-# the entire point is that one class is absent.
+# Reject unknown held-out labels before launching training.
 [ "$(echo "$GENS" | wc -w)" = 21 ] || { echo "ERROR: '$HELDOUT' is not one of the 22"; exit 1; }
 echo "Holding out '$HELDOUT' — training on 21 classes"
 

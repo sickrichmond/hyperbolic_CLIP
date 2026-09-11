@@ -1,10 +1,11 @@
-"""The anchor-separation stats are now emitted unconditionally by the cone loss.
+"""Check separation diagnostics with the separation loss weight disabled.
 
-Two cases, because the whole point is that the Poincare snapshots cannot tell them
-apart: random 128-d anchors (mean angle ~90 deg, healthy) and collapsed anchors both
-draw as one overlapping blob in any 2-D projection.
+Compare random 128-D anchor directions with nearly coincident directions.
+The current script imports AttributionConeLoss, which is not exported by
+losses.attribution_loss. It cannot run until updated to EntailmentConeLoss
+or consolidated with the cone-loss regression checks.
 
-    python -m tests.test_sep_stats
+Run: python -m tests.test_sep_stats
 """
 import torch
 import torch.nn.functional as F

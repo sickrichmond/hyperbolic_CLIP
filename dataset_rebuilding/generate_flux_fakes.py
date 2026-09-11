@@ -1,31 +1,14 @@
-"""
-Pilot: regenerate FAKE images with FLUX from the new dense captions.
+"""Generate stem-named FLUX images from detailed captions of real images.
 
-For every REAL image we have a new detailed caption (dataset_rebuilding/
-caption_real_images.py). Here we feed that caption to FLUX and save the
-generated fake, so the synthetic counterpart is now produced from a rich prompt
-(harder to attribute) instead of IAB's thin original caption.
+Enumerate real images, look up captions by stem, and save
+<out_root>/FLUX/<semantic path>/<stem>.png. Seed each image deterministically
+from base_seed and stem. Defaults use FLUX.1-schnell in bf16 at 1024x1024.
 
-Output layout (NON-destructive — a separate root, the original iab_dataset is
-untouched). Each fake is named after its REAL image's stem, so real↔fake pair
-trivially by stem:
+Requires CUDA; optional CPU offload reduces GPU residency. Existing outputs
+are skipped unless --overwrite is set. Choose a separate root to preserve
+input data. Stem filenames differ from IAB's prompt-row fake naming.
 
-    <out_root>/FLUX/COCO/000000.png            ← from real real/COCO/000000.jpg
-    <out_root>/FLUX/AnimalFace/cat/flickr_cat_000003.png
-    ...
-
-This mirrors the IAB `<generator>/<semantic>` layout, so the result can later be
-pointed at by the dataset loader (or paired by stem with the reals).
-
-Resumable: existing PNGs are skipped. Safe to relaunch after a SLURM timeout.
-
-Example:
-    python dataset_rebuilding/generate_flux_fakes.py \\
-        --captions_dir $WORK/hyp_fine_tuning/iab_captions_detailed_clean \\
-        --dataset_path $WORK/hyp_fine_tuning/iab_dataset \\
-        --out_root     $WORK/hyp_fine_tuning/iab_recap_dataset \\
-        --model        black-forest-labs/FLUX.1-schnell \\
-        --max_per_class 100        # pilot subset; drop to do all 2000/class
+Usage: python dataset_rebuilding/generate_flux_fakes.py --help
 """
 import argparse
 import csv

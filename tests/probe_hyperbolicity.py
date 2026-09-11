@@ -1,34 +1,16 @@
-"""Is this feature space tree-like enough to deserve a hyperbolic model?
+"""Estimate fixed-base-point hyperbolicity on sampled cached features.
 
-The whole premise of HypCLIP is that hyperbolic space fits the data better than a
-sphere. Nobody ever tested it: `grep -rE 'hyperbolicity|gromov|delta_hyp'` over the
-repo returns nothing. This is the standard justification measure in the literature
-(Khrulkov et al., "Hyperbolic Image Embeddings", CVPR 2020, §5.1) and it is the
-first thing a reviewer will ask for.
+Use Euclidean pairwise distances D and base point w=row 0:
+    G[i,j] = (D[i,w] + D[j,w] - D[i,j]) / 2
+    delta = max_ij(max_k min(G[i,k], G[k,j]) - G[i,j])
+    delta_rel = 2*delta / diameter
 
-Gromov's four-point delta, computed from a fixed base point w (Fournier et al.):
+The calculation uses O(n^3) work and O(n^2) storage. It does not maximize
+over all base points and does not determine which classifier is best.
+Read X from clip_features_val.pt or a supplied cache file; no encoder pass
+is performed. --selfcheck checks synthetic tree and cycle metrics.
 
-    G[i][j] = ½ (d(i,w) + d(j,w) − d(i,j))          the Gromov product
-    δ       = max (G ⊗ G − G),   (G ⊗ G)[i][j] = max_k min(G[i][k], G[k][j])
-    δ_rel   = 2δ / diam
-
-δ_rel ∈ [0, 1]. **0 = an exact tree metric** (hyperbolic geometry is the right
-embedding space); **1 = maximally non-tree-like** (a 4-cycle hits exactly 1).
-Khrulkov reports ≈0.2–0.3 for natural image datasets — a value in that band means
-this data is no more tree-like than any other image set, and the geometry needs to
-be justified by what it *does* (hierarchy, open-set) rather than by how the
-features are shaped.
-
-Runs on the feature caches `scripts/extract_clip_features.py` already writes, so it
-needs no forward pass of its own:
-
-    python -m tests.probe_hyperbolicity --selfcheck
-    python -m tests.probe_hyperbolicity \\
-        frozen=$WORK/hyp_fine_tuning/clip_features_frozen \\
-        lora=$WORK/hyp_fine_tuning/clip_features_lora \\
-        projection=$WORK/hyp_fine_tuning/clip_features_projection
-
-CPU is enough at n=1500; a GPU makes the O(n³) min-max product instant.
+Usage: python -m tests.probe_hyperbolicity --help
 """
 import argparse
 import sys
@@ -38,11 +20,9 @@ import torch
 
 
 def delta_hyperbolicity(D):
-    """(δ, δ_rel) from a square distance matrix, base point = the row-0 point.
+    """Return the row-0 Gromov-product violation and 2*violation/diameter.
 
-    A fixed base point is the usual trade: the true δ maximises over all of them,
-    but δ_w ≤ 2δ for any w, so the number is an estimate of the right order and the
-    O(n⁴) version buys nothing at this scale.
+    This is a fixed-base-point statistic, not a maximum over all base points.
     """
     row = D[0]
     G = 0.5 * (row.unsqueeze(1) + row.unsqueeze(0) - D)

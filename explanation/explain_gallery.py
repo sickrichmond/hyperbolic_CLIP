@@ -1,31 +1,14 @@
-"""
-Per-class explanation gallery for AttributionCLIP.
+"""Build per-class AGCAM or Guided explanation galleries.
 
-Unlike explain_image.py (which explains ONE image against all class cones),
-this script picks one representative image *per class* — a real FLUX sample for
-the FLUX class, a real SD3 sample for the SD3 class, etc. — explains each with
-its own class heatmap, and assembles a side-by-side comparison grid.
+Choose one sorted image per requested class within one semantic directory,
+explain its own-class score, and save heatmaps, overlays, a grid and JSON.
+--image_index chooses the sample; titles compare the prediction with its label.
 
-This answers the question: "How does the model look at a genuine sample of each
-generator?", which is what you want for comparing attribution behaviour across
-generators rather than dissecting a single image.
+The CLI re-encodes checkpoint text prompts and uses exterior-angle scoring.
+It does not restore free-anchor/axis-loss semantics; its attention forward
+also omits fixed image-radius normalization.
 
-Usage
------
-    python -m explanation.explain_gallery \\
-        --checkpoint    $WORK/hyp_fine_tuning/checkpoints/attribution_all_no_dalle_d16.pt \\
-        --dataset_path  $WORK/hyp_fine_tuning/iab_dataset \\
-        --semantic      COCO \\
-        --method        agcam \\
-        --output_dir    $WORK/hyp_fine_tuning/outputs/gallery/d16
-
-Notes
------
-* One semantic is fixed (default COCO) so every class is shown on the same kind
-  of content — a fair comparison. Override with --semantic.
-* --image_index selects which sample per class (default 0 = first file).
-* The model's predicted class is annotated per tile; a green title means the
-  prediction matches the tile's true class, red means it does not.
+Usage: python -m explanation.explain_gallery --help
 """
 from __future__ import annotations
 

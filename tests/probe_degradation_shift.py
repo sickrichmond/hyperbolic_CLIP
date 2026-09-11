@@ -1,41 +1,15 @@
-"""How far does a degradation move the embedding, in the same units as the anchor margins?
+"""Measure angular embedding shifts between paired image views.
 
-The robustness gap is not explained yet. Two hypotheses died:
-  - "tight anchors cause the collapse" — omniaug has the tightest anchors measured
-    (1.7°) and is the most robust;
-  - "widening the margin cures it" — Run C has 4x sweepwin's margin (8.8° vs 2.2°)
-    and collapses identically under JPEG (AUC 0.637 vs 0.643).
+For degradations, sample aligned clean/degraded images from the manifest's
+validation split. For --styled, intersect relative paths in two image roots;
+matching paths are assumed to represent corresponding source content.
 
-What survives is a quantitative version: a margin only helps if it is larger than the
-displacement the degradation induces. This measures that displacement directly — the
-angle between the embedding of the SAME image, clean and degraded — and puts it next
-to the anchor margins from tests/probe_anchor_spread.py.
+Report shift quantiles, the fraction exceeding the closest anchor-pair angle,
+and cosine-classification flips. Cosine is used for both model geometries, so
+these flips need not match a hyperbolic checkpoint's own decision rule.
+The shift/separation ratio is a diagnostic, not a robustness guarantee.
 
-    displacement >> margin, for both hyperbolic runs  -> it IS a threshold story, and
-        8.8° was simply too small; only the euclidean's 65° clears it.
-    displacement small (a few degrees)                -> the margin is irrelevant and
-        the euclidean's advantage lives in the ENCODER, not in the anchors.
-
-Predictions are `argmax_c cos(x, a_c)` for both geometries: on the euclidean model that
-IS the decision rule, and on the hyperbolic one it agrees with `argmin_c ξ_c` on 0.9998
-of images (tests/probe_cone_vs_cosine.py), so the flip rate is the model's own.
-
-    IAB_EXCLUDE_GENERATORS=dalle3 python -m tests.probe_degradation_shift \\
-        $CK/attribution_22cls_sweepwin_vitl14.pt \\
-        $CK/attribution_22cls_promptsC_ce_vitl14.pt \\
-        $CK/attribution_22cls_euclidean_d128_vitl14.pt
-
-Levels are the eval's: 1=DS0.5 2=DS0.25 3=JPEG65 4=JPEG30 5=Blur3 6=Blur5. GPU node.
-
-`shift / minimum margin` turned out to order every model measured so far, with a sharp
-threshold at 1 (below it AUC 0.94-1.00, above it 0.64-0.66). --styled asks whether that
-is a law about DEGRADATION or a law about SHIFT, by swapping the degraded view for the
-same content rendered in another style — the styled sets append --style to the same
-dense caption, so the pairing is exact:
-
-    IAB_EXCLUDE_GENERATORS=dalle3 python -m tests.probe_degradation_shift \\
-        --styled $FAST/datasets/iab_recap_dataset_v2 $FAST/datasets/iab_recap_cartoon_v2 \\
-        $CK/attribution_22cls_sweepwin_vitl14.pt $CK/attribution_22cls_euclidean_d128_vitl14.pt
+Usage: python -m tests.probe_degradation_shift --help
 """
 import argparse
 import math
@@ -84,10 +58,10 @@ _CACHE = {}
 
 
 def paired_datasets(args, names, clip_name, level):
-    """The same images twice, clean and degraded — identical order, asserted.
+    """Return aligned clean/degraded validation subsets with fixed-seed sampling.
 
-    Cached: enumerating 437k files takes about as long as the forward passes, and every
-    checkpoint here shares the same clip_name and levels.
+    Cache by processor name and level; other dataset arguments must remain
+    fixed within the invocation.
     """
     key = (clip_name, level)
     if key in _CACHE:
@@ -110,12 +84,7 @@ def paired_datasets(args, names, clip_name, level):
 
 
 class StyledView(Dataset):
-    """Just enough of IABCLIPDataset for embed(): open the file, CLIP-preprocess it.
-
-    The styled sets carry no captions on disk and none of their four generators is
-    grok3, so the caption, degradation and watermark-crop branches would all be
-    dead code here.
-    """
+    """Open RGB files and apply CLIP preprocessing without captions or cropping."""
 
     def __init__(self, paths, clip_name):
         from transformers import CLIPImageProcessor
@@ -132,14 +101,10 @@ class StyledView(Dataset):
 
 
 def styled_pair(args, clip_name):
-    """The same CONTENT in two styles — the semantic analogue of clean vs degraded.
+    """Pair matching relative image paths from two roots, then sample deterministically.
 
-    Styled sets are produced by appending --style to the SAME dense caption
-    (dataset_rebuilding/generate_fakes.py:286), so a given relative path
-    <generator>/<semantic>/<stem> names the same source image in every style.
-    Intersecting the two file trees is therefore an exact content pairing, and the
-    resulting angle is directly comparable with the degradation shifts and with the
-    anchor margins.
+    Corresponding paths are assumed to refer to the same source content.
+    Cache by CLIP processor name and root pair for this invocation.
     """
     key = (clip_name, tuple(args.styled))
     if key in _CACHE:

@@ -3,7 +3,7 @@
 # Setup script for CINECA Leonardo — run this ONCE on the login node.
 # Uses python/3.11.7 + venv (no conda available on this allocation).
 #
-# Usage:  bash $WORK/hyp_fine_tuning/hyperbolic_CLIP/scripts/setup_cineca.sh
+# Usage from the repository root: bash slurm/setup_cineca.sh
 # ============================================================================
 
 set -e

@@ -1,17 +1,8 @@
-"""Reading images off Leonardo's Lustre filesystem without dying.
+"""Open images as RGB with bounded retries for filesystem errors.
 
-Under heavy parallel I/O (several jobs, several dataloader workers each, all on
-the same dataset) Lustre sporadically returns a transient PermissionError or
-OSError on an individual file — a file that has been read successfully for a
-whole epoch can suddenly fail once, and is perfectly readable a second later.
-Three 20h jobs died ~40 minutes in for exactly this reason.
-
-The policy is deliberate: retry the SAME file with escalating backoff, never skip
-it and never substitute another sample. A loader that quietly drops unreadable
-files trains on a different dataset than the one it reports, and nothing in the
-results would show it. If a file is still unreadable after every attempt the
-exception propagates and the job fails — which is what should happen when the
-permission problem is real rather than transient.
+Retry the same path up to eight times by default, sleeping with linear backoff
+after each failed attempt. Return the decoded RGB image on success; propagate
+the last error when attempts are exhausted. Samples are never skipped or replaced.
 """
 import time
 

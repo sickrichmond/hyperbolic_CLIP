@@ -1,25 +1,10 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — 22 classes, the OPTUNA WINNER (study hypclip_22cls, trial #38).
+# CINECA Leonardo — fixed text-anchor cone recipe on the 22-class manifest.
 #
-# 62 trials with a value (42 complete, 20 pruned), best 0.9950 clean val_balanced,
-# against 0.9886 for the hand-tuned sweepwin recipe. Four trials tied at 0.9950
-# (#38, #49, #53, #57); #38 is the one Optuna reports as best.
+# Runs five epochs with LoRA rank 8/alpha 16 and the explicit loss/optimizer
+# settings below. No caption terms. Saves the best balanced-val checkpoint.
 #
-# The trials threw their checkpoints away (they wrote to $TMPDIR), so the winner has
-# to be retrained once to exist as an artifact. Values below are the trial's arguments
-# verbatim, at the precision optuna_search.py formats them with (%.4g, lr %.6g), so
-# this reproduces trial #38 exactly rather than approximately.
-#
-# What the search moved, relative to sweepwin — it LOOSENED every hyperbolic-specific
-# constraint: min_radius 0.5 -> 0.9921 and target_norm 4.0 -> 3.892 more than double the
-# cone half-aperture (ψ ≈ 0.52 rad against 0.246), and lambda_norm halves from 0.5 to
-# 0.25. lora_r drops 16 -> 8 while lr doubles. Worth measuring after this run:
-#   python -m tests.probe_open_set --anchors_only $CKPT     # is ψ still uniform?
-#   python -m tests.probe_cone_vs_cosine $CKPT              # still 0.9998 agreement?
-#
-# Submit:  sbatch slurm/slurm_train_22cls_optunawin.sh
-# ============================================================================
+# Submit: sbatch slurm/slurm_train_22cls_optunawin.sh
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod

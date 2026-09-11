@@ -1,35 +1,10 @@
-"""Self-check for the axis-ray distance. No GPU, no data, no checkpoint.
+"""CPU checks for distance to the geodesic ray beyond a cone apex.
 
-    python -m tests.test_axis_ray_dist
+Compare axis_ray_dist with brute-force minimization at three curvatures.
+Check branch continuity, angular monotonicity, image gradients on both
+branches, radial/tangential anchor gradients and finite on-axis gradients.
 
-`axis_ray_dist(x, a)` is the geodesic distance from an image to the AXIS RAY of its
-cone: the geodesic from the origin through the apex `a`, restricted to the far side of
-`a` (the side the cone opens toward). It is the always-on regulariser that fills the
-entailment hinge's dead interior — the hinge stops pulling the moment a point is inside
-its cone, this does not.
-
-Six invariants. The first two pin down that it is the distance we think it is; the rest
-pin down the three failures that would be invisible in a training log: a fold-back that
-turns the far side into an attractor, a branch with no gradient, and an anchor that can
-rotate but not move radially.
-
-  1. EXACT: matches a brute-force minimisation over the ray, at three curvatures;
-  2. CONTINUOUS at the branch switch — there the perpendicular foot IS the apex;
-  3. STRICTLY MONOTONE in the angle over all of [0, pi]. The obvious alternative —
-     distance to the full GEODESIC, sinh(d) = ||x_perp|| — is bilateral: ||x_perp|| is
-     invariant under x -> -x, so theta=160 deg scores exactly as theta=20 deg and
-     descending past 90 deg means walking to the antipode. That is the degeneracy Run C
-     hit with a pair of anchors at 179 degrees;
-  4. NO DEAD ZONE: non-zero gradient on the image on BOTH branches. The ray from the
-     ORIGIN is one-sided too but goes flat past 90 deg, where the anchor drops out of
-     the expression entirely — a dead zone exactly where random anchors start;
-  5. THE ANCHOR MOVES RADIALLY on the apex branch and only ROTATES on the perpendicular
-     branch. Anchor depth is a learnable quantity only because of the first; with psi
-     coupled to depth (psi = asin(2K/||a||)) that is what lets each class find its own
-     aperture instead of every anchor being pinned to one norm by L_norm;
-  6. an image exactly ON its axis gives d = 0 and a FINITE gradient. This is not a
-     corner case: it is the point the term drives every sample toward, so torch.norm's
-     NaN gradient at zero would be reached in practice, not in theory.
+Run: python -m tests.test_axis_ray_dist
 """
 import math
 

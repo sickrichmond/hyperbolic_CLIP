@@ -1,13 +1,11 @@
-"""Self-check for the class-count wiring of every ported attributor.
+"""Check class-count wiring for the registered comparison methods.
 
-Runs on CPU, no dataset, no framework:
+Run 23-class and dalle3-excluded 22-class cases in separate subprocesses,
+since the label map is loaded at import time. Check registrations, real's label
+and hierarchy mappings against a fixed oracle. RepMix head/gating checks run
+only when CUDA is available. No image dataset is required.
 
-    python -m comparison.training.tests_new_methods
-
-Catches the class of bug that invalidated the first 22-class runs: a head sized
-from a hardcoded 23, or `real` identified by a hardcoded index, both of which go
-wrong the moment IAB_EXCLUDE_GENERATORS re-indexes the label map. Each case is
-re-imported in a subprocess because the label map is read at import time.
+Run: python -m comparison.training.tests_new_methods
 """
 import os
 import subprocess

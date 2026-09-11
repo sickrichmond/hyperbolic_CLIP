@@ -1,17 +1,14 @@
-"""D3 — does JPEG REMOVE our signal or INJECT a false one?
+"""Probe exterior-angle predictions under JPEG compression.
 
-Evaluates an existing checkpoint at JPEG quality 95/85/75/65/30 on the harness
-test split. The benchmark suite starts at 65, so 95/85/75 are new territory:
+Evaluate qualities 95, 85, 75, 65 and 30 on the same fixed-seed subset of up to
+4,000 harness test images. Report harness metrics, class recalls, spatial image
+norms and exterior-angle diagnostics. Uses FAST/datasets/iab_dataset.
 
-  * accuracy already broken at q95 (visually lossless)  -> JPEG *injects* a
-    structure the model reads as a class (see dataset.py:161 — only `real`
-    accepts .jpg, so "JPEG artifact => real" is a free feature on clean data);
-  * smooth decay q95 -> q65                             -> JPEG *removes* the
-    band our fingerprint lives in.
+This probe always scores with oxy_angle and derives apertures from depth;
+it does not implement the axis-loss checkpoint decision rule. Quality curves
+alone do not distinguish signal removal from compression-induced cues.
 
-Standalone: touches no repo file. Run it on a GPU node.
-
-    python -m tests.probe_jpeg_quality $WORK/hyp_fine_tuning/checkpoints/attribution_22cls_sweepwin_vitl14.pt
+Usage: IAB_EXCLUDE_GENERATORS=dalle3 python -m tests.probe_jpeg_quality CHECKPOINT
 """
 import os
 import sys
@@ -46,10 +43,7 @@ def main(ckpt_path):
     names = harness_class_names()
     real_idx = names.index('real')
 
-    # Anchor geometry. A degraded image loses specificity, so its embedding drifts
-    # toward the origin — and a shallow point falls into the WIDEST cone. If `real`
-    # holds the smallest ‖t‖ it is the default sink for every corrupted image, which
-    # would explain recall(real)=1.000 under JPEG without any codec shortcut.
+    # Report depth-coupled apertures; these are not free axis-loss widths.
     mr = ckpt.get('min_radius', 0.1)
     psi = half_aperture(x_anc, curv=curv, min_radius=mr)
     order = torch.argsort(psi, descending=True)

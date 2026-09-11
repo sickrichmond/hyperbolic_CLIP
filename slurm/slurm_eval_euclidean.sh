@@ -1,20 +1,11 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — 22-CLASS eval of the EUCLIDEAN ablation, on the HARNESS test
-# set. Same protocol as slurm_eval_22cls.sh (get_dataloader +
-# calculate_metrics_for_test, levels 0..6), same output file format, so the
-# euclidean column drops straight into the comparison tables next to the
-# hyperbolic ones.
+# CINECA Leonardo — comparison-harness evaluation of the spherical classifier.
 #
-# This is the geometry ablation's eval: compare it against
-# $WORK/outputs/hypclip_sweepwin_22cls, which is one variable away (same backbone,
-# LoRA, manifest, anchors, epochs, LR — only the geometry differs).
+# Runs degradation levels 0–6 and writes the harness result format.
+# DIM selects the default checkpoint and log directory; CKPT and LOGDIR
+# override them directly. IAB_EXCLUDE_GENERATORS excludes dalle3.
 #
-# CKPT and LOGDIR follow DIM, or override them directly.
-#
-# Submit:  sbatch slurm/slurm_eval_euclidean.sh
-#          sbatch --export=ALL,DIM=8 slurm/slurm_eval_euclidean.sh
-# ============================================================================
+# Submit: sbatch --export=ALL,DIM=128 slurm/slurm_eval_euclidean.sh
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod

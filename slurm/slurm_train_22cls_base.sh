@@ -1,23 +1,13 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — ours @ 22 CLASSES, PURE BASE LOSS (no captions)
-# CLIP ViT-L/14, LoRA, hyperbolic entailment-cone loss — image-in-class-cone only.
+# CINECA Leonardo — 22-class cone training without caption terms, four GPUs.
 #
-# Changes vs the 23-class run (slurm_train_23cls_fair.sh):
-#   - IAB_EXCLUDE_GENERATORS=dalle3  → whole pipeline runs at 22 classes.
-#   - --no_captions  → disables BOTH caption terms → trains on ALL images (no
-#     caption requirement) = same sample set as the baselines.
-#   - manifest split_manifest_22cls.json (regenerate it first, see below), and
-#     ours validates on the HARNESS VAL split (no double val carve).
-#   - --generators WITHOUT dalle3.
-#
-# PREREQUISITE — regenerate the 22-class manifest once (login node, cheap):
+# Uses the comparison train/val manifest and saves the best balanced-val model.
+# Create the manifest before submission:
 #   IAB_EXCLUDE_GENERATORS=dalle3 python -m comparison.training.scripts.dump_split_manifest \
 #       --root_dir $FAST/datasets/iab_dataset \
 #       --out $WORK/hyp_fine_tuning/split_manifest_22cls.json
 #
-# Submit:  sbatch slurm/slurm_train_22cls_base.sh
-# ============================================================================
+# Submit: sbatch slurm/slurm_train_22cls_base.sh
 
 #SBATCH --account=EUHPC_D35_189          # verify with `saldo -b`
 #SBATCH --partition=boost_usr_prod
@@ -57,8 +47,7 @@ if [ ! -f "$MANIFEST" ]; then
     exit 1
 fi
 
-# 22 generatori (dalle3 escluso) + real, pure base loss (--no_captions), tutte le immagini,
-# selezione sulla val dell'harness. Iperparametri = quelli tuned (poi lo sweep li cerca).
+# Train 21 generator classes plus real without captions; select on harness val.
 CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --dataset_path    $DATA \
     --captions_dir    $CAPS \

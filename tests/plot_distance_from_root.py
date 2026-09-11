@@ -1,33 +1,13 @@
-"""
-Plot the distribution of hyperbolic distance-from-root, per class.
+"""Plot image distance-from-origin distributions by class and real/fake group.
 
-This is the AttributionCLIP analogue of Figure 4 in HySAC: for every image we
-measure its geodesic distance from the origin (root) of the Lorentz model and
-plot the per-class distributions.
+Load image embeddings and compute Lorentz geodesic distances to the origin.
+Write <output>_per_class.png and <output>_real_vs_fake.png plus printed summaries.
+IABDataset enumerates the requested classes/semantics without a harness split.
 
-Interpretation caveat
-----------------------
-In HySAC the radial coordinate (distance from root) encodes the safe/unsafe
-hierarchy, so the distributions separate cleanly. In this attribution model the
-radius mainly separates **real vs fake**; individual generators are separated
-*angularly* (entailment cones / oxy_angle), NOT radially. So expect `real` at
-one radius and the fake generators largely overlapping at another — that is the
-honest, expected result, not a bug. The cleaner HySAC-style read is the
-real-vs-fake panel.
+Fixed-image-radius checkpoints have approximately constant distances by
+construction; the plot does not imply radial real/fake or class separation.
 
-Two figures are written:
-  - <output>_per_class.png : one KDE per generator (what you asked for).
-  - <output>_real_vs_fake.png : two distributions (real vs all-fake), the
-    direct HySAC Fig.4 analogue.
-
-Usage
------
-    python -m tests.plot_distance_from_root \\
-        --checkpoint    $WORK/hyp_fine_tuning/checkpoints/attribution_all_no_dalle_d16.pt \\
-        --dataset_path  $WORK/hyp_fine_tuning/iab_dataset \\
-        --semantics     COCO \\
-        --max_per_class 300 \\
-        --output        $WORK/hyp_fine_tuning/outputs/dist_from_root/d16
+Usage: python -m tests.plot_distance_from_root --help
 """
 from __future__ import annotations
 

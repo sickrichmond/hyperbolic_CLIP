@@ -1,11 +1,9 @@
-"""Self-check for the Optuna pruning hook — stdlib only, runs on the login node.
+"""Check the Optuna pruning parser against trainer validation output.
 
-The whole pruning mechanism rests on one regex matching a line the trainer prints
-and NOT matching any of the lines around it. If that silently stops matching (a
-tweak to the trainer's print), every trial would run to completion with `best=-1`
-and the study would be garbage without failing.
+Only validation-summary lines should yield balanced accuracy; progress lines
+and per-class recalls must not match. Requires only the standard library.
 
-    python -m tests.test_optuna_parse
+Run: python -m tests.test_optuna_parse
 """
 from scripts.optuna_search import VAL_RE
 

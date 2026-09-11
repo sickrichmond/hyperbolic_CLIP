@@ -1,34 +1,16 @@
-"""Do the cones buy anything on an UNKNOWN generator, where cosine cannot?
+"""Compare unknown-generator scores for exterior-angle cone checkpoints.
 
-Closed-set is settled: `argmin ξ` and `argmax cos` agree at 0.9998
-(tests/probe_cone_vs_cosine.py) and a plain nn.Linear on the same 128-d vectors
-beats the cones 99.2 vs 98.86. So on 22-way accuracy the geometry buys nothing.
+Known images come from the manifest's validation split. Unknown images come
+from a selected generator outside the checkpoint/harness label space.
+Compare min(xi), -max(cosine), -spatial_norm and min(xi-psi); larger values
+indicate unknowns. Report AUROC, FPR at an empirical 95% unknown recall,
+zero-margin rejection and predicted-class counts.
 
-One degree of freedom is left, and it is the only one the sphere does not have:
-the NORM of the image embedding. cos is scale-invariant by construction; ξ is not
-(oxy_angle divides by ‖x‖). In entailment-cone terms an image that belongs to no
-leaf should stay near the origin — generic, uncommitted — and therefore fall
-outside every cone. That is a claim about open-set rejection, and it is testable
-for free: `dalle3` is on disk and excluded from training by IAB_EXCLUDE_GENERATORS.
+The implementation uses oxy_angle and depth-coupled apertures, not the
+axis-loss decision rule. Unknown-class predictions do not establish whether
+two generators are duplicates. --selfcheck checks score orientations.
 
-Four scores over the SAME embeddings, oriented so higher == "unknown":
-
-    xi_min    min_c ξ_c                the model's own confidence
-    neg_cos   -max_c cos(x, a_c)       the same thing without the geometry
-    neg_norm  -‖x_img‖                 the radius alone, no anchors at all
-    margin    min_c (ξ_c - ψ_c)        the PARAMETER-FREE cone rule: >0 == outside
-                                       every cone == "none of the above"
-
-Read `AUROC`. xi_min meaningfully above neg_cos is the contribution — the geometry
-rejecting what cosine cannot. Equal, and the conclusion is that a scalar
---target_norm disables depth by construction and the fix is a per-hierarchy-level
-target_norm, not a better threshold. `margin` matters separately: it is the only
-score here that needs no held-out unknowns to pick a threshold.
-
-    IAB_EXCLUDE_GENERATORS=dalle3 python -m tests.probe_open_set \\
-        $WORK/hyp_fine_tuning/checkpoints/attribution_22cls_sweepwin_vitl14.pt
-
-Standalone: touches no repo file. GPU node. `--selfcheck` needs neither GPU nor data.
+Usage: python -m tests.probe_open_set --help
 """
 import argparse
 import os
@@ -176,8 +158,7 @@ def main():
         print(f"{name:10s} {roc_auc_score(y, s.numpy()):7.4f} {fpr:10.4f}   "
               f"{k[name].mean():+.4f} / {u[name].mean():+.4f}")
 
-    # The control: if ξ ranks images exactly as cosine does, it cannot beat it, and any
-    # AUROC gap above is noise. Only ‖x_img‖ can make them differ.
+    # Compare image-score rankings; this does not identify a causal mechanism.
     rank = lambda t: t.argsort().argsort().float()
     rho = torch.corrcoef(torch.stack([
         rank(torch.cat([k["xi_min"], u["xi_min"]])),
@@ -198,9 +179,7 @@ def main():
         q = torch.quantile(-d["neg_cos"], torch.tensor([0.01, 0.5, 0.99]))
         print(f"  {lbl:8s} p01={q[0]:.6f}  median={q[1]:.6f}  p99={q[2]:.6f}")
 
-    # THE control on whether dalle3 is a fair unknown at all: if it lands overwhelmingly
-    # on one known class, it is a near-duplicate of that generator, not a novel one, and
-    # confident predictions are the correct behaviour rather than an OSR failure.
+    # Report which known classes receive the predictions from each image set.
     print("\nwhere argmin ξ sends them (top 5):")
     for lbl, d in (("known", k), ("unknown", u)):
         h = torch.bincount(d["pred"].long(), minlength=len(names))

@@ -11,11 +11,8 @@ set -euo pipefail
 
 MODEL="${1:-qwen3.5:9b}"
 
-# IMPORTANT: Ollama v0.30.x dropped CUDA-kernel compatibility for Leonardo's
-# driver (535.274.02 / CUDA 12.2) → models crash on load with
-# "CUDA error: device kernel image is invalid". v0.24.0 is the last release that
-# BOTH runs on this driver AND supports qwen3.5. Do not bump without re-testing
-# on a GPU node (see dataset_rebuilding/README.md).
+# Default runtime pin for Leonardo captioning. Test model loading on an
+# allocated GPU before overriding OLLAMA_VERSION; setup runs on the login node.
 OLLAMA_VERSION="${OLLAMA_VERSION:-v0.24.0}"
 
 # Persist large data under $WORK/hyp_fine_tuning (home quota is small; bare $WORK
@@ -35,8 +32,7 @@ echo "OLLAMA_MODELS: $OLLAMA_MODELS"
 echo "MODEL:         $MODEL"
 
 # ── Install Ollama binary (no root needed; it's a self-contained bundle) ──────
-# Recent Ollama releases ship a zstd-compressed tarball (ollama-linux-amd64.tar.zst),
-# NOT the old .tgz. We fetch it from GitHub releases.
+# Fetch the zstd-compressed Linux AMD64 bundle from the selected GitHub release.
 if [ "$OLLAMA_VERSION" = "latest" ]; then
     URL="https://github.com/ollama/ollama/releases/latest/download/ollama-linux-amd64.tar.zst"
 else

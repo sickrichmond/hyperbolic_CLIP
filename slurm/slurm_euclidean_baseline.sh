@@ -1,28 +1,12 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — EUCLIDEAN BASELINE, 22 classes. The geometry ablation.
+# CINECA Leonardo — 22-class spherical cosine classifier.
 #
-# One variable from `ours-sweepwin`: SAME backbone (ViT-L/14), SAME LoRA (16/32),
-# SAME embedding width (128), SAME 22 classes, semantics, manifest, batch size,
-# epochs, LR and weight decay. The only difference is that embeddings live on the
-# Euclidean unit sphere and images are matched to the text anchors by cosine
-# similarity (a trainable zero-shot CLIP) instead of by hyperbolic entailment
-# cones. The gap against attribution_22cls_sweepwin_vitl14.pt IS the contribution
-# of the geometry — the ablation the whole premise of the paper rests on.
+# Uses CLIP ViT-L/14, q/v LoRA, a shared MLP, cross-entropy and learned logit scale.
+# DIM controls embedding width (default 128). Train and validation images come
+# from the comparison manifest. Evaluate with slurm/slurm_eval_euclidean.sh.
+# Compare full recipes when attributing differences to geometry or loss.
 #
-# The cone / norm / caption hyperparameters have no analogue on the sphere and are
-# intentionally absent (see losses/euclidean_attribution_loss.py). What replaces
-# them is a single learned logit_scale, CLIP-style.
-#
-# --split_manifest is NOT optional here: without it this would train on the
-# caption-based split while the hyperbolic run trains on the harness manifest, and
-# the comparison would carry two variables instead of one.
-#
-# ~2.5h on 2 GPUs. Eval afterwards with slurm/slurm_eval_euclidean.sh.
-#
-# Submit:  sbatch slurm/slurm_euclidean_baseline.sh
-#          sbatch --export=ALL,DIM=8 slurm/slurm_euclidean_baseline.sh   # low-d sweep
-# ============================================================================
+# Submit: sbatch --export=ALL,DIM=128 slurm/slurm_euclidean_baseline.sh
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod

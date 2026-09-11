@@ -8,15 +8,12 @@ from geometry.lorentz import exp_map0
 
 
 class AttributionCLIP(nn.Module):
-    """
-    CLIP (vision + text) with LoRA on both encoders, plus a shared projection
-    head to the Lorentz model of hyperbolic space.
+    """CLIP with configurable LoRA targets and a shared Lorentz projection head.
 
-    Image and text are encoded through CLIP+LoRA into the shared CLIP space,
-    then a small MLP head produces tangent vectors at the origin which are
-    lifted onto the hyperboloid by exp_map0. The same head is used for both
-    modalities so that image and text-anchor embeddings live in the same
-    hyperbolic space and entailment cones can be computed between them.
+    Normalize CLIP image/text features, project them to tangent vectors with
+    an MLP, and lift with exp_map0. image_radius optionally fixes image tangent
+    norms; text tangent norms are not fixed. Default LoRA targets are q/v in
+    both encoders; lora_target can restrict the encoder and layer range.
     """
 
     def __init__(
@@ -47,12 +44,8 @@ class AttributionCLIP(nn.Module):
         for p in self.clip.parameters():
             p.requires_grad = False
 
-        # lora_target: a REGEX (peft re.fullmatch's it against the base model's
-        # module names), so one string picks both the encoder and the layer range.
-        # None keeps the historical behaviour: q/v of every block in BOTH encoders,
-        # 72 adapters on ViT-L/14. Restricting to the upper vision blocks looks like
-        #   r"vision_model\.encoder\.layers\.(1[2-9]|2[0-3])\.self_attn\.(q|v)_proj"
-        # and leaves the lower blocks — where CLIP's word knowledge lives — untouched.
+        # A string target is a full-match regex over base-model module names.
+        # Without one, adapt q/v projections in both encoders.
         lora_cfg = LoraConfig(
             r=lora_r,
             lora_alpha=lora_alpha,
@@ -123,11 +116,11 @@ class AttributionCLIP(nn.Module):
         DataParallel-friendly forward.
 
         Image-only mode (caption_ids is None): returns x_img (B, D_hyp).
-        Hierarchical mode: returns (x_img, x_cap), both (B, D_hyp). Both inputs
+        Caption mode: returns (x_img, x_cap), both (B, D_hyp). Both inputs
         are sliced along dim 0 by DataParallel — same B for both.
 
         Anchors are NOT processed here: they have shape (K, *) not (B, *) and
-        must be encoded separately on the primary GPU via encode_text().
+        are supplied separately by the trainer's anchor state.
         """
         x_img, _ = self.encode_image(pixel_values)
         if caption_ids is None:
@@ -139,11 +132,10 @@ class AttributionCLIP(nn.Module):
 
     @classmethod
     def from_checkpoint(cls, ckpt: dict, **overrides) -> "AttributionCLIP":
-        """Rebuild the architecture a checkpoint was trained with (weights NOT loaded).
+        """Construct the checkpoint architecture without loading its weights.
 
-        'lora_target' is absent from pre-2026-08 checkpoints, where .get() yields
-        None and the full 72-adapter configuration comes back — which is what those
-        checkpoints' strict load_state_dict needs.
+        Missing optional keys use the model defaults; absent lora_target selects
+        q/v projections in both encoders.
         """
         return cls(
             clip_name=ckpt["clip_name"],

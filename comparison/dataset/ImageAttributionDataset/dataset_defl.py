@@ -21,11 +21,8 @@ class DEFLDataset(ImageAttributionDataset):
         # level1: 0 commercial, 1 open-source, 2 real;
         # level2: 0 commercial, 1 SD, 2 diffusers, 3 DiT, 4 AR, 5 real;
         # level3: the same as label
-        # Derived from the ACTIVE label map (respects IAB_EXCLUDE_GENERATORS) — the
-        # taxonomy is identical to HiFi-Net's, so the same helper serves both. The
-        # 23 hardcoded tuples this replaces mis-grouped every class from index 11 on
-        # once dalle3 was excluded (hidream got 'commercial' instead of 'DiT'),
-        # corrupting method_label and hence the dual-margin contrastive loss.
+        # Derive hierarchical labels from the active map, respecting
+        # IAB_EXCLUDE_GENERATORS, using the shared HiFi taxonomy.
         self.label_mapping = hifi_label_mapping()
     def __getitem__(self, idx):  
         item = super().__getitem__(idx)  
@@ -36,4 +33,4 @@ class DEFLDataset(ImageAttributionDataset):
         item["image"] = image  
         item["clip_image"] = clip_image  
         item["method_label"] = self.label_mapping[item["label"]][2]
-        return item  
+        return item

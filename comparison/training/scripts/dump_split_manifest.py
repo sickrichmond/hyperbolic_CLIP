@@ -1,19 +1,11 @@
-"""
-Dump the exact val/test image paths of the baseline stratified split, so the
-hyperbolic model can be TRAINED excluding them (no leakage) while being evaluated
-on byte-identical test images.
+"""Export the comparison loader's train, validation and test paths to JSON.
 
-Reuses `get_dataloader` — the very function `test.py` uses — so the partition is
-guaranteed identical to what the baselines are tested on (stratified by label,
-seed 42, 2000/semantic cap). Paths are stored RELATIVE to root_dir (the on-disk
-layout is shared between the harness dataset and data/iab_clip_dataset.py:
-`{generator}/{super}/{sub}/{file}`), so training-time exclusion is robust to the
-absolute root differing between machines.
+Paths are relative to root_dir. Reuse the same dataset contents, active class
+map, cap, seed and semantic-split options when training/evaluating from this
+manifest; matching a seed alone does not ensure matching rows.
 
-Usage (on CINECA, once):
-    python -m comparison.training.scripts.dump_split_manifest \\
-        --root_dir $FAST/datasets/iab_dataset \\
-        --out      $WORK/hyp_fine_tuning/split_manifest_default.json
+Run: python -m comparison.training.scripts.dump_split_manifest \\
+    --root_dir DATASET --out MANIFEST.json
 """
 import os
 import json
@@ -34,8 +26,8 @@ def main():
     p.add_argument('--root_dir', required=True)
     p.add_argument('--out', required=True)
     p.add_argument('--model_name', default='resnet50',
-                   help="Any baseline dataset works — all share the same enumeration, "
-                        "so the split is identical. resnet50 avoids a CLIP download.")
+                   help="Dataset adapter used to enumerate the split. resnet50 avoids "
+                        "a CLIP download; match enumeration settings when reusing paths.")
     p.add_argument('--num_images_per_semantic_per_class', '-n', type=int, default=2000)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--use_semantic_split', action='store_true', default=False)

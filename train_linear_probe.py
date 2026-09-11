@@ -1,27 +1,15 @@
-"""
-Fase B — Linear probe on FROZEN CLIP features.
+"""Train a readout on cached image features without updating their encoder.
 
-This is the professor's baseline: it measures how much of the 22-way generator
-attribution is ALREADY linearly decodable from off-the-shelf CLIP image features,
-with NO LoRA fine-tuning and NO special geometry. If this probe already scores
-~98%, then fine-tuning + cones + dimension are all second-order.
+Read clip_features_{train,val}.pt from scripts.extract_clip_features. Each cache
+contains X (N, D), y (N,) and classes. The linear head is nn.Linear(D, K); the
+cone head learns tangent-space anchors and a temperature for exterior-angle
+logits. Use projection features for the cone head.
 
-Input: the two caches written by scripts/extract_clip_features.py
-    <features_dir>/clip_features_train.pt   {"X": (N,768), "y": (N,), "classes": [...]}
-    <features_dir>/clip_features_val.pt
+Training uses AdamW and cross-entropy with inverse-frequency class weights
+unless disabled. Select the checkpoint by balanced validation accuracy and
+report recalls and a confusion matrix.
 
-It trains a single nn.Linear(feat_dim -> num_classes) with class-balanced
-cross-entropy (the train set is imbalanced: real has ~8800 captioned images vs
-~16000 per generator), then reports overall / balanced / per-class accuracy and a
-confusion matrix on the cached validation split.
-
-There is no CLIP here: we operate on the cached 768-d features, so it trains in a
-couple of minutes (seconds on a GPU).
-
-Usage:
-    python train_linear_probe.py \
-        --features_dir $WORK/hyp_fine_tuning/clip_features \
-        --output       $WORK/hyp_fine_tuning/checkpoints/linear_probe.pt
+Usage: python train_linear_probe.py --features_dir CACHE --output CHECKPOINT
 """
 import argparse
 from pathlib import Path
@@ -36,18 +24,10 @@ from losses.attribution_loss import _pairwise_xi
 
 
 class ConeHead(nn.Module):
-    """argmin ξ, but with the anchor NORMS free — the degree of freedom the trained
-    model does not have.
+    """Learn tangent anchors and temperature for logits -xi/exp(log_tau).
 
-    In the model a scalar --target_norm pins every ψ to the same value, and with
-    equal ψ `argmin ξ` IS `argmax cos` (exp_map0 is radial), which is why the two
-    rules agree at 0.9998. Letting each anchor find its own radius makes ψ vary and
-    the rule genuinely hyperbolic, on features that are otherwise identical. If this
-    still ties nn.Linear, the ceiling is in the REPRESENTATION and the cone loss —
-    not in the readout — and Phase B has to change the objective, not the head.
-
-    Only meaningful on the `projection` cache: those vectors already live in the
-    tangent space at the origin, which is what exp_map0 expects.
+    Lift cached features and anchors with exp_map0 before exterior-angle
+    scoring. Use tangent projection caches; input features remain frozen.
     """
 
     def __init__(self, init, curv=1.0, min_radius=0.5, tau_init=1.0):
@@ -63,7 +43,7 @@ class ConeHead(nn.Module):
 
 
 def class_centroids(X, y, num_classes):
-    """Per-class mean of the cached features — the anchor init that is not degenerate."""
+    """Return per-class cached-feature means, with zeros for absent classes."""
     c = torch.zeros(num_classes, X.shape[1]).index_add_(0, y, X)
     return c / torch.bincount(y, minlength=num_classes).clamp(min=1).unsqueeze(1)
 
@@ -110,8 +90,7 @@ def evaluate(linear, X, y, num_classes, device):
 
 
 def print_report(classes, overall, balanced, recalls, conf, n_val, title):
-    """Print overall / balanced / per-class accuracy + confusion matrix.
-    Shared by train_linear_probe and eval_linear_probe."""
+    """Print validation accuracy, per-class recall and a confusion matrix."""
     print(f"\n=== {title} ===")
     print(f"Overall accuracy:  {100 * overall:.1f}%")
     print(f"Balanced accuracy: {100 * balanced:.1f}%   ({n_val} val samples)\n")

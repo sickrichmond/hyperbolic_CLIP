@@ -1,36 +1,12 @@
-"""
-Optuna hyperparameter search for the 22-class hyperbolic attribution model.
+"""Search attribution hyperparameters with Optuna and a shared journal.
 
-Replaces the hand-written OAT sweeps (slurm/sweep_configs_22cls*.txt). Two things
-the grid could not do:
-  - it searches continuously, instead of one-factor-at-a-time around a base point
-    (sweep 1 found lr at the BOUNDARY of its range, which a grid cannot fix);
-  - it PRUNES: a config that collapses to chance in epoch 1 (lambda_neg 2.0 did
-    exactly that) is killed instead of burning the whole task budget.
+Each trial launches train_attribution.py in a subprocess and reports the
+trainer's per-epoch balanced validation accuracy for pruning. Trial checkpoints
+use temporary storage and are removed; the journal retains parameters/results.
+Journal storage uses symlink locking.
 
-Each trial is a SUBPROCESS of train_attribution.py, not an in-process call: the
-trainer builds ViT-L/14 + LoRA + DataParallel inside main(), and rebuilding that
-ten times in one process leaks CUDA state. The subprocess also means this file
-never has to touch the trainer.
-
-Pruning reads the trainer's existing per-epoch validation line
-    "  val: overall=X%  balanced=Y%  (N samples)"
-with the same regex scripts/plot_training_log.py already uses. Nothing new is
-logged by the trainer.
-
-Trials do NOT keep their checkpoint (--output goes to $TMPDIR): lora_state is the
-whole PEFT-wrapped CLIP, ~1.7 GB, and the winner gets retrained anyway. Optuna
-keeps the hyperparameters, which is all that is needed.
-
-Storage is a journal FILE with symlink locking, not SQLite: SQLite's locking is
-unreliable on Lustre.
-
-Usage:
-    # one worker (the slurm array runs four against the same journal)
-    python -m scripts.optuna_search --storage $WORK/hyp_fine_tuning/optuna/hypclip_22cls.log
-
-    # ranking, any time, from the login node
-    python -m scripts.optuna_search --storage ... --report
+Run: python -m scripts.optuna_search --storage JOURNAL
+Report: python -m scripts.optuna_search --storage JOURNAL --report
 """
 import argparse
 import os
@@ -64,7 +40,7 @@ def parse_args():
                    help="Upper bound per worker; --timeout is what actually stops it.")
     p.add_argument("--timeout", type=float, default=None,
                    help="Seconds. No NEW trial starts after this; running ones finish.")
-    # Everything below is fixed across trials (parity with the baselines).
+    # Dataset and runtime arguments are shared across trials.
     p.add_argument("--dataset_path", default=None)
     p.add_argument("--captions_dir", default=None)
     p.add_argument("--split_manifest", default=None)
@@ -79,7 +55,7 @@ def parse_args():
 
 
 def suggest(trial):
-    """The search space. Ranges are informed by sweeps 1 and 2 — see the plan."""
+    """Sample hyperparameters and return their trainer CLI arguments."""
     lora_r = trial.suggest_categorical("lora_r", [8, 16, 32])
     lambda_norm = trial.suggest_categorical("lambda_norm", [0.0, 0.25, 0.5, 1.0])
     cfg = [
@@ -90,7 +66,6 @@ def suggest(trial):
         "--curv",           f"{trial.suggest_float('curv', 0.5, 2.0, log=True):.4g}",
         "--min_radius",     f"{trial.suggest_float('min_radius', 0.1, 1.0):.4g}",
         "--margin",         f"{trial.suggest_float('margin', 0.05, 0.5):.4g}",
-        # lambda_neg 2.0 collapses training to chance (measured in sweep 1) — excluded.
         "--lambda_neg",     f"{trial.suggest_float('lambda_neg', 0.5, 1.5):.4g}",
         "--lambda_norm",    str(lambda_norm),
         "--weight_decay",   f"{trial.suggest_float('weight_decay', 1e-3, 1e-1, log=True):.4g}",
@@ -154,7 +129,7 @@ def run_trial(trial, args):
 
 
 def report(study):
-    """Ranking without pandas — trials_dataframe() needs it and the venv may not."""
+    """Print completed-trial rankings directly from the study records."""
     from collections import Counter
 
     trials = study.get_trials(deepcopy=False)
@@ -186,7 +161,7 @@ def main():
 
     path = Path(args.storage)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # Symlink locking: works on Lustre/NFS, unlike SQLite's byte-range locks.
+    # Coordinate journal writers with file-symlink locking.
     storage = JournalStorage(JournalFileBackend(
         str(path), lock_obj=JournalFileSymlinkLock(str(path))))
 

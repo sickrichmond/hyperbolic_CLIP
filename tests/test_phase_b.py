@@ -1,26 +1,11 @@
-"""Self-check for the Phase B loss terms. No GPU, no data, no checkpoint.
+"""CPU checks for optional entailment-cone loss terms.
 
-    python -m tests.test_phase_b
+Cover default objective composition, angular separation bounds, floor and
+bilateral norm penalties, family containment, squared-angle gradients,
+negative subsampling, tangent norm clamping, Poincare conversion and
+additive axis-ray regularization with shallow-image diagnostics.
 
-Nine invariants, each pinning down one thing that would otherwise fail silently:
-
-  1. the defaults are inert — with the new knobs off, the total is exactly what it was
-     (L_img_in_class + λ_norm·L_norm), so `B_ce` really is one variable from sweepwin;
-  2. the separation floor fires on overlapping cones and is zero on disjoint ones;
-  3. the ceiling fires on an antipodal pair and is zero on a healthy spread;
-  4. 'bilateral' penalises anchors that are too DEEP, 'floor' does not — the difference
-     that let Run C's anchors drift to 8.18 with L_norm = 0;
-  5. the family term is zero when a model anchor sits inside its family's cone and
-     positive when it does not;
-  6. pos_mode="axis" still has gradient where the hinge has exactly none — a point
-     already INSIDE its cone. That is the whole reason the term exists;
-  7. neg_samples keeps exactly k negatives per row, and all of them when k is larger
-     than the row;
-  8. the anchor norm clamp pulls a tangent back into range from BOTH sides, and the
-     Poincare<->Lorentz round trip the disk plot relies on is exact;
-  9. lambda_axis adds exactly lambda_axis * mean(d_ray) and nothing else, and
-     frac_shallow separates the configuration the cone rule needs (images DEEPER than
-     their anchors) from the one the last axis run spent five epochs in.
+Run: python -m tests.test_phase_b
 """
 import math
 
@@ -71,7 +56,7 @@ def test_axis_regulariser_is_additive_and_shallow_aware():
     assert st["frac_shallow"].item() == 0.0, st["frac_shallow"]
     assert st["loss_axis"].item() > 0.0, "a random point is not on its axis"
 
-    # images SHALLOWER than every anchor: what the last axis run actually trained in
+    # Images shallower than every anchor exercise the saturation diagnostic.
     shallow = _ray(torch.randn(B, D, generator=g), 0.009)
     _, st2 = EntailmentConeLoss(min_radius=0.5, lambda_axis=lam)(shallow, x_anc, labels)
     assert st2["frac_shallow"].item() == 1.0, st2["frac_shallow"]
@@ -108,7 +93,7 @@ def test_separation_floor():
 def test_separation_ceiling():
     anti = torch.zeros(2, D)
     anti[0, 0] = 1.0
-    anti[1, 0] = -1.0                      # 180 degrees: Run C's pathology
+    anti[1, 0] = -1.0                      # 180 degrees: exceeds the configured angular ceiling
     anti = _ray(anti, 6.0)
     loss_fn = EntailmentConeLoss(min_radius=0.1, lambda_sep=1.0, theta_max=150.0)
     fired, _ = loss_fn._sep_term(anti, half_aperture(anti, min_radius=0.1))
@@ -116,7 +101,7 @@ def test_separation_ceiling():
 
     inert = torch.zeros(2, D)
     inert[0, 0] = 1.0
-    inert[1, 0] = math.cos(math.radians(132.2))   # the euclidean model's widest pair
+    inert[1, 0] = math.cos(math.radians(132.2))   # below the 150-degree ceiling
     inert[1, 1] = math.sin(math.radians(132.2))
     inert = _ray(inert, 6.0)
     quiet, _ = loss_fn._sep_term(inert, half_aperture(inert, min_radius=0.1))
@@ -127,7 +112,7 @@ def test_separation_ceiling():
 def test_norm_mode():
     x_img = exp_map0(torch.randn(B, D, generator=torch.Generator().manual_seed(1)))
     labels = torch.arange(B) % K
-    deep = _ray(torch.eye(K, D), 8.18)     # Run C's measured anchor norm
+    deep = _ray(torch.eye(K, D), 8.18)     # spatial norm above the target
 
     floor = EntailmentConeLoss(min_radius=0.1, lambda_norm=1.0, target_norm=4.0)
     both = EntailmentConeLoss(min_radius=0.1, lambda_norm=1.0, target_norm=4.0,
@@ -163,8 +148,7 @@ def test_family_containment():
 
 
 def test_axis_has_gradient_inside_the_cone():
-    """The point of the whole change: a sample already inside its cone must still
-    pull. The hinge gives it exactly zero gradient, xi^2 gives it 2*xi."""
+    """Squared-angle positives retain a gradient strictly inside the cone."""
     labels = torch.arange(K)
     dirs = torch.eye(K, D)
     x_anc = _ray(dirs, 3.0)
@@ -224,8 +208,7 @@ def test_anchor_clamp_and_poincare_round_trip():
     t = t * (n.clamp(lo, hi) / n.clamp_min(1e-8))
     assert torch.allclose(t.norm(dim=-1), torch.tensor([lo, hi])), t.norm(dim=-1)
 
-    # The disk plot lifts mesh points back with x = 2p / (1 - ||p||^2); it has to be
-    # the exact inverse of lorentz_to_poincare or the cones land in the wrong place.
+    # Check the curvature-1 Lorentz/Poincare coordinate round trip.
     x = exp_map0(torch.randn(7, D, generator=torch.Generator().manual_seed(3)))
     x_time = torch.sqrt(1.0 + (x ** 2).sum(-1, keepdim=True))
     p = x / (x_time + 1.0)

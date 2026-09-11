@@ -1,35 +1,18 @@
-"""The generator taxonomy the DATA shows, next to the one the metadata asserts.
+"""Cluster generator classes from confusion, anchor-angle or feature caches.
 
-`_HIFI_HIERARCHY` groups the 22 generators by provenance (`commercial` lumps 8
-models together because they are products, not because they share an architecture).
-Before we make the cone loss enforce that tree, it is worth asking what tree the
-model's own errors and anchors imply — and whether the two agree.
+--confmat reads per-level confusion matrices and converts symmetric confusion
+rates to distances. --angles reads the matrix from probe_anchor_spread --dump.
+--centroids computes angular distances between class-mean training features.
 
-Three independent sources, none of which costs a job:
+Apply average-linkage clustering to --cut groups and report adjusted Rand
+indices against the selected HiFi mapping and between input sources.
+Agreement is a diagnostic, not proof of a generator taxonomy.
+--out writes the first source's {class: family} mapping for --hierarchy emergent;
+each family is named after its most central member.
 
-  --confmat   the 22x22 conf_matrix in every test_results_degraded_*.txt, read by
-              nothing today. Distance = how often the model swaps the two classes.
-              One source per --level.
-  --angles    the anchor angle matrix dumped by `probe_anchor_spread --dump`.
-              Weak by construction: all 22 anchors fit inside 9 degrees.
-  --centroids the per-class MEAN feature from a scripts.extract_clip_features cache.
-              The most direct: it owes nothing to what the model gets wrong.
-
-Average-linkage agglomerative clustering on each, cut at --cut, then Adjusted Rand
-Index against the HiFi-Net partition chosen by --against, AND — the part that
-decides — between every pair of sources. A tree only exists if the sources agree
-with EACH OTHER; if they do not, there is nothing stable to enforce and Phase B
-should carry only the asserted taxonomy.
-
---out writes the FIRST source as {class: family} for `--hierarchy emergent`, each
-family named after its most central member so it still has a usable text prompt.
-
-    python -m comparison.training.scripts.extract_tree --selfcheck
-    IAB_EXCLUDE_GENERATORS=dalle3 python -m comparison.training.scripts.extract_tree \\
-        --confmat $WORK/outputs/hypclip_fair_22cls --level 1 2 5 \\
-        --centroids $WORK/hyp_fine_tuning/clip_features_lora --cut 6
-
-Pure stdlib, login node. Run from the repo root.
+Clustering and JSON parsing use the standard library; centroid caches require
+PyTorch and loading the harness class map requires its dataset dependencies.
+Usage: python -m comparison.training.scripts.extract_tree --help
 """
 import argparse
 import json
@@ -231,9 +214,7 @@ def main():
                                              centroid_distance(args.centroids, names),
                                              names, hifi_labels, args.cut)))
 
-    # The decisive table: a tree only exists if the sources agree with EACH OTHER.
-    # Disagreement among them means there is nothing stable to enforce, whatever any
-    # single ARI against HiFi-Net happens to say.
+    # Compare source partitions with each other and with the supplied taxonomy.
     labelling = [("HiFi-Net", hifi_labels)] + [(n, l) for n, _, l in sources]
     if len(labelling) > 2:
         width = max(len(n) for n, _ in labelling)
@@ -247,12 +228,8 @@ def main():
               "to enforce, and Phase B should run with --hierarchy hifi only.")
 
     if args.out and sources:
-        # Takes the FIRST source, so pass only the one you want. Measured 2026-08-18:
-        # that is --centroids. The confusion matrices turned out NOT to be a usable
-        # tree source — levels 1 and 2 chain into one blob, and level 5, the only
-        # well-conditioned one, agrees with nothing (ARI 0.027 against the taxonomy,
-        # 0.06-0.19 against the other sources). Centroids on the LoRA features score
-        # 0.253 and recover the five SD models exactly.
+        # Save the first supplied source (confusion, angles, then centroids).
+        # Pass a single source to choose the output unambiguously.
         Path(args.out).write_text(json.dumps(sources[0][1], indent=2, sort_keys=True) + "\n")
         print(f"\nwrote {args.out}  (source: {sources[0][0]})")
 

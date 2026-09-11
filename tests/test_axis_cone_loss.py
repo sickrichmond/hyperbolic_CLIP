@@ -1,40 +1,12 @@
-"""Self-check for the axis-distance cone loss. No GPU, no data, no checkpoint.
+"""CPU checks for axis-cone scoring, gradients and calibration.
 
-    python -m tests.test_axis_cone_loss
+Cover angular monotonicity, wall membership, depth invariance, sampled image
+gradients, direction-only anchor gradients, aperture bounds, detached gradient
+paths, overlap and coverage margins, simplex construction and CE ranking.
+The aperture-equilibrium check uses a fixed synthetic angular distribution;
+it is not a coverage guarantee for joint training with bounded apertures.
 
-Fourteen invariants. The first three pin down that q is the quantity we think it is; the
-rest pin down the failures that would be invisible in a training log — a dead gradient,
-a coupled parameter that hands the optimiser a shortcut, and a decision rule that has
-quietly become a cosine.
-
-  1. q is STRICTLY MONOTONE in the angle over the whole [0, pi]. The obvious
-     (sinh d_axis / sinh R)^2 is not: it is bilateral, its derivative flips sign at 90
-     degrees, and past that "descending" means walking to 180 — an antipodal attractor,
-     which is the degeneracy Run C hit with a pair of anchors at 179 degrees;
-  2. q = 1 exactly on the cone wall, < 1 inside, > 1 outside;
-  3. q is invariant to the image's depth, so there is no collapse-toward-the-origin
-     direction and nothing to calibrate about how deep the head starts;
-  4. the gradient on the IMAGE is non-zero everywhere, including near 180 degrees;
-  5. with equal psi, argmin q IS argmax cos; with different psi they diverge. That is
-     the necessary condition for the cone rule to be worth anything;
-  6. DECOUPLING: the radial component of the gradient on the anchor is exactly zero and
-     the tangential one is not, so the anchor can only rotate. When the aperture was
-     derived from the anchor's depth instead, "widen my cone" and "move toward the
-     origin" were the same move and the optimiser took it every time — measured, psi ran
-     to 65 degrees and its spread across classes collapsed from 8.7 to 0.6;
-  7. psi's gradient has the right sign on both terms, and the sigmoid parameterisation
-     keeps it inside its range with no projection;
-  8. the aperture equilibrium is where the derivation says: the cone shrinks until the
-     mass of the samples left outside it equals nu, so nu upper-bounds the fraction of a
-     class's own samples that fall outside its own cone;
-  9. the two crossed detaches hold — the pull term cannot move psi, and the aperture term
-     cannot move the images. Without them, widening the cone is a cheaper way to lower
-     the loss than rotating a 128-dimensional axis, and the optimiser takes it.
- 10. overlapping cones pay exactly their squared angular violation, including the
-     requested empty margin; disjoint cones pay zero.
- 11. the inside margin is part of coverage, not the classification score.
- 12. the encoder-facing coverage hinge fires at psi-inside_margin, moves image/axis
-     directions, and cannot widen psi.
+Run: python -m tests.test_axis_cone_loss
 """
 import math
 
@@ -60,7 +32,7 @@ def _sin(psi_deg):
 
 
 def _axis(index: int = 0) -> torch.Tensor:
-    """An anchor direction. Its norm is irrelevant to q — that is the whole point."""
+    """Construct an anchor direction; q normalizes its norm."""
     a = torch.zeros(1, D)
     a[0, index] = 1.0
     return a
@@ -203,8 +175,7 @@ def test_psi_gradient_signs_and_bounds():
 
 
 def test_aperture_equilibrium_is_coverage():
-    """nu bounds the fraction left outside. Build a class with a known spread of angles,
-    find where the aperture gradient vanishes, and check the coverage there."""
+    """Check outside fraction near an aperture-only synthetic equilibrium."""
     nu = 0.10
     n = 400
     # angles spread over [4, 44] degrees: a mix of tight and outlying samples
@@ -232,9 +203,8 @@ def test_aperture_equilibrium_is_coverage():
     q = axis_cone_q(x, _axis(), sp).squeeze(1)
     outside = (q > 1).double().mean().item()
     viol_mass = (q * (q > 1)).mean().item()
-    # The violator mass is a STEP function of psi: each sample crosses the wall at q = 1
-    # and adds 1/n to it, so it jumps over nu rather than landing on it. One jump is the
-    # honest tolerance here, not a round number.
+    # Violator mass varies between wall crossings and jumps by 1/n at q=1.
+    # Allow finite-sample tolerance around the stationary-point condition.
     assert abs(viol_mass - nu) < 2.0 / n, (viol_mass, nu, 1.0 / n)
     assert outside <= nu + 1e-9, (outside, nu)
 
@@ -248,9 +218,7 @@ def test_aperture_equilibrium_is_coverage():
 
 
 def test_detaches_hold():
-    """Each parameter has one job: the pull must not reach psi, the aperture must not
-    reach the images. This is what stops 'widen the cone' from substituting for 'rotate
-    the axis' — the substitution that ran psi to 65 degrees when they were coupled."""
+    """Center gradients cannot reach psi; aperture gradients cannot reach images."""
     x = _at_angle(math.radians(40.0)).clone().requires_grad_(True)   # outside a 30° cone
     sp = _sin(30.0).clone().requires_grad_(True)
     labels = torch.zeros(1, dtype=torch.long)

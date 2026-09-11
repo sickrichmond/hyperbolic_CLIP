@@ -1,32 +1,15 @@
-"""
-Frequency / degradation DIAGNOSTIC for the hyperbolic-CLIP attributor — NO training.
+"""Sweep blur and JPEG settings on harness test images without training.
 
-Answers two questions about why ours collapses under degradation (esp. JPEG):
+Report accuracy/AUC/AP and synthetic-error routing to real, the same HiFi
+family, or another family. Reuse a test loader with degradation overrides;
+workers must inherit the configured globals through fork.
 
-  (1) High-frequency reliance. We sweep a pure low-pass (Gaussian blur, sigma
-      0.5..5) and a JPEG-quality ramp (q 90..30) over the SAME clean test images
-      and plot accuracy vs strength. If accuracy falls off a cliff under gentle
-      low-pass, the model is leaning on high-frequency generator fingerprints.
-      Comparing the blur curve to the JPEG curve separates "removed high freq"
-      (blur) from "added 8x8 block artifacts" (JPEG-specific, out-of-distribution).
+This diagnostic encodes default text templates and always uses -oxy_angle.
+It does not restore custom prompt/free-anchor semantics or axis-loss scoring.
+Use comparison.training.test_hypclip for checkpoint-native evaluation.
+The curves describe sensitivity; they do not establish its cause.
 
-  (2) Where the errors go. For each condition we use the HiFi family hierarchy
-      (dataset._HIFI_HIERARCHY level-3, 6 families) to route every synthetic-image
-      error into: -> real (all synthetic signal gone), -> same family (only the
-      fine model id is lost, the family cue survives), or -> cross family. Plus the
-      recall on real images (do reals stay real?).
-
-It reuses test_hypclip's model/anchor machinery so the decision rule is identical
-(logits = -xi, argmax reproduces the cone prediction). The test images/split are
-byte-identical to the baseline eval; degradation is injected by monkeypatching
-ImageAttributionDataset.get_degraded_img, so the SAME test loader is enumerated
-once and re-scanned per condition (cheap).
-
-Usage (CINECA, via SLURM — see slurm/slurm_diag_frequency.sh):
-    python -m comparison.training.diag_frequency \\
-        --checkpoint $WORK/hyp_fine_tuning/checkpoints/attribution_22cls_base_vitl14.pt \\
-        --root_dir   $FAST/datasets/iab_dataset \\
-        --log_dir    $WORK/outputs/hypclip_diag_22cls
+Usage: python -m comparison.training.diag_frequency --help
 """
 import os
 import io

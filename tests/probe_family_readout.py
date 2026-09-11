@@ -1,32 +1,16 @@
-"""Does the model keep the FAMILY when it loses the leaf — and does it know?
+"""Compare leaf, family and induced-family readouts for hierarchical cone checkpoints.
 
-This is the one claim a cosine cannot express. Under JPEG65 the 22-way accuracy of
-every cone model collapses to ~0.19 while its AUC stays at 0.64, i.e. the prediction
-is wrong and the model is confident anyway. A nested-cone model has somewhere else to
-go: answer the family, and say so.
+On paired_datasets' sampled manifest validation images, optionally degraded,
+compute exterior-angle predictions for leaves and families. The induced family
+is the family of the predicted leaf. Re-encode family prompts from saved names
+and reorder family_of to the harness class order.
 
-Three readouts on the same embeddings, per degradation level:
+Abstain when min(xi_leaf-psi_leaf) > 0. Report macro recall, rejection rate,
+leaf recall among retained samples and family recall among rejected samples.
+This is a cone-hierarchy diagnostic, not an axis-loss evaluator; rejection at
+the cone wall is not automatically calibrated for unknown generators.
 
-  leaf      argmin_c xi_c over the 22 model anchors          (what the model reports today)
-  family    argmin_f xi_f over the F family anchors          (a level a flat softmax has not got)
-  induced   family_of[argmin_c xi_c]                         (the family the leaf answer implies)
-
-`family` above `induced` means the family anchors carry information the leaf ranking has
-already lost — which is the whole point of putting them there.
-
-And the abstention, which needs no threshold to be tuned:
-
-  abstain   min_c (xi_c - psi_c) > 0   ==  outside EVERY leaf cone == "none of these"
-
-Read `leaf | kept` against `leaf`: if abstaining removes mostly-wrong predictions the
-rule is calibrated, and `family | abstained` says whether the coarse answer is still
-right where the fine one was refused.
-
-    IAB_EXCLUDE_GENERATORS=dalle3 python -m tests.probe_family_readout \\
-        $CK/attribution_22cls_phaseb_hifi_vitl14.pt --levels 0 3 5
-
-Levels are the eval's: 0=clean 1=DS0.5 2=DS0.25 3=JPEG65 4=JPEG30 5=Blur3 6=Blur5.
-Balanced (macro-recall) accuracy throughout — the test split is 95.5% synthetic. GPU node.
+Usage: python -m tests.probe_family_readout --help
 """
 import argparse
 import os

@@ -1,41 +1,13 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — Phase B: give the geometry a job it can actually do.
+# CINECA Leonardo — exterior-angle CE, separation and hierarchy recipes.
 #
-# The sweepwin recipe, one variable at a time. What Phase A measured, and what each
-# run answers:
+# RUN=ce: CE with the positive hinge disabled and a floor norm penalty.
+# RUN=flat: CE with bilateral norm penalties and angular separation bounds.
+# RUN=hifi: add family containment/CE using the HiFi family mapping.
+# RUN=emerg: use data/tree_emergent.json for the family mapping.
+# All modes retain the wrong-class hinge and use text anchors.
 #
-#   The projection head zeroes the class geometry the LoRA builds (centroid ARI
-#   0.253 -> -0.007 against the generator taxonomy). The same head trained with a
-#   plain CE keeps 0.119, so the ARCHITECTURE is innocent and the SATURATING HINGE is
-#   what gives the head permission to collapse. But CE alone recovers less than half.
-#
-#   RUN=ce      hinge OFF, CE ON, nothing else.        Does the geometry matter, or did
-#                                                      only the loss shape ever matter?
-#                                                      Compare against the euclidean
-#                                                      ablation: one variable apart.
-#   RUN=flat    + bilateral norm + separation.         Can the cones become a genuine
-#                                                      partition? Target: 2psi/margin
-#                                                      below 1 (12.8 today). psi is
-#                                                      still uniform here, so argmin xi
-#                                                      still equals argmax cos —
-#                                                      by design, this isolates spread
-#                                                      from depth.
-#   RUN=hifi    + nested family cones, HiFi-Net tree.  Does the asserted taxonomy help?
-#   RUN=emerg   + nested family cones, data tree.      Does the tree the centroids show
-#                                                      help more? (data/tree_emergent.json)
-#
-# Only the hierarchy runs make psi vary across anchors, and equal psi is exactly why
-# argmin xi has never differed from argmax cos.
-#
-# Read out of the epoch line: min∠ must climb above 2·psi (overlap -> 0%), and with a
-# hierarchy, in_fam should reach 100% while fam_acc stays high.
-#
-# Submit:  sbatch --export=ALL,RUN=ce    slurm/slurm_train_22cls_phaseb.sh
-#          sbatch --export=ALL,RUN=flat  slurm/slurm_train_22cls_phaseb.sh
-#          sbatch --export=ALL,RUN=hifi  slurm/slurm_train_22cls_phaseb.sh
-#          sbatch --export=ALL,RUN=emerg slurm/slurm_train_22cls_phaseb.sh
-# ============================================================================
+# Submit: sbatch --export=ALL,RUN=flat slurm/slurm_train_22cls_phaseb.sh
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -69,9 +41,8 @@ MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 
 RUN=${RUN:-ce}
 
-# Depth is what makes psi vary. With min_radius 0.5: ‖x‖=1.5 -> psi 41.8 deg,
-# ‖x‖=5.0 -> psi 11.5 deg. Families must stay SHALLOWER than models, and models
-# shallower than the images (which sit at ~7), or containment points the wrong way.
+# Spatial norm targets are 1.5 for family anchors and 5 for class anchors.
+# Norm penalties encourage these depths; they do not enforce depth ordering.
 case "$RUN" in
   ce)
     EXTRA="--lambda_hinge 0 --lambda_ce 1.0 --lambda_norm 0.5 --target_norm 4.0"

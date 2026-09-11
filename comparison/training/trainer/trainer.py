@@ -114,9 +114,7 @@ class Trainer(object):
         val_metric = None  
         val_metrics = None  
 
-        # The 4 comparison methods (resnet50, dct, hifi_net, defl) all use the
-        # standard batch-training loop below. The clip_lr linear-probe and pose
-        # custom-loop special cases were removed together with those methods.
+        # Registered methods use the batch-training loop below.
         if True:
             num_batches = len(train_loader)  
             pbar = tqdm(enumerate(train_loader), total=num_batches)  

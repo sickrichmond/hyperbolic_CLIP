@@ -1,30 +1,13 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — Phase A of the linear probe: cache image features once.
+# CINECA Leonardo — cache features on the comparison train/val manifest.
 #
-# Three sources, selected by SOURCE=, all written to their own directory and all
-# consumed by the same slurm_train_probe.sh. Together they answer "how much of the
-# 0.993 is CLIP, how much is the LoRA, how much is the geometry":
+# SOURCE=frozen: frozen CLIP features.
+# SOURCE=lora: adapted CLIP features from CKPT.
+# SOURCE=projection: tangent or Euclidean pre-normalization head output from CKPT.
+# The last two require CKPT. OUT_DIR overrides the source-specific cache path;
+# use distinct directories for different checkpoints or datasets.
 #
-#   SOURCE=frozen      off-the-shelf CLIP ViT-L/14, no LoRA        (the baseline)
-#   SOURCE=lora        the trained LoRA CLIP embedding             (CKPT required)
-#   SOURCE=projection  the tangent vectors out of the projection   (CKPT required)
-#
-# --split_manifest puts all three on the SAME images as the results tables. Without
-# it the split is the legacy caption-based one (94,673 val images) and the numbers
-# are not comparable with anything.
-#
-# A euclidean CKPT works too (extract_clip_features branches on ckpt['geometry']) —
-# that is the control for whether the projection head or the saturating hinge is what
-# collapses the class geometry. Give it its own OUT_DIR or it overwrites the
-# hyperbolic cache of the same SOURCE.
-#
-# Submit:  sbatch --export=ALL,SOURCE=frozen slurm/slurm_extract_features.sh
-#          sbatch --export=ALL,SOURCE=lora,CKPT=$WORK/hyp_fine_tuning/checkpoints/attribution_22cls_sweepwin_vitl14.pt \
-#                 slurm/slurm_extract_features.sh
-#          sbatch --export=ALL,SOURCE=projection,CKPT=$CK/attribution_22cls_euclidean_d128_vitl14.pt,\
-# OUT_DIR=$WORK/hyp_fine_tuning/clip_features_projection_eucl slurm/slurm_extract_features.sh
-# ============================================================================
+# Submit: sbatch --export=ALL,SOURCE=frozen slurm/slurm_extract_features.sh
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod

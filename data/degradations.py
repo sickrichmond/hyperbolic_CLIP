@@ -1,21 +1,14 @@
-"""
-Image degradations for robustness evaluation.
+"""PIL image degradations and training augmentation policies.
 
-These replicate EXACTLY the pipeline used by the ImageAttributionBench comparison
-methods (comparison/dataset/ImageAttributionDataset/dataset.py -> get_degraded_img),
-so our hyperbolic model is tested under identical corruptions and the robustness
-curves are directly comparable:
+Evaluation levels: 0=clean, 1=nearest-neighbor down/up at 0.5 scale,
+2=down/up at 0.25, 3=JPEG65, 4=JPEG30, 5=Gaussian blur3, 6=blur5.
+These operators match the harness degradation families; full evaluation parity
+also depends on enumeration, splitting and preprocessing.
 
-  level 0: clean (no change)
-  level 1: downsample x0.5   (NEAREST down- then up-scale)
-  level 2: downsample x0.25
-  level 3: JPEG compression, quality 65
-  level 4: JPEG compression, quality 30
-  level 5: Gaussian blur, sigma 3
-  level 6: Gaussian blur, sigma 5
-
-NOTE: downsample uses Image.NEAREST for both directions (as in the upstream port),
-which is more aggressive than a bilinear/bicubic resize — kept identical on purpose.
+The corruption training policy samples JPEG, blur and downsample operations
+independently and shuffles their order. The omnidfa policy uses JPEG, bicubic
+rescaling, flipping, restricted RandAugment and blur. CLIP preprocessing
+handles output resizing and normalization.
 """
 import random
 from io import BytesIO
@@ -69,8 +62,7 @@ def apply_degradation(image, level):
 # span the test levels instead of the seven fixed settings. Each family fires
 # independently, in random order, so an image gets 0-3 corruptions.
 #
-# ⚠️ A model trained with this has seen the test-time corruption families →
-# report it with an asterisk, like DNA-Det (see the fairness audit).
+# Report the training policy alongside corruption-test results.
 _AUG = (
     (0.5, lambda img: _compress(img, quality=random.randint(30, 95))),
     (0.4, lambda img: _blur(img, sigma=random.uniform(0.5, 5.0))),
@@ -103,9 +95,7 @@ def random_degradation(image):
 # The paper excludes shear/translate so the local feature extractor never sees
 # padding artifacts from beyond the image border — the same reason applies to us.
 #
-# Milder than random_degradation on purpose: of the seven test levels only DS0.5
-# falls inside these ranges (q75-95 misses JPEG65/30, sigma<=2 misses Blur3/5,
-# scale>=0.5 misses DS0.25). Report as `omniaug†`, a weaker asterisk than `aug*`.
+# The parameter ranges differ from the discrete test corruptions.
 _RANDAUG_DROP = ("ShearX", "ShearY", "TranslateX", "TranslateY")
 _randaug = None
 
@@ -166,7 +156,7 @@ if __name__ == "__main__":
     for lvl in range(7):
         assert apply_degradation(img, lvl).size == img.size
 
-    # OmniDFA policy (needs torchvision — CINECA only).
+    # OmniDFA policy requires torchvision.
     space = _randaugment()._augmentation_space(31, (200, 256))
     assert not any(k in space for k in _RANDAUG_DROP), \
         f"shear/translate still in the op space: {sorted(space)}"

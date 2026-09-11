@@ -1,25 +1,12 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — Phase B: train the LINEAR PROBE on cached features.
+# CINECA Leonardo — train a readout on cached features.
 #
-# No CLIP here: it loads one of the caches written by slurm_extract_features.sh
-# and trains a single nn.Linear with class-balanced cross-entropy, then prints
-# overall / balanced / per-class accuracy + confusion — the same metrics as the
-# fine-tuned evals, so the numbers line up directly against 0.993.
+# SOURCE selects clip_features_SOURCE. HEAD=linear fits a linear classifier;
+# HEAD=cone learns exterior-angle anchors and temperature on projection features.
+# The readout uses weighted CE and reports cached validation metrics, not
+# harness test results. No image encoder is run during training.
 #
-# Tiny (768-d vectors), so 1 GPU + 30 min is plenty; re-run with different
-# --lr / --epochs / --no_class_weight cheaply.
-#
-# HEAD=cone swaps nn.Linear for a softmax over -ξ with FREE anchor norms, on the very
-# same features. It is the one readout the trained model cannot have (a scalar
-# --target_norm pins every ψ, which is why argmin ξ ≡ argmax cos at 0.9998). Only
-# meaningful with SOURCE=projection — those vectors already live in tangent space.
-#
-# Submit:  sbatch --export=ALL,SOURCE=frozen     slurm/slurm_train_probe.sh
-#          sbatch --export=ALL,SOURCE=lora       slurm/slurm_train_probe.sh
-#          sbatch --export=ALL,SOURCE=projection slurm/slurm_train_probe.sh
-#          sbatch --export=ALL,SOURCE=projection,HEAD=cone slurm/slurm_train_probe.sh
-# ============================================================================
+# Submit: sbatch --export=ALL,SOURCE=projection,HEAD=linear slurm/slurm_train_probe.sh
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod

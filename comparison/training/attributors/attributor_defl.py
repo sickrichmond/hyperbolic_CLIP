@@ -72,7 +72,6 @@ class DEFLAttributor(AbstractAttributor):
         return {"dual_contrastive_loss": loss1,
                 "ce_loss": loss2,
                 'overall': loss1+loss2
-                # 'overall': loss1 # FIXME: only dual?
                 }  
 
     def compute_metrics(self, input_data: dict, pred_dict: dict, test=False) -> dict:  
@@ -97,4 +96,4 @@ class DEFLAttributor(AbstractAttributor):
             return {'acc': float(acc), 'auc': float(auc), 'ap': float(ap)}  
 
     def load_parameters(self, load_param):  
-        pass  
+        pass

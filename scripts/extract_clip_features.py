@@ -1,25 +1,15 @@
-"""Phase A of the linear probe: cache image features once, probe them many times.
+"""Cache image features for train_linear_probe.py.
 
-Three feature sources, all consumed by the same train_linear_probe.py, which is how
-we separate "CLIP already knows" from "the LoRA learned it" from "the cones did it":
+Without --checkpoint, extract normalized frozen CLIP image features. With a
+checkpoint, --features clip extracts adapted CLIP features; projection extracts
+hyperbolic tangent vectors or Euclidean pre-normalization head outputs.
 
-  (default)          frozen CLIP                 -> DetectorDF._clip_image
-  --checkpoint X     CLIP + the trained LoRA     -> AttributionCLIP._clip_image
-  --checkpoint X --features projection
-                     the projection head output  -> the tangent vectors themselves
+Write clip_features_train.pt and clip_features_val.pt with X, y, classes and
+source fields. Feature dimension depends on the selected source. A supplied
+split manifest selects train/val paths without requiring captions; otherwise
+the dataset's caption-based val_frac split is used.
 
-If a linear probe on the LoRA features already reaches the full model's accuracy,
-the hyperbolic geometry is not buying accuracy and the paper has to say so.
-
---split_manifest puts the probe on the SAME images as everything in the results
-tables (the harness split); without it the split is the legacy caption-based one
-and the numbers are not comparable.
-
-Usage:
-    python -m scripts.extract_clip_features \\
-        --dataset_path $FAST/datasets/iab_dataset --captions_dir $CAPS \\
-        --generators real 4o ... --split_manifest $MANIFEST \\
-        --out_dir $WORK/hyp_fine_tuning/clip_features_frozen
+Usage: python -m scripts.extract_clip_features --help
 """
 import argparse
 import json
@@ -71,12 +61,7 @@ def build_extractor(args, device):
     ckpt = torch.load(args.checkpoint, map_location=device, weights_only=False)
 
     if ckpt.get("geometry") == "euclidean":
-        # The control for "who collapses the representation, the head or the loss?".
-        # Same 768->768->GELU->128 head and same init as the hyperbolic model, trained
-        # by a non-saturating CE instead of a hinge. Measured on the hyperbolic run:
-        # class centroids score ARI 0.253 against the taxonomy in LoRA space and
-        # -0.007 after this head. If the euclidean head keeps the structure, the head
-        # is fine and the saturating hinge is what lets it collapse.
+        # Restore the spherical model; the requested feature tap is selected below.
         from models.euclidean_attribution_clip import EuclideanAttributionCLIP
         model = EuclideanAttributionCLIP(
             clip_name=ckpt["clip_name"],
@@ -116,8 +101,7 @@ def main():
                   seed=args.seed)
 
     if args.split_manifest:
-        # Same two datasets train_attribution.py builds with a manifest, so the probe
-        # trains and validates on exactly the images the tabled models did.
+        # Select manifest train/validation paths without requiring captions.
         with open(args.split_manifest) as f:
             man = json.load(f)
         print(f"Split manifest: {len(man['train'])} train + {len(man['val'])} val")

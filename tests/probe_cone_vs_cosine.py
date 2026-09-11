@@ -1,24 +1,13 @@
-"""Does the hyperbolic geometry decide anything, or is it a cosine classifier?
+"""Compare checkpoint classification with nearest-anchor cosine classification.
 
-The hypothesis, stated so it can be falsified: with --target_norm 4.0 every anchor
-is pushed to the same norm, so every cone gets the same half-aperture ψ. When the
-ψ are equal, `argmin_c ξ_c` — the inference rule — degenerates into "the anchor at
-the smallest ANGLE", i.e. nearest-class-direction. exp_map0 is radial, so direction
-is preserved from the tangent space onto the hyperboloid, and the whole hyperbolic
-apparatus would then be an expensive way to write `argmax_c cos(x, a_c)`. That
-would also explain why a two-term hinge is enough.
+Use the same fixed-seed subset of up to 8,000 harness test images for both
+rules. Cone checkpoints minimize the exterior angle xi; axis checkpoints
+minimize q, reconstructing apertures from stored anchor depths. Report accuracy,
+prediction agreement and per-class disagreements. Equal axis apertures make
+q ranking equivalent to cosine ranking; observed agreement alone does not
+establish a cause or a benefit from geometry.
 
-This measures it directly: same images, same model, two decision rules.
-
-    IAB_EXCLUDE_GENERATORS=dalle3 python -m tests.probe_cone_vs_cosine \\
-        $WORK/hyp_fine_tuning/checkpoints/attribution_22cls_sweepwin_vitl14.pt
-
-Read `agreement`. >= 0.99 confirms the hypothesis (declare it as a limit: we have
-cones, not hierarchy). Clearly below, and the cone widths ARE doing work, which is
-a positive result worth claiming. The ψ spread printed first says how much room
-there was for a difference at all.
-
-Standalone: touches no repo file. GPU node.
+Usage: IAB_EXCLUDE_GENERATORS=dalle3 python -m tests.probe_cone_vs_cosine CHECKPOINT
 """
 import os
 import sys

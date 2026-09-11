@@ -31,7 +31,7 @@ export HOROPCA_DIR=${HOROPCA_DIR:-$WORK/hyp_fine_tuning/horopca}
 
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
-# Override via env vars when needed, e.g. CKPT=... OUT=... sbatch scripts/slurm_visualize.sh
+# Override via env vars when needed, e.g. CKPT=... OUT=... sbatch slurm/slurm_visualize_more_families.sh
 CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_more_families.pt}
 OUT=${OUT:-$WORK/hyp_fine_tuning/viz/more_families}
 GENERATORS=${GENERATORS:-"real FLUX SD3_5 SDXL 4o grok3 infinity dalle3 PIXART mid-6.0"}

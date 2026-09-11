@@ -1,18 +1,10 @@
-"""Inspect an anchor-centroid cache: how separable are the per-class means?
+"""Report cosine similarities between cached per-class CLIP centroids.
 
-    python -m tests.inspect_centroids $WORK/hyp_fine_tuning/anchor_centroids_22cls.pt
-    python -m tests.inspect_centroids $WORK/hyp_fine_tuning/anchor_centroids_22cls_spectral.pt
+Read class_names and mean_clip from an anchor-centroid cache, normalize the
+means, and print off-diagonal statistics and the closest class pairs. This
+describes class means, not individual-image separability or training outcomes.
 
-The centroids are the INIT of the free anchors, so two classes whose CLIP-space
-means point almost the same way start with overlapping cones, and one can swallow
-the other for good. Two open questions this answers in seconds instead of a 20h
-job:
-
-  - the spectral branch sat at 1/22 = chance accuracy for a whole run. If its
-    off-diagonal cosines are ~0.99+, the FFT-into-CLIP embedding is near constant
-    across classes and no training budget fixes that.
-  - mid-6.0 stayed at 0.0% for five epochs while mid-5.2 was at 100%. If those two
-    centroids are near-parallel, the collapse is in the initialisation.
+Usage: python -m tests.inspect_centroids cache.pt [more.pt ...]
 """
 import sys
 

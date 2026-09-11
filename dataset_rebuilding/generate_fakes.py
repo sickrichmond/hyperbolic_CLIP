@@ -1,33 +1,15 @@
-"""
-Regenerate FAKE images with a chosen diffusion model from the new dense captions.
+"""Generate FLUX, SD3, SD3_5 or SDXL images from detailed caption CSVs.
 
-Two naming modes:
+--naming iab maps source CSV rows to real-image stems and writes
+{prefix}_p{row}_i{variant}.png. --naming stem enumerates real images and writes
+{stem}.png. Both use detailed captions keyed by stem and deterministic seed keys.
+--style appends a suffix to each caption.
 
-  --naming iab   (default): mirror the ORIGINAL IAB fake set 1:1 — iterate the
-      rows N of the fake-source caption CSV and emit `{prefix}_p{N}_i{K}.png`
-      (K = 0..variants-1, IAB uses 2), using OUR detailed caption for the real
-      image at row N. Same generators, same filenames, same structure as IAB;
-      the ONLY difference is the richer prompt. This is what you want for an
-      apples-to-apples attribution comparison.
+GENERATOR settings specify model, precision, resolution and inference defaults;
+CLI options override them. Existing outputs are skipped unless --overwrite is
+set. Use a separate out_root to preserve source datasets.
 
-  --naming stem : one fake per REAL image, named `<stem>.png` (the round-1 form).
-
-Defaults (model / steps / guidance / dtype / resolution) MATCH the IAB paper
-(arXiv 2605.12967) per generator, so nothing varies except the prompt.
-
-Output (non-destructive — choose a fresh --out_root for each round), IAB layout:
-
-    <out_root>/<GEN>/COCO/COCO-new_p0_i0.png
-    <out_root>/<GEN>/AnimalFace/cat/AnimalFace_cat_p0_i0.png
-    ...
-
-Resumable: existing PNGs are skipped.
-
-Example (full set, IAB naming — see slurm_gen.sh):
-    python dataset_rebuilding/generate_fakes.py --generator SD3 \\
-        --captions_dir      $WORK/hyp_fine_tuning/iab_captions_detailed_clean \\
-        --fake_src_captions_dir $WORK/hyp_fine_tuning/iab_captions \\
-        --out_root          $WORK/hyp_fine_tuning/iab_recap_dataset_v2
+Usage: python dataset_rebuilding/generate_fakes.py --help
 """
 import argparse
 import csv

@@ -1,25 +1,11 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — ours @ 22 CLASSES, SWEEP WINNER, run to convergence.
+# CINECA Leonardo — five-epoch text-anchor cone recipe on the 22-class manifest.
 #
-# Config = rank 1 of slurm/sweep_configs_22cls.txt (task 3, 98.86% val_balanced):
-# TEXT anchors, lr 3e-4, lora 16/32, min_radius 0.5, margin 0.3, lambda_neg 1.0,
-# lambda_norm 0.5 / target_norm 4.0. In the sweep it only ran 3 EPOCHS, for ranking
-# purposes; this is the pending "retrain the winner for >=5 epochs" action from
-# sweep_results_hypclip.md. Base loss, all images (parity with the baselines).
+# No captions. AUGMENT=1 enables training degradations; AUG_POLICY selects
+# corruption (default) or omnidfa. Checkpoint names distinguish these modes.
 #
-# NOTE on lambda_norm: the image-centroid run combined lr 3e-4 (rank 1) with
-# lambda_norm 0 (rank 2) — a combination the sweep never tested. So the current
-# "centroids 93.3% vs text 98.86%" gap has two variables in it; this run pins down
-# the text-anchor side properly.
-#
-# ~1.75M forwards at the measured 210 forward/s on 2 GPUs → ~2.5h.
-#
-# Submit:  sbatch slurm/slurm_train_22cls_sweepwinner.sh
-#          sbatch --export=ALL,AUGMENT=1 slurm/slurm_train_22cls_sweepwinner.sh   # -> aug*
-#          sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa \
-#                 slurm/slurm_train_22cls_sweepwinner.sh                          # -> omniaug†
-# ============================================================================
+# Submit: sbatch slurm/slurm_train_22cls_sweepwinner.sh
+#         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_22cls_sweepwinner.sh
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -51,12 +37,8 @@ CAPS=$WORK/hyp_fine_tuning/iab_captions
 OUT=$WORK/hyp_fine_tuning/checkpoints
 MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 
-# AUGMENT=1 -> train-time augmentation on the TRAIN split. Two policies:
-#   AUG_POLICY=corruption (default) — random JPEG/blur/downsample, i.e. the test-time
-#     corruption FAMILIES → the run goes in the tables with an asterisk, like dna*.
-#   AUG_POLICY=omnidfa — Table 8 of arXiv 2509.25682. Milder: only DS0.5 of the seven
-#     test levels falls inside its ranges → weaker asterisk (†), a literature recipe
-#     rather than an augmentation shaped on the test set.
+# AUGMENT=1 applies the selected data.degradations policy to training images.
+# Validation is clean; report the augmentation policy with robustness results.
 AUGMENT=${AUGMENT:-0}
 AUG_POLICY=${AUG_POLICY:-corruption}
 if [ "$AUGMENT" = 1 ]; then

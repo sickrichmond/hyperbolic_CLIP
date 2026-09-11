@@ -1,42 +1,15 @@
-"""
-AGCAM and Guided attribution for AttributionCLIP.
+"""AGCAM and Guided heatmaps for exterior-angle AttributionCLIP scores.
 
-Both methods backpropagate an attribution score through the CLIP vision
-transformer to the per-layer attention maps (AGCAM) or only the last layer
-(Guided), producing a spatial heatmap that highlights which image regions
-drove the model's attribution decision.
+Backpropagate -xi(target) or min_other(xi)-xi(target) through vision attention.
+AGCAM aggregates layers/heads; Guided uses the final layer. Return detached
+min-max-normalized spatial heatmaps.
 
-Adaptation notes vs. the HySAC explanation pipeline
------------------------------------------------------
-* Score function: replaces the SVDD distance with an entailment-cone score
-  derived from oxy_angle.  Two modes are provided:
-    - "angle"  : directly measures image-in-cone membership for one class.
-    - "margin" : oxy_angle(second-best anchor) - oxy_angle(target anchor).
-                 Positive when the model is confident; recommended.
-* Model accessor: HySAC exposed model.visual(...); here the chain is
-  model.clip.vision_model → visual_projection → normalize → projection → exp_map0.
-* fp32: to_hyperbolic already disables autocast; we replicate that here so
-  the full backprop path stays numerically stable.
-* LoRA on q_proj / v_proj: attention weights depend on LoRA-adapted queries,
-  so gradients flow correctly even in eval() mode (LoRA params keep
-  requires_grad=True at all times).
-
-Usage
------
-    from explanation.agcam_guided import (
-        encode_anchors,
-        compute_agcam_heatmap,
-        compute_guided_heatmap,
-        explain_all_classes,
-    )
-
-    x_anchors = encode_anchors(model, anchor_texts, tokenizer, device)
-
-    heatmap = compute_agcam_heatmap(
-        model, pixel_values, x_anchors,
-        target_class=0,          # e.g. "real"
-        score_mode="margin",
-    )
+The forward path normalizes CLIP features, applies the projection and exp_map0,
+and requests attention tensors. It does not apply fixed image-radius
+normalization or axis-loss scoring. Call outside no_grad/inference_mode with
+eager attention and gradient-bearing model parameters.
+encode_anchors accepts text prompts; checkpoint free anchors must be supplied
+separately by a caller that supports them.
 """
 from __future__ import annotations
 
@@ -145,22 +118,16 @@ def forward_with_attentions(
     model,                       # AttributionCLIP, must be in eval()
     pixel_values: torch.Tensor,  # (1, C, H, W)
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-    """
-    Run the AttributionCLIP visual pipeline and return both the hyperbolic
-    embedding and all per-layer attention tensors, connected in the same
-    computation graph so that AGCAM/Guided can backpropagate through them.
+    """Return hyperbolic embeddings and graph-connected layer attentions.
 
-    IMPORTANT: call this function OUTSIDE any torch.no_grad() /
-    torch.inference_mode() context.  LoRA adapter weights keep
-    requires_grad=True in eval() mode, which is sufficient for autograd.
+    Requests attention tensors from the vision encoder, normalizes projected
+    CLIP features, applies the projection head and exp_map0. Unlike the model's
+    image forward path, this helper does not apply fixed image-radius scaling.
+    Call with gradients enabled and outside autocast; eval mode alone does not
+    enable gradients on frozen parameters.
 
-    Implementation mirrors AttributionCLIP._clip_image + to_hyperbolic but
-    explicitly requests output_attentions=True.
-
-    Returns:
-        x_hyp:      (1, D_hyp) hyperbolic embedding, in the computation graph.
-        attentions: list of L tensors each shaped (1, n_heads, S, S) where
-                    S = n_patches + 1 (CLS token included).
+    Returns (1, D_hyp) embeddings and L attention tensors (1, heads, S, S),
+    where S is the number of patches plus the CLS token.
     """
     vision_out = model.clip.vision_model(
         pixel_values=pixel_values,
@@ -179,9 +146,7 @@ def forward_with_attentions(
     feats = model.clip.visual_projection(vision_out.pooler_output)
     feats = F.normalize(feats, dim=-1)
 
-    # --- replicate to_hyperbolic (fp32, no autocast) -------------------------
-    # to_hyperbolic disables autocast to prevent fp16 NaN in sinh/acosh/asin.
-    # We replicate that behaviour here so the full backprop path is in fp32.
+    # Cast features to float before the head; the caller must disable autocast.
     feats   = feats.float()
     tangent = model.projection(feats)
     x_hyp   = exp_map0(tangent, curv=model.curv)
@@ -190,7 +155,7 @@ def forward_with_attentions(
 
 
 # ---------------------------------------------------------------------------
-# Score computation (replaces SVDD distance)
+# Exterior-angle score computation
 # ---------------------------------------------------------------------------
 
 def compute_score(
@@ -200,32 +165,12 @@ def compute_score(
     score_mode: Literal["angle", "margin"],
     curv: float,
 ) -> torch.Tensor:
-    """
-    Compute a scalar score to backpropagate for attribution.
+    """Return a scalar exterior-angle score for backpropagation.
 
-    "angle"
-        Returns  -oxy_angle(anchor_target, x_hyp).
-        Gradient points toward image regions that push the embedding inside
-        the target entailment cone.  Simple and fast.
-
-    "margin"
-        Returns  oxy_angle(anchor_second_best, x_hyp) - oxy_angle(anchor_target, x_hyp).
-        Positive when the model is confident; highlights what distinguishes
-        the predicted generator from the closest alternative.
-        Recommended for multi-class attribution.
-
-    In both cases a larger score corresponds to a stronger attribution signal
-    for target_class, matching the convention of the heatmap methods below.
-
-    Args:
-        x_hyp:        Hyperbolic image embedding (1, D_hyp), part of the graph.
-        x_anchors:    Detached class prototypes (K, D_hyp).
-        target_class: Class index to explain.
-        score_mode:   "angle" or "margin".
-        curv:         Curvature of the hyperbolic space.
-
-    Returns:
-        Scalar tensor (differentiable w.r.t. x_hyp and its upstream graph).
+    "angle" returns negative target xi; "margin" returns the smallest other
+    class xi minus target xi. A positive margin means the target ranks first,
+    not that it contains the image or that the prediction is calibrated.
+    x_hyp has shape (1, D); detached x_anchors has shape (K, D).
     """
     # xi shape: (K,) — one angle per class for the single image
     xi = _pairwise_angles(x_anchors, x_hyp, curv=curv).squeeze(-1)  # (K,)
@@ -239,7 +184,7 @@ def compute_score(
         K   = xi.shape[0]
         idx = torch.arange(K, device=xi.device)
         xi_second = xi[idx != target_class].min()
-        return xi_second - xi_target  # positive = model is confident
+        return xi_second - xi_target  # positive = target has the smallest exterior angle
 
     raise ValueError(f"Unknown score_mode: {score_mode!r}")
 

@@ -1,39 +1,12 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — ours @ 22 CLASSES, IMAGE-CENTROID ANCHORS + AUGMENTATION
+# CINECA Leonardo — image-centroid anchors with training degradations.
 #
-# Identical to slurm_train_22cls_centroid.sh plus --train_augment: random JPEG /
-# blur / downsample on the TRAIN split (data/degradations.py:random_degradation),
-# same corruption families as the test pipeline but with continuously sampled
-# parameters. Val stays clean.
+# Uses the centroid recipe with --train_augment: random JPEG, blur or downsample
+# on training images; validation stays clean. Record this augmentation exposure
+# when comparing robustness results. The clean centroid cache is shared with
+# slurm_train_22cls_centroid.sh and must match the backbone and training data.
 #
-# ⚠️ FAIRNESS: this model HAS seen the test-time corruption families in training,
-# which no baseline has (fairness audit 2026-07-21 — the same thing DNA-Det is
-# asterisked for). Report it as `ours-aug*`, as a separate axis (ours-clean vs
-# ours-aug), NOT head-to-head with the baselines on the degraded rows.
-#
-# Anchors are NOT the encoded text templates any more: a single forward pass over
-# the train split gives the per-class mean CLIP embedding, the projection head
-# maps it to tangent space, and from there each anchor is a free parameter. Where
-# SD3 and SD3.5 images actually land decides how far apart their anchors start,
-# instead of what the text encoder makes of the two strings.
-#
-# Hyperparameters = the sweep winners (slurm/sweep_configs_22cls.txt): lr 3e-4 is
-# the dominant axis (+5pt over 5e-5) and the anchor-norm regulariser hurts
-# (λ_norm 0 was 2nd overall) — the two have never been combined before. λ_neg
-# stays at 1.0: 2.0 collapses training to ~random.
-#
-# 2 GPUs + boost_qos_lprod: whole-node jobs starve on this cluster (see the
-# 4-GPU→2-GPU note in slurm_train_22cls_base_2gpu.sh). Results are unaffected —
-# DataParallel splits the same total batch of 256.
-#
-# Reuses the centroid cache written by the clean run (centroids are always
-# computed on clean images, so both runs start from the same anchors). Launch
-# this one after the clean run has written ANCHOR_CACHE; starting both at once
-# only wastes the ~20 min pre-pass twice, it is not harmful (atomic write).
-#
-# Submit:  sbatch slurm/slurm_train_22cls_centroid_aug.sh
-# ============================================================================
+# Submit: sbatch slurm/slurm_train_22cls_centroid_aug.sh
 
 #SBATCH --account=EUHPC_D35_189          # verify with `saldo -b`
 #SBATCH --partition=boost_usr_prod

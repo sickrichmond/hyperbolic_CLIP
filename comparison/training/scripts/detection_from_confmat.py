@@ -1,22 +1,15 @@
-"""Real-vs-fake detection, recovered from confusion matrices already on disk.
+"""Aggregate real-vs-fake detection and error routing from saved confusion matrices.
 
-The 22x22 conf_matrix is written into every test_results_degraded_*.txt and read
-by nothing: the existing aggregators parse only the nine scalars. Everything needed
-for a detection number is therefore already there, at zero GPU cost.
+Read test_results_degraded_*.txt, using the active harness class map.
+Collapse generator predictions into real/fake recalls and balanced accuracy.
+Also report synthetic-error routing by HiFi family and clean recall/errors
+within the configured native-resolution groups.
 
-Plain accuracy on this collapse is meaningless — the test set is ~95.5% synthetic,
-so never predicting `real` scores ~0.955. Only balanced accuracy is reported.
+RES_GROUP is a fixed lookup, not measured from the input images at runtime.
+Group statistics describe associations and do not establish which features
+a classifier uses. No model forward pass is performed.
 
-Also cross-tabs accuracy against the native-resolution groups (see RES_GROUP), which
-is how we tell whether the detection number is a fingerprint or a resampling
-artifact — tests/audit_shortcuts.py showed 20 of the 22 classes emit at exactly one
-resolution and that scale_to_224 alone separates real from fake at 0.866.
-
-No GPU, login node is fine. Run from the repo root:
-
-    IAB_EXCLUDE_GENERATORS=dalle3 python -m comparison.training.scripts.detection_from_confmat \\
-        sweepwin=$WORK/outputs/hypclip_fair_22cls \\
-        resnet50=comparison/training/logs/default_split/resnet50/<run>
+Usage: python -m comparison.training.scripts.detection_from_confmat label=DIR [more ...]
 """
 import re
 import sys
@@ -88,16 +81,11 @@ def detection(conf, real):
 
 
 def resolution_analysis(conf, names):
-    """Is the accuracy explained by the resampling ratio, or not?
+    """Summarize recalls and error routing using the fixed RES_GROUP lookup.
 
-    Two numbers, both from the clean confusion matrix:
-      - recall INSIDE the 1024 group (14 classes that share one ratio, so resolution
-        gives nothing there). High recall = the model has real fingerprints.
-      - what fraction of errors stay INSIDE a resolution group. A model reading the
-        ratio literally cannot confuse across groups, so ~1.0 is the signature of a
-        resolution shortcut — though twin pairs inflate it too, since twins happen to
-        share a resolution. It is decisive only in the other direction: well below 1
-        means the ratio is NOT the channel.
+    Reports recall within the 1024 group and the fraction of between-class
+    errors that stay in a resolution group. These associations do not establish
+    whether the image model relies on resolution or generator-specific features.
     """
     k = len(conf)
     grp = [RES_GROUP.get(n, 0) for n in names]

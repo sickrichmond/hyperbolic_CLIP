@@ -1,72 +1,25 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — the axis-distance cone loss (losses/axis_cone_loss.py).
+# CINECA Leonardo — axis-cone classifier recipes (22 classes).
 #
-# One idea: an image belongs ON THE AXIS of its class's cone and OUTSIDE every other
-# class's cone.
+# q is squared directional chord distance divided by the cone-wall chord:
+# q=0 on the axis, approximately 1 on the wall, and >1 outside.
+# Free apertures are sigmoid-bounded to PSI_RANGE; simplex modes fix them.
+# Coverage and separation are weighted objectives, not hard guarantees.
 #
-#     q_ik = ‖x̂ᵢ − ûₖ‖² / ‖wallₖ‖²  =  (1 − cos θ) / (1 − cos ψₖ)
-#     L    = pull + coverage/aperture + wrong-cone exclusion + cone separation
+# RUN=axis: SGD, trainable random axes/apertures.
+# RUN=axis_adam: AdamW, trainable random axes/apertures.
+# RUN=axis_constrained: fixed image radius, separate image/anchor learning rates.
+# RUN=axis_anchors: frozen image encoder/head, trainable axes/apertures.
+# RUN=axis_simplex: frozen simplex axes and 45-degree half-apertures, with CE.
+# RUN=axis_simplex_cover: 20 epochs; coverage weight 5, center 0.1, CE 0.5.
 #
-# q = 0 on the axis, 1 exactly on the cone WALL, > 1 outside. The coverage block finds
-# the narrowest aperture that leaves at most --nu of the class outside, --inside_margin
-# pads that coverage, and --lambda_sep keeps different cone walls disjoint.
+# All modes use vision-layer 12–23 q/v LoRA and no caption terms.
+# Simplex modes attempt calibration on the selected checkpoint's clean train
+# embeddings; infeasible coverage/separation leaves the fixed aperture unchanged.
+# Use high-dimensional coverage and pairwise-angle statistics to assess fit.
 #
-# The anchors are free parameters in tangent space, random directions, and the aperture
-# psi is a SEPARATE free parameter per class, bounded to --psi_range by a sigmoid.
-# Decoupling them is not cosmetic: deriving psi from the anchor's depth (sin psi = 2K/‖a‖)
-# makes "widen my cone" and "move toward the origin" the same action, and the optimiser
-# takes that scalar shortcut over the 128-dimensional rotation every time. Measured over
-# five epochs with the coupled version: psi 53.3° -> 65.0° monotone, the anchor norm pinned
-# at its floor, and the psi SPREAD across classes collapsing 8.7° -> 0.6° — which is exactly
-# when argmin q becomes argmax cos. Decoupled, the radial gradient on the anchor is exactly
-# zero and the trainer keeps ‖a‖ = 2K/sin psi so the stored anchor is still the point it
-# represents. Where psi settles is set by the aperture block, which shrinks the cone until
-# the mass of the samples left outside it equals --nu: the narrowest cone that still holds
-# its own class, with nu as the slack. nu upper-bounds the fraction of a class's own
-# samples outside its cone, so 0.05 means "leave at most 5% out".
-#
-# LoRA is on the upper half of the vision encoder only (layers 12-23, 24 adapters instead
-# of 72) and nothing on the text side: with free anchors the text encoder is out of the
-# objective entirely. Optimiser is SGD; note --lr does not carry over from the AdamW runs.
-#
-#   RUN=axis       SGD, lr 1e-2.
-#   RUN=axis_adam  the same loss under AdamW at its own lr. The control: without it a bad
-#                  axis run cannot be told apart from an untuned SGD lr.
-#   RUN=axis_constrained  images learn directions at 1/10 the anchors' learning rate;
-#                         their radius is fixed and the cones have inside/outside margins.
-#   RUN=axis_anchors  frozen image encoder/head; only anchor axes and apertures move.
-#                     Images stay at tangent radius 4 and cone walls keep a 2° gap.
-#   RUN=axis_simplex  fixed regular-simplex axes and fixed 45° cones train the image
-#                     classifier; the best checkpoint is then calibrated on all train data.
-#   RUN=axis_simplex_cover  revised simplex run: the encoder is explicitly penalised
-#                          outside the effective 43° wall, with lighter centre/CE terms.
-#
-# Read out of the epoch line, in order of importance:
-#   ψ∈[min,max]  must SPREAD. If the apertures stay equal then argmin q IS argmax cos,
-#                algebraically, however high the accuracy climbs — that is the 0.9985
-#                cone-cosine agreement that has pinned every run so far. With psi free and
-#                a coverage criterion, a narrow spread would now be a fact about the data.
-#                axis_simplex is intentionally uniform during training; its final all-data
-#                calibration creates the per-class spread after classifier selection.
-#   out vs ν     the coverage the cone actually reached against what was asked for. Equal
-#                means the aperture converged; far apart means it is still in transit.
-#   min∠         the open problem: it fell 41° → 9.7° over the last run, because the
-#                negative term goes to exactly zero once an image is outside a wrong cone,
-#                so nothing holds the anchors apart while the pull drags them all into the
-#                same narrow region of CLIP space.
-#
-# The schedule now floors at --lr_min instead of annealing to 1e-6: in the 5-epoch runs
-# psi, min-angle and q were all still moving when the last two epochs ran at 9.6e-4 and
-# 1e-6, so those final numbers said where the clock stopped, not where the equilibrium is.
-#
-# Submit:  sbatch --export=ALL,RUN=axis      slurm/slurm_train_22cls_axis.sh
-#          sbatch --export=ALL,RUN=axis_adam slurm/slurm_train_22cls_axis.sh
-#          sbatch --export=ALL,RUN=axis_constrained slurm/slurm_train_22cls_axis.sh
-#          sbatch --export=ALL,RUN=axis_anchors slurm/slurm_train_22cls_axis.sh
-#          sbatch --export=ALL,RUN=axis_simplex slurm/slurm_train_22cls_axis.sh
-#          sbatch --export=ALL,RUN=axis_simplex_cover slurm/slurm_train_22cls_axis.sh
-# ==========================================================================
+# Submit: sbatch --export=ALL,RUN=axis_simplex_cover slurm/slurm_train_22cls_axis.sh
+# CHECKPOINT_DIR overrides checkpoint storage; RUN defaults to axis.
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod

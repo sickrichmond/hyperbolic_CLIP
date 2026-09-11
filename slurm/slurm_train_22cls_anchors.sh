@@ -1,30 +1,12 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — ours @ 22 CLASSES, STRUCTURAL TEXT ANCHORS. Three runs, each
-# one variable from the previous, all on the ours-sweepwin recipe (lr 3e-4,
-# lora 16/32, min_radius 0.5, margin 0.3, lambda_neg 1.0, lambda_norm 0.5 /
-# target_norm 4.0, 5 epochs, base loss, full manifest).
+# CINECA Leonardo — structural text-anchor recipes on the 22-class manifest.
 #
-# Why: the default anchors are two templates, so 21 of the 22 sentences differ by
-# one token and CLIP embeds them nearly collinearly — the cones start on top of
-# each other. data/anchor_prompts_structural.json varies verb, voice and syntax
-# per class instead. Measure a set first:  python -m tests.probe_anchor_prompts
+# RUN=A: re-encode data/anchor_prompts_structural.json through text LoRA.
+# RUN=B: initialize free tangent anchors from those prompts; learn a drift scale.
+# RUN=C: re-encoded prompts plus exterior-angle CE with a learned temperature.
+# All modes use the cone loss without caption terms, for five epochs.
 #
-#   RUN=A  prompts only. Anchors are still re-encoded every step and move through
-#          the text-encoder LoRA. ONE variable from ours-sweepwin.
-#   RUN=B  --anchor_init text_free: free tangent parameters initialised at the
-#          encoded prompts, drifting by t = t0 + softplus(s)·δ with δ init 0 and
-#          s a single LEARNED scalar. One variable from A.
-#   RUN=C  --lambda_ce: CE on softmax(-ξ/τ) with τ learned, on top of the cone
-#          hinge. Attacks the AUC-holds/accuracy-collapses gap, not the anchor
-#          geometry. One variable from A. Inference is unchanged.
-#
-# ~2.5h each on 2 GPUs.
-#
-# Submit:  sbatch --export=ALL,RUN=A slurm/slurm_train_22cls_anchors.sh
-#          sbatch --export=ALL,RUN=B slurm/slurm_train_22cls_anchors.sh
-#          sbatch --export=ALL,RUN=C slurm/slurm_train_22cls_anchors.sh
-# ============================================================================
+# Submit: sbatch --export=ALL,RUN=A slurm/slurm_train_22cls_anchors.sh
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod

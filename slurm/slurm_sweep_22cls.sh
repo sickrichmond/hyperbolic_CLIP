@@ -1,24 +1,14 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — HypCLIP hyperparameter SWEEP @ 22 classes, base loss.
-# SLURM job array: one training per line of slurm/sweep_configs_22cls.txt.
-# Short (3 epochs) for ranking; retrain the winner longer afterwards.
+# CINECA Leonardo — one training job per line of a sweep configuration file.
 #
-# Each task selects on the HARNESS VAL split and saves val_balanced in its .pt.
-# Rank them with: python comparison/training/scripts/collect_sweep.py \
-#     --dir $WORK/hyp_fine_tuning/checkpoints/sweep --configs slurm/sweep_configs_22cls.txt
+# Select/checkpoint on the comparison validation split. SWEEP_CONFIGS chooses
+# the argument file; NUM_EPOCHS defaults to 3. Match --array to its line count:
+# 0–18 for the base/v2 files, 0–3 for the caption file.
+# Outputs are separated by config filename. Short-run rankings need not
+# match rankings at longer training budgets.
 #
-# PREREQUISITE: 22-class manifest (split_manifest_22cls.json). See slurm_train_22cls_base.sh.
-# Submit:  sbatch slurm/slurm_sweep_22cls.sh
-# The array size must match `wc -l` of the chosen config file.
-#
-# Sweep 2 (19 configs, 5 epochs) — extends lr past 3e-4, which was the BOUNDARY of
-# sweep 1 and its monotonic winner, and fills the never-tested lr 3e-4 x lambda_norm 0
-# cell (lambda_norm 0 was worth +4.3 at lr 5e-5, but the winner kept 0.5/4.0):
-#   sbatch --array=0-18%4 --export=ALL,NUM_EPOCHS=5,\
-# SWEEP_CONFIGS=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo/slurm/sweep_configs_22cls_v2.txt \
-#     slurm/slurm_sweep_22cls.sh
-# ============================================================================
+# Submit: sbatch slurm/slurm_sweep_22cls.sh
+# Report: python -m comparison.training.scripts.collect_sweep --dir OUTPUT --configs CONFIGS
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -53,9 +43,7 @@ MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 #   --export=ALL,SWEEP_CONFIGS=$REPO/slurm/sweep_configs_22cls_captions.txt slurm/slurm_sweep_22cls.sh
 # Match --array to `wc -l` of the chosen config file.
 CONFIGS=${SWEEP_CONFIGS:-$REPO/slurm/sweep_configs_22cls.txt}
-# 3 epochs is enough to RANK, but in sweep 1 every top config still had epoch=3 as its
-# best — nothing had converged, so the ranking was of learning SPEED as much as of final
-# quality. Sweep 2 runs at 5, the same length as the final trainings.
+# Override NUM_EPOCHS to compare configurations at the desired training budget.
 NUM_EPOCHS=${NUM_EPOCHS:-3}
 # Per-config subdir so the two sweeps (base vs captions) don't overwrite each
 # other's sweep_<idx>.pt. collect_sweep.py --dir points at the matching subdir.
@@ -67,9 +55,7 @@ LINE=$(sed -n "$((SLURM_ARRAY_TASK_ID + 1))p" "$CONFIGS")
 echo "=== sweep task $SLURM_ARRAY_TASK_ID ==="
 echo "config: $LINE"
 
-# 2 GPUs → SLURM exposes them as 0,1. Whole-node (4-GPU) tasks starved PD(Priority)
-# with no reservation at low fairshare; half-node backfills. batch_size unchanged
-# (256) → nn.DataParallel splits 128/GPU, results identical, ~2x wall time.
+# DataParallel splits the total batch of 256 across two visible GPUs.
 CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --dataset_path    $DATA \
     --captions_dir    $CAPS \

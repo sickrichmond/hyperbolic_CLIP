@@ -1,22 +1,13 @@
-"""
-Harness-native dataset adapter for the hyperbolic-CLIP attributor.
+"""CLIP preprocessing adapter for the comparison harness.
 
-Subclasses the baseline `ImageAttributionDataset` so it inherits the EXACT same
-image enumeration, 23-class label map, semantic labels, grok crop and test-time
-degradation. Because `get_dataloader` performs its stratified split on
-`dataset.samples` (identical order across all baseline datasets), evaluating the
-hyperbolic model through this adapter uses BYTE-IDENTICAL test images / split /
-degradations as resnet50/dct/hifi_net/defl.
+Inherit ImageAttributionDataset's enumeration, active class map, semantic labels,
+grok crop and test degradations. Replace each returned PIL image with the CLIP
+processor tensor under the image key. Used by both hyperbolic and spherical
+CLIP evaluators.
 
-The only difference from the baselines is that `__getitem__` returns a
-CLIP-preprocessed `pixel_values` tensor (under key 'image') instead of a PIL
-image, so our model can consume it directly.
-
-`config['pre_resize']` is the one deliberate deviation, and it is a CONTROL, not a
-default (see test_hypclip.py --pre_resize): it squares every image to a common size
-before the CLIP processor, so the native→224 resampling ratio stops varying by
-class. tests/audit_shortcuts.py shows that ratio is strongly class-dependent, and
-this is how we find out whether the model was reading it.
+Optional pre_resize resizes the shortest edge with bicubic interpolation,
+preserving aspect ratio, before CLIP processing. It changes the preprocessing
+protocol; it does not remove all effects of native image resolution.
 """
 from PIL import Image
 
@@ -44,12 +35,8 @@ class HypclipDataset(ImageAttributionDataset):
         item = super().__getitem__(idx)
         image = item['image']
         if self.pre_resize:
-            # SHORTEST EDGE to N, aspect preserved. The processor then takes every
-            # image N->224, so the resampling ratio is the same for all classes —
-            # which is the channel the audit implicates (scale_to_224 alone gives
-            # real-vs-fake 0.866; adding aspect only reaches 0.867, so aspect carries
-            # nothing). Squaring instead would also DISTORT non-square images (grok3,
-            # real, gemini) and their drop could no longer be attributed.
+            # Resize the shortest edge to N while preserving aspect ratio.
+            # The processor then resizes/crops; native-resolution effects can remain.
             w, h = image.size
             k = self.pre_resize / min(w, h)
             image = image.resize((max(1, round(w * k)), max(1, round(h * k))),

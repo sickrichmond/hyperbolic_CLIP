@@ -1,28 +1,11 @@
-"""
-Explain a single image with AGCAM or Guided attribution.
+"""Save AGCAM or Guided explanations for a single image.
 
-Loads an AttributionCLIP checkpoint, encodes class anchors, runs the chosen
-explanation method for one or all classes, and saves heatmap PNGs and
-colour-overlay PNGs alongside the output JSON.
+Load a checkpoint, re-encode its text prompts, predict with exterior angles,
+and explain a selected class or every class. Save heatmap/overlay PNGs and JSON.
+The CLI does not restore free anchors or axis-loss scoring. Its attention
+forward omits fixed image-radius normalization.
 
-Usage examples
---------------
-# Explain predicted class with AGCAM (margin score, all outputs)
-python explanation/explain_image.py \\
-    --image       data/images/example.jpg \\
-    --checkpoint  checkpoints/attribution_FLUX_vitl14.pt \\
-    --method      agcam \\
-    --score_mode  margin \\
-    --output_dir  outputs/example \\
-    --all_classes
-
-# Explain a specific class with Guided
-python explanation/explain_image.py \\
-    --image       data/images/example.jpg \\
-    --checkpoint  checkpoints/attribution_FLUX_vitl14.pt \\
-    --method      guided \\
-    --target      FLUX \\
-    --output_dir  outputs/example_guided
+Usage: python -m explanation.explain_image --help
 """
 from __future__ import annotations
 
