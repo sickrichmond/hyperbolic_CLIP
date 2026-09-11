@@ -13,8 +13,7 @@ Input: the two caches written by scripts/extract_clip_features.py
 It trains a single nn.Linear(feat_dim -> num_classes) with class-balanced
 cross-entropy (the train set is imbalanced: real has ~8800 captioned images vs
 ~16000 per generator), then reports overall / balanced / per-class accuracy and a
-confusion matrix — same metrics as tests/eval_attribution, so the number lines up
-directly against the hyperbolic and euclidean fine-tuned models.
+confusion matrix on the cached validation split.
 
 There is no CLIP here: we operate on the cached 768-d features, so it trains in a
 couple of minutes (seconds on a GPU).
