@@ -133,28 +133,11 @@ def report_epoch(avg, args, epoch, lr, anchors):
         line1 = (f"\nEpoch {epoch}: train loss={avg['loss']:.4f}  "
                  f"L_img_cls={avg['loss_img_in_cls']:.4f}"
                  f"  (pos={avg['loss_pos']:.4f} neg={avg['loss_neg']:.4f})")
-        if args.lambda_cap_in_class > 0 or args.lambda_img_in_cap > 0:
-            line1 += (f"  L_cap_cls={avg['loss_cap_in_cls']:.4f}"
-                      f"  L_img_cap={avg['loss_img_in_cap']:.4f}")
         line1 += f"  L_norm={avg['loss_norm']:.4f}"
-        if "loss_axis" in avg:
-            line1 += (f"  L_axis={avg['loss_axis']:.4f}"
-                      f"  shallow={100 * avg['frac_shallow']:.1f}%")
-        if args.lambda_ce > 0:
-            line1 += f"  L_ce={avg['loss_ce']:.4f}  τ={avg['ce_tau']:.3f}"
         line1 += (f"  min∠={avg['sep_min_deg']:.1f}°"
                   f"  mean∠={avg['sep_mean_deg']:.1f}°"
                   f"  overlap={100*avg['sep_overlap']:.0f}%"
                   f"  2ψ/min∠={2*math.degrees(avg['mean_psi_anc'])/max(avg['sep_min_deg'], 1e-6):.1f}")
-        if "sep_max_deg" in avg:
-            line1 += (f"  L_sep={avg['loss_sep']:.4f}"
-                      f"  max∠={avg['sep_max_deg']:.1f}°")
-        if "loss_fam_anc" in avg:
-            line1 += (f"  L_famA={avg['loss_fam_anc']:.4f}"
-                      f"  L_famI={avg['loss_fam_img']:.4f}"
-                      f"  in_fam={100*avg['inside_family']:.0f}%"
-                      f"  fam_acc={100*avg['family_acc']:.1f}%"
-                      f"  ψf={avg['mean_psi_fam']:.3f}")
         if anchors.anchor_drift is not None:
             line1 += f"  drift_s={F.softplus(anchors.anchor_drift).item():.4f}"
         line1 += f"  lr={lr:.2e}"
@@ -168,13 +151,6 @@ def report_epoch(avg, args, epoch, lr, anchors):
               f"‖x_anc‖={avg['mean_anc_norm']:.2f}"
               + (f"  ‖t_anc‖={anchors.anchor_tangent.norm(dim=-1).mean().item():.2f}"
                  if anchors.anchor_tangent is not None else ""))
-        if args.lambda_cap_in_class > 0 or args.lambda_img_in_cap > 0:
-            print(f"           inside_cap={100*avg['inside_cap']:.1f}%  "
-                  f"inside_img_in_cap={100*avg['inside_img_cap']:.1f}%  "
-                  f"ψ_cap={avg['mean_psi_cap']:.3f}  "
-                  f"ξ_cap→anc={avg['mean_xi_cap_anc']:.3f}  "
-                  f"ξ_img→cap={avg['mean_xi_img_cap']:.3f}  "
-                  f"‖t̄_cap‖={avg['mean_cap_norm']:.2f}")
 
 
 def report_validation(val):

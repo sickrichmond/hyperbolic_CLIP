@@ -32,7 +32,7 @@ from tests.probe_degradation_shift import paired_datasets
 def family_texts(names):
     """Regenerated from the checkpoint's family NAMES, byte-identical to training.
 
-    training.anchors.build_family_anchors is deterministic in the names, so the
+    Family prompt construction is deterministic in the stored names, so the
     checkpoint does not need to carry the sentences.
     """
     return ["A real image" if n == "real"

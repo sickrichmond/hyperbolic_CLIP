@@ -27,7 +27,6 @@ class TinyTokenizer:
 
 
 class TinyDataset(Dataset):
-    captions = False
     calls = []
 
     def __init__(self, **kwargs):
@@ -45,9 +44,6 @@ class TinyDataset(Dataset):
         label = self.classes.index(name)
         item = {"pixel_values": torch.eye(4)[label] + 0.01 * (i % 4),
                 "generator": name}
-        if self.captions:
-            item.update(input_ids=torch.tensor([label]),
-                        attention_mask=torch.tensor([1]))
         return item
 
 
@@ -72,9 +68,8 @@ class TinyModel(nn.Module):
         tangent = self.projection(torch.eye(4)[ids[:, 0]]) * 0.3
         return exp_map0(tangent, curv=self.curv), tangent
 
-    def forward(self, pixel, ids=None, mask=None):
-        image = self.encode_image(pixel)[0]
-        return image if ids is None else (image, self.encode_text(ids, mask)[0])
+    def forward(self, pixel):
+        return self.encode_image(pixel)[0]
 
     def trainable_parameters(self):
         return [p for p in self.parameters() if p.requires_grad]
@@ -83,11 +78,9 @@ class TinyModel(nn.Module):
         pass
 
 
-def run_tiny_training(module, directory, options, captions=False, manifest=False):
+def run_tiny_training(module, directory, options, manifest=False):
     """Exercise real optimization, validation, saving and final embedding collection."""
     directory = Path(directory)
-    (directory / "tree.json").write_text(json.dumps(
-        {"real": "real", "FLUX": "diffusion", "SDXL": "diffusion"}))
     (directory / "split.json").write_text(json.dumps(
         {"train": ["train-row"], "val": ["val-row"]}))
     args = parse_args([
@@ -97,7 +90,6 @@ def run_tiny_training(module, directory, options, captions=False, manifest=False
         "--output", str(directory / "model.pt"),
         "--diag_plot_dir", str(directory), "--snapshot_every", "1",
         "--plot_all_train", "--log_every", "1",
-        "--hierarchy_json", str(directory / "tree.json"),
         *options,
         *(["--split_manifest", str(directory / "split.json")] if manifest else []),
     ])
@@ -110,7 +102,6 @@ def run_tiny_training(module, directory, options, captions=False, manifest=False
     plotter = SimpleNamespace(plot_epoch_snapshot=snapshot, _load_horopca=lambda: None)
     TinyDataset.calls = []
     with contextlib.ExitStack() as stack:
-        stack.enter_context(patch.object(TinyDataset, "captions", captions))
         stack.enter_context(patch.object(module, "AttributionCLIP", TinyModel))
         stack.enter_context(patch.object(module, "IABCLIPDataset", TinyDataset))
         stack.enter_context(patch.object(module, "parse_args", return_value=args))
@@ -151,10 +142,19 @@ class AttributionTrainingTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as cm:
             parse_args(["--help"])
         self.assertEqual(cm.exception.code, 0)
-        args = parse_args(["--dataset_path", "x", "--captions_dir", "y",
-                           "--no_captions", "--lambda_cap_in_class", "1"])
+        base = ["--dataset_path", "x", "--captions_dir", "y"]
+        args = parse_args(base + ["--no_captions"])
         validate_args(args)
-        self.assertEqual(args.lambda_cap_in_class, 0)
+        for flag in ("--lambda_cap_in_class", "--lambda_img_in_cap",
+                     "--lambda_axis", "--lambda_hinge", "--pos_mode",
+                     "--lambda_family", "--hierarchy", "--theta_max"):
+            with self.subTest(flag=flag), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    parse_args(base + [flag, "1"])
+        for flag in ("--lambda_ce", "--lambda_sep"):
+            with self.subTest(flag=flag), self.assertRaises(ValueError):
+                validate_args(parse_args(base + [flag, "1"]))
+            validate_args(parse_args(base + ["--loss", "axis", flag, "1"]))
         args.fixed_image_radius, args.init_depth = 4, 3
         with self.assertRaises(ValueError):
             validate_args(args)
@@ -163,27 +163,31 @@ class AttributionTrainingTests(unittest.TestCase):
         cases = [
             (["--loss", "axis", "--anchor_init", "simplex", "--freeze_anchors",
               "--fixed_psi", "45", "--lambda_aperture", "0", "--lambda_cover", "5",
-              "--lambda_ce", "0.5", "--calibrate_psi"], False, True),
-            (["--loss", "axis", "--anchor_init", "random", "--anchors_only"],
-             False, False),
-            (["--anchor_init", "text", "--lambda_cap_in_class", "0.5",
-              "--lambda_img_in_cap", "0.5", "--hierarchy", "emergent",
-              "--lambda_family", "0.2", "--lambda_sep", "0.3"], True, True),
-            (["--anchor_init", "text_free", "--lambda_ce", "0.5"], False, False),
-            (["--anchor_init", "image_centroid", "--anchor_norm_range", "1", "2"],
-             False, False),
+              "--lambda_ce", "0.5", "--calibrate_psi"], True),
+            (["--loss", "axis", "--anchor_init", "random", "--anchors_only"], False),
+            (["--anchor_init", "text", "--lambda_norm", "0.5",
+              "--target_norm", "4", "--norm_mode", "bilateral"], True),
+            (["--anchor_init", "text_free", "--neg_samples", "1"], False),
+            (["--anchor_init", "image_centroid", "--anchor_norm_range", "1", "2"], False),
+            (["--anchor_init", "random", "--require_caption"], True),
         ]
-        for options, captions, manifest in cases:
+        for options, manifest in cases:
             with self.subTest(options=options), tempfile.TemporaryDirectory() as directory:
                 checkpoint, frames, calls = run_tiny_training(
-                    trainer, directory, options, captions, manifest)
+                    trainer, directory, options, manifest=manifest)
                 self.assertEqual(checkpoint["class_names"], ["real", "FLUX", "SDXL"])
                 self.assertGreaterEqual(checkpoint["val_balanced"], 0)
+                self.assertEqual(checkpoint["hierarchy"], "none")
+                self.assertEqual(checkpoint["family_names"], [])
+                self.assertIsNone(checkpoint["family_of"])
+                if checkpoint["loss"] == "cone":
+                    self.assertEqual(checkpoint["lambda_ce"], 0)
+                    self.assertIsNone(checkpoint["ce_tau"])
                 self.assertEqual(frames[-1][0], "train_all_final.png")
                 self.assertEqual(len(frames[-1][1]), 12)
                 self.assertEqual(set(frames[-1][2]), {0, 1, 2})
                 self.assertTrue(np.isfinite(frames[-1][1]).all())
-                self.assertEqual(calls[0]["require_caption"], captions)
+                self.assertEqual(calls[0]["require_caption"], "--require_caption" in options)
                 self.assertEqual(calls[0]["seed"], calls[1]["seed"])
                 self.assertEqual(calls[0]["split"], "all" if manifest else "train")
                 self.assertEqual(calls[1]["split"], "all" if manifest else "val")

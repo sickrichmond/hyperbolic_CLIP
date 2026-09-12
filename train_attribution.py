@@ -1,7 +1,7 @@
 """Train a hyperbolic image-attribution classifier with cone or axis losses.
 
-Supports text and free class anchors, optional caption/family terms for the cone
-loss, validation-based checkpoint selection, and Poincare diagnostics."""
+Supports text and free class anchors, image-only training, validation-based
+checkpoint selection, and Poincare diagnostics."""
 import math
 from pathlib import Path
 
@@ -37,11 +37,6 @@ def main():
         raise ValueError(f"{len(class_names)} simplex anchors need --hyperbolic_dim >= "
                          f"{len(class_names) - 1}")
     name_to_idx = {n: i for i, n in enumerate(class_names)}
-    if args.anchor_init != "text" and (args.lambda_cap_in_class > 0
-                                       or args.lambda_img_in_cap > 0):
-        raise ValueError(f"--anchor_init {args.anchor_init} makes the anchors free "
-                         f"parameters; the caption terms have no class anchor to attach "
-                         f"to. Use --no_captions.")
     if args.anchor_init in ("image_centroid", "simplex"):
         kind = "image centroids" if args.anchor_init == "image_centroid" else "regular simplex"
         print(f"Class anchors: {kind} (text-free), {len(class_names)} classes")
@@ -53,12 +48,7 @@ def main():
         for i, (c, t) in enumerate(zip(class_names, anchor_texts)):
             print(f"  [{i}] {c:14s} → \"{t}\"")
 
-    use_caps = (args.lambda_cap_in_class > 0 or args.lambda_img_in_cap > 0)
-    if args.loss == "axis" and use_caps:
-        raise ValueError("--loss axis has no caption terms; it scores images against "
-                         "class cones only. Drop --lambda_cap_in_class/--lambda_img_in_cap "
-                         "or use --loss cone.")
-    req_cap = use_caps or args.require_caption
+    req_cap = args.require_caption
     train_include = val_include = None
     if args.split_manifest:
         import json
@@ -100,7 +90,7 @@ def main():
             **dataset_kwargs,
             split="val", val_frac=args.val_frac,
             include_uncaptioned=True, split_scheme=args.split_scheme, test_frac=args.test_frac,
-            require_caption=use_caps,
+            require_caption=False,
         )
 
     train_ds.train_augment = args.train_augment
@@ -166,17 +156,8 @@ def main():
         cone_loss = EntailmentConeLoss(
             curv=args.curv, min_radius=args.min_radius,
             margin=args.margin, lambda_neg=args.lambda_neg,
-            lambda_cap_in_class=args.lambda_cap_in_class,
-            lambda_img_in_cap=args.lambda_img_in_cap,
             lambda_norm=args.lambda_norm, target_norm=args.target_norm,
-            lambda_axis=args.lambda_axis,
-            lambda_ce=args.lambda_ce, ce_tau_init=args.ce_tau_init,
-            lambda_hinge=args.lambda_hinge, norm_mode=args.norm_mode,
-            target_norm_family=args.target_norm_family,
-            lambda_sep=args.lambda_sep, separation_margin=args.separation_margin,
-            theta_max=args.theta_max,
-            lambda_family=args.lambda_family, family_of=anchors.family_of,
-            pos_mode=args.pos_mode, neg_samples=args.neg_samples,
+            norm_mode=args.norm_mode, neg_samples=args.neg_samples,
         ).to(device)
 
     # Include learned loss temperatures; geometric tensors use their own LR and no decay.
@@ -227,11 +208,7 @@ def main():
     if args.loss == "axis" and args.lambda_cover > 0:
         print(f"Coverage term: λ_cover={args.lambda_cover}  "
               f"λ_center={args.lambda_center}  effective wall=ψ-{args.inside_margin:g}°")
-    if use_caps:
-        print(f"Hierarchical mode: λ_cap_in_class={args.lambda_cap_in_class} "
-              f"λ_img_in_cap={args.lambda_img_in_cap}")
-    else:
-        print("Base attribution loss only (no caption terms).")
+    print("Image-only attribution training.")
 
     plot_epoch_snapshot = None
     diag_state = None
@@ -272,24 +249,11 @@ def main():
         base_keys = ["loss_img_in_cls", "loss_pos", "loss_neg", "xi_sat",
                      "psi_min_deg", "psi_max_deg",
                      "sep_min_deg", "sep_mean_deg", "sep_overlap",
-                     "loss_cap_in_cls", "loss_img_in_cap", "loss_norm",
+                     "loss_norm",
                      "cone_acc", "inside_img", "mean_psi_anc", "mean_xi_img_anc",
                      "mean_anc_norm"]
-    cap_keys  = ["inside_cap", "inside_img_cap", "mean_psi_cap",
-                 "mean_xi_cap_anc", "mean_xi_img_cap", "mean_cap_norm"]
-    ce_keys   = ["loss_ce", "ce_tau"] if args.lambda_ce > 0 else []
-    axreg_keys = (["loss_axis", "frac_shallow"]
-                  if args.lambda_axis > 0 and not axis else [])
-    sep_keys  = (["loss_sep", "sep_max_deg"]
-                 if args.lambda_sep > 0 and not axis else [])
-    fam_keys  = (["loss_fam_anc", "loss_fam_img", "inside_family", "family_acc",
-                  "mean_psi_fam", "fam_tau"]
-                 if args.lambda_family > 0 and args.hierarchy != "none" and not axis
-                 else [])
-
-    stat_csv_keys = base_keys + ce_keys + axreg_keys + sep_keys + fam_keys
-    if use_caps:
-        stat_csv_keys = stat_csv_keys + cap_keys
+    ce_keys = ["loss_ce", "ce_tau"] if axis and args.lambda_ce > 0 else []
+    stat_csv_keys = base_keys + ce_keys
 
     if snap_every and plot_epoch_snapshot is not None:
         model.eval()
@@ -318,11 +282,7 @@ def main():
             model.eval()
         else:
             model.train()
-        sums = {"loss": 0.0,
-                **{k: 0.0 for k in
-                   base_keys + ce_keys + axreg_keys + sep_keys + fam_keys}}
-        if use_caps:
-            sums.update({k: 0.0 for k in cap_keys})
+        sums = {"loss": 0.0, **{k: 0.0 for k in stat_csv_keys}}
         bar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.num_epochs}")
         for step, batch in enumerate(bar, 1):
             global_step += 1
@@ -331,25 +291,16 @@ def main():
                                     device=device, dtype=torch.long)
 
             with autocast("cuda"):
-                if use_caps:
-                    cap_ids = batch["input_ids"].to(device)
-                    cap_mask = batch["attention_mask"].to(device)
-                    x_img, x_cap = model(pixel, cap_ids, cap_mask)
-                else:
-                    x_img = model(pixel)
-                    x_cap = None
+                x_img = model(pixel)
                 t_anc = anchors.tangent()
                 if t_anc is None:
                     x_anc, _ = core.encode_text(anchors.anchor_ids, anchors.anchor_mask)
-                x_fam = (core.encode_text(anchors.fam_ids, anchors.fam_mask)[0]
-                         if anchors.fam_ids is not None else None)
             if t_anc is not None:
                 # Hyperbolic lifting requires float32 even during mixed-precision training.
                 with autocast("cuda", enabled=False):
                     x_anc = exp_map0(t_anc.float(), curv=args.curv)
             loss, stats = (cone_loss(x_img, x_anc, labels, anchors.sin_psi()) if axis
-                           else cone_loss(x_img, x_anc, labels,
-                                          x_cap=x_cap, x_fam=x_fam))
+                           else cone_loss(x_img, x_anc, labels))
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -364,11 +315,8 @@ def main():
             anchors.project_(args)
 
             sums["loss"] += loss.item()
-            for k in base_keys + ce_keys + axreg_keys + sep_keys + fam_keys:
+            for k in stat_csv_keys:
                 sums[k] += stats[k].item()
-            if use_caps:
-                for k in cap_keys:
-                    sums[k] += stats[k].item()
 
             if stat_csv is not None and (global_step % args.log_every == 0
                                          or global_step == 1):
@@ -407,10 +355,6 @@ def main():
                         "acc":  f"{sums['cone_acc']/step:.3f}",
                         "ψa":   f"{sums['mean_psi_anc']/step:.3f}",
                     }
-                if use_caps:
-                    post["cc"] = f"{sums['loss_cap_in_cls']/step:.3f}"
-                    post["ip"] = f"{sums['loss_img_in_cap']/step:.3f}"
-                    post["ψc"] = f"{sums['mean_psi_cap']/step:.3f}"
                 bar.set_postfix(**post)
 
         avg = {k: v / steps_per_epoch for k, v in sums.items()}
@@ -484,7 +428,7 @@ def main():
                     "lambda_ce":       args.lambda_ce,
                     "ce_tau":          (F.softplus(cone_loss.ce_tau_raw).item()
                                         if args.lambda_ce > 0 else None),
-                    "lambda_hinge":    args.lambda_hinge,
+                    "lambda_hinge":    1.0,
                     "loss":            args.loss,
                     "lambda_aperture": args.lambda_aperture,
                     "lambda_cover":    args.lambda_cover,
@@ -495,7 +439,7 @@ def main():
                     "fixed_psi":       args.fixed_psi,
                     "freeze_anchors":  args.freeze_anchors,
                     "psi_range":       args.psi_range,
-                    "pos_mode":        args.pos_mode,
+                    "pos_mode":        "hinge",
                     "neg_samples":     args.neg_samples,
                     "optimizer":       args.optimizer,
                     "momentum":        args.momentum,
@@ -506,15 +450,13 @@ def main():
                     "lambda_sep":      args.lambda_sep,
                     "separation_margin": args.separation_margin,
                     "inside_margin":  args.inside_margin,
-                    "theta_max":       args.theta_max,
-                    "hierarchy":         args.hierarchy,
-                    "family_names":      anchors.family_names,
-                    "family_of":         (anchors.family_of.cpu().tolist()
-                                          if anchors.family_of is not None else None),
-                    "target_norm_family": args.target_norm_family,
-                    "lambda_family":     args.lambda_family,
-                    "fam_tau":           (F.softplus(cone_loss.fam_tau_raw).item()
-                                          if args.lambda_family > 0 else None),
+                    "theta_max":       150.0,
+                    "hierarchy":         "none",
+                    "family_names":      [],
+                    "family_of":         None,
+                    "target_norm_family": 0.0,
+                    "lambda_family":     0.0,
+                    "fam_tau":           None,
                     "train_augment":   args.train_augment,
                     "aug_policy":      args.aug_policy,
                     "generators":      args.generators,

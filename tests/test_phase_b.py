@@ -1,112 +1,65 @@
-"""CPU checks for optional entailment-cone loss terms.
-
-Cover default objective composition, angular separation bounds, floor and
-bilateral norm penalties, family containment, squared-angle gradients,
-negative subsampling, tangent norm clamping, Poincare conversion and
-additive axis-ray regularization with shallow-image diagnostics.
+"""CPU checks for entailment-cone hinges and anchor-norm regularization.
 
 Run: python -m tests.test_phase_b
 """
-import math
-
 import torch
 
 from geometry.lorentz import exp_map0, half_aperture, oxy_angle
-from losses.attribution_loss import EntailmentConeLoss, _subsample
+from losses.attribution_loss import EntailmentConeLoss, _subsample, predict_class
 
 D, K, B = 8, 4, 6
 
 
-def _ray(direction: torch.Tensor, norm: float) -> torch.Tensor:
-    """A point on the hyperboloid at the given space-norm, along `direction`."""
-    d = direction / direction.norm(dim=-1, keepdim=True)
-    return d * norm
+def _ray(direction, norm):
+    return direction / direction.norm(dim=-1, keepdim=True) * norm
 
 
-def test_defaults_are_inert():
-    g = torch.Generator().manual_seed(0)
-    x_img = exp_map0(torch.randn(B, D, generator=g))
-    x_anc = exp_map0(torch.randn(K, D, generator=g))
-    labels = torch.arange(B) % K
-
-    loss_fn = EntailmentConeLoss(min_radius=0.1, lambda_norm=0.5, target_norm=4.0)
-    loss, st = loss_fn(x_img, x_anc, labels)
-    expected = st["loss_img_in_cls"] + 0.5 * st["loss_norm"]
-    assert torch.allclose(loss, expected, atol=1e-6), (loss, expected)
-    assert st["loss_sep"].item() == 0.0
-    # lambda_axis defaults to 0, so the axis-ray regulariser must not appear at all —
-    # not as a term and not as a stat that a log parser would then expect to find.
-    assert "loss_axis" not in st and "frac_shallow" not in st, sorted(st)
-    print("1 ok  defaults inert, no new term leaks in")
-
-
-def test_axis_regulariser_is_additive_and_shallow_aware():
-    """lambda_axis adds exactly lambda_axis * mean(d_ray) and nothing else, and
-    frac_shallow reports the configuration in which the hinge has no gradient at all."""
-    g = torch.Generator().manual_seed(0)
-    x_anc = _ray(torch.randn(K, D, generator=g), 3.0)
-    labels = torch.arange(B) % K
-
-    # images DEEPER than every anchor: the configuration the cone rule needs
-    deep = _ray(torch.randn(B, D, generator=g), 9.0)
-    base = EntailmentConeLoss(min_radius=0.5)(deep, x_anc, labels)[0]
-    lam = 0.25
-    tot, st = EntailmentConeLoss(min_radius=0.5, lambda_axis=lam)(deep, x_anc, labels)
-    assert torch.allclose(tot, base + lam * st["loss_axis"], atol=1e-6), (tot, base)
-    assert st["frac_shallow"].item() == 0.0, st["frac_shallow"]
-    assert st["loss_axis"].item() > 0.0, "a random point is not on its axis"
-
-    # Images shallower than every anchor exercise the saturation diagnostic.
-    shallow = _ray(torch.randn(B, D, generator=g), 0.009)
-    _, st2 = EntailmentConeLoss(min_radius=0.5, lambda_axis=lam)(shallow, x_anc, labels)
-    assert st2["frac_shallow"].item() == 1.0, st2["frac_shallow"]
-    # ...and there the hinge is flat, because every xi is at the acos clamp
-    assert st2["xi_sat"].item() > 0.5, st2["xi_sat"]
-    print(f"9 ok  lambda_axis is exactly additive; frac_shallow 0.0 when images are "
-          f"deeper, 1.0 when they are not (xi_sat {st2['xi_sat'].item():.2f} there)")
+def test_hinges_and_norm_match_formula():
+    """Check values and gradients against direct positive/negative pair formulas."""
+    for curv in (0.5, 1.0, 2.0):
+        for mode in ("floor", "bilateral"):
+            # Overlapping anchor directions exercise the wrong-class hinge too.
+            anchors = _ray(torch.tensor([[1., .01], [1., -.01]]), 3).requires_grad_()
+            images = _ray(torch.tensor([[1., .02], [1., .04], [1., .3]]), 9).requires_grad_()
+            labels = torch.tensor([0, 1, 0])
+            criterion = EntailmentConeLoss(
+                curv=curv, min_radius=0.5, margin=0.3, lambda_neg=0.7,
+                lambda_norm=0.4, target_norm=4, norm_mode=mode)
+            loss, stats = criterion(images, anchors, labels)
+            psi = half_aperture(anchors, curv=curv, min_radius=0.5)
+            angles = torch.stack([
+                oxy_angle(a.expand_as(images), images, curv=curv) for a in anchors
+            ], dim=1)
+            positive = (angles[torch.arange(3), labels] - psi[labels]).clamp_min(0).mean()
+            mask = torch.arange(2).unsqueeze(0) != labels.unsqueeze(1)
+            negative = (psi.unsqueeze(0) + 0.3 - angles).clamp_min(0)[mask].mean()
+            deviation = 4 - anchors.norm(dim=-1)
+            norm = (deviation.clamp_min(0) if mode == "floor" else deviation).square().mean()
+            expected = positive + 0.7 * negative + 0.4 * norm
+            assert positive > 0 and negative > 0
+            assert torch.allclose(loss, expected)
+            actual_grad = torch.autograd.grad(loss, (images, anchors), retain_graph=True)
+            expected_grad = torch.autograd.grad(expected, (images, anchors))
+            for actual, reference in zip(actual_grad, expected_grad):
+                assert torch.isfinite(actual).all()
+                assert torch.allclose(actual, reference, atol=1e-6)
+            assert all(not v.requires_grad for v in stats.values())
+            assert not list(criterion.parameters())
+            assert torch.equal(predict_class(images, anchors, curv), angles.argmin(1))
+    print("hinge/norm values, gradients, diagnostics and inference: OK")
 
 
-def test_separation_floor():
-    # Two anchors 0.5 degrees apart at norm 6 -> psi ~ 1.9 deg each, so they overlap.
-    base = torch.zeros(2, D)
-    base[0, 0] = 1.0
-    base[1, 0] = math.cos(math.radians(0.5))
-    base[1, 1] = math.sin(math.radians(0.5))
-    tight = _ray(base, 6.0)
-    psi = half_aperture(tight, min_radius=0.1)
-
-    loss_fn = EntailmentConeLoss(min_radius=0.1, lambda_sep=1.0)
-    overlap, st = loss_fn._sep_term(tight, psi)
-    assert overlap.item() > 0, overlap
-    assert st["sep_overlap"].item() == 1.0
-
-    wide = torch.zeros(2, D)
-    wide[0, 0] = 1.0
-    wide[1, 1] = 1.0                       # 90 degrees apart
-    wide = _ray(wide, 6.0)
-    ok, st = loss_fn._sep_term(wide, half_aperture(wide, min_radius=0.1))
-    assert ok.item() == 0.0, ok
-    assert st["sep_overlap"].item() == 0.0
-    print(f"2 ok  floor: overlapping {overlap.item():.4f}, disjoint 0.0")
-
-
-def test_separation_ceiling():
-    anti = torch.zeros(2, D)
-    anti[0, 0] = 1.0
-    anti[1, 0] = -1.0                      # 180 degrees: exceeds the configured angular ceiling
-    anti = _ray(anti, 6.0)
-    loss_fn = EntailmentConeLoss(min_radius=0.1, lambda_sep=1.0, theta_max=150.0)
-    fired, _ = loss_fn._sep_term(anti, half_aperture(anti, min_radius=0.1))
-    assert fired.item() > 0, fired
-
-    inert = torch.zeros(2, D)
-    inert[0, 0] = 1.0
-    inert[1, 0] = math.cos(math.radians(132.2))   # below the 150-degree ceiling
-    inert[1, 1] = math.sin(math.radians(132.2))
-    inert = _ray(inert, 6.0)
-    quiet, _ = loss_fn._sep_term(inert, half_aperture(inert, min_radius=0.1))
-    assert quiet.item() == 0.0, quiet
-    print(f"3 ok  ceiling: 180 deg {fired.item():.4f}, 132.2 deg 0.0")
+def test_positive_hinge_stops_inside():
+    anchors = _ray(torch.eye(K, D), 3)
+    images = _ray(torch.eye(K, D) + 0.02 * torch.eye(K, D).roll(K, dims=1), 9)
+    images.requires_grad_()
+    labels = torch.arange(K)
+    loss, stats = EntailmentConeLoss(min_radius=0.5, lambda_neg=0)(images, anchors, labels)
+    assert stats["inside_img"] == 1
+    assert loss == 0
+    loss.backward()
+    assert torch.count_nonzero(images.grad) == 0
+    print("positive hinge is flat inside the cone: OK")
 
 
 def test_norm_mode():
@@ -122,65 +75,6 @@ def test_norm_mode():
     assert st_floor["loss_norm"].item() == 0.0, st_floor["loss_norm"]
     assert abs(st_both["loss_norm"].item() - (8.18 - 4.0) ** 2) < 1e-3, st_both["loss_norm"]
     print(f"4 ok  norm: floor 0.0 at depth 8.18, bilateral {st_both['loss_norm'].item():.3f}")
-
-
-def test_family_containment():
-    x_img = exp_map0(torch.randn(B, D, generator=torch.Generator().manual_seed(2)))
-    labels = torch.arange(B) % K
-    family_of = torch.zeros(K, dtype=torch.long)          # every class in family 0
-
-    dirs = torch.zeros(K, D)
-    dirs[:, 0] = 1.0                                      # all along the family's ray
-    inside = _ray(dirs, 6.0)
-    fam = _ray(torch.eye(1, D), 2.0)                      # shallow -> wide cone
-
-    loss_fn = EntailmentConeLoss(min_radius=0.1, lambda_family=1.0, family_of=family_of)
-    _, st = loss_fn(x_img, inside, labels, x_fam=fam)
-    assert st["inside_family"].item() == 1.0, st["inside_family"]
-    assert st["loss_fam_anc"].item() == 0.0, st["loss_fam_anc"]
-
-    away = torch.zeros(K, D)
-    away[:, 1] = 1.0                                      # 90 degrees off the family
-    _, st = loss_fn(x_img, _ray(away, 6.0), labels, x_fam=fam)
-    assert st["inside_family"].item() == 0.0, st["inside_family"]
-    assert st["loss_fam_anc"].item() > 0, st["loss_fam_anc"]
-    print(f"5 ok  family: aligned inside, orthogonal {st['loss_fam_anc'].item():.3f}")
-
-
-def test_axis_has_gradient_inside_the_cone():
-    """Squared-angle positives retain a gradient strictly inside the cone."""
-    labels = torch.arange(K)
-    dirs = torch.eye(K, D)
-    x_anc = _ray(dirs, 3.0)
-    psi = half_aperture(x_anc, min_radius=0.5)
-
-    # Deeper than its anchor and inside the cone, but TILTED off the axis. Exactly ON
-    # the axis is the wrong probe: xi = 0 is the minimum of xi^2, so zero gradient
-    # there is correct (and oxy_angle's acos clamp saturates anyway). The case that
-    # decides the change is strictly between the axis and the cone boundary.
-    # D >= 2K, so e_{K+i} is a direction orthogonal to every anchor.
-    for tilt in (0.5, 0.2, 0.1, 0.05, 0.02):
-        off = torch.zeros(K, D)
-        off[torch.arange(K), torch.arange(K) + K] = tilt
-        x_img = _ray(dirs + off, 9.0)
-        xi = oxy_angle(x_anc, x_img)
-        if bool(((xi > 1e-4) & (xi < psi)).all()):
-            break
-    else:
-        raise AssertionError(f"no tilt lands strictly inside: xi={xi}, psi={psi}")
-
-    def grad(pos_mode):
-        p = x_img.clone().requires_grad_(True)
-        loss_fn = EntailmentConeLoss(min_radius=0.5, lambda_neg=0.0, pos_mode=pos_mode)
-        loss, _ = loss_fn(p, x_anc, labels)
-        loss.backward()
-        return p.grad.abs().max().item()
-
-    g_hinge, g_axis = grad("hinge"), grad("axis")
-    assert g_hinge == 0.0, g_hinge
-    assert g_axis > 0.0, g_axis
-    print(f"6 ok  inside the cone (xi {xi.min():.3f}-{xi.max():.3f} < psi {psi.min():.3f}): "
-          f"hinge grad {g_hinge:.1e}, axis grad {g_axis:.3e}")
 
 
 def test_negative_subsample():
@@ -218,13 +112,9 @@ def test_anchor_clamp_and_poincare_round_trip():
 
 
 if __name__ == "__main__":
-    test_defaults_are_inert()
-    test_separation_floor()
-    test_separation_ceiling()
+    test_hinges_and_norm_match_formula()
+    test_positive_hinge_stops_inside()
     test_norm_mode()
-    test_family_containment()
-    test_axis_has_gradient_inside_the_cone()
     test_negative_subsample()
     test_anchor_clamp_and_poincare_round_trip()
-    test_axis_regulariser_is_additive_and_shallow_aware()
-    print("\nall Phase B invariants hold")
+    print("All hinge-loss checks passed.")

@@ -1,20 +1,18 @@
 """Check separation diagnostics with the separation loss weight disabled.
 
 Compare random 128-D anchor directions with nearly coincident directions.
-The current script imports AttributionConeLoss, which is not exported by
-losses.attribution_loss. It cannot run until updated to EntailmentConeLoss
-or consolidated with the cone-loss regression checks.
+Measure mean pair angles and overlap without adding a separation loss.
 
 Run: python -m tests.test_sep_stats
 """
 import torch
 import torch.nn.functional as F
 
-from losses.attribution_loss import AttributionConeLoss
+from losses.attribution_loss import EntailmentConeLoss
 
 torch.manual_seed(0)
 K, D, B = 22, 128, 64
-loss = AttributionConeLoss(min_radius=0.5)
+loss = EntailmentConeLoss(min_radius=0.5)
 labels = torch.arange(B) % K
 x_img = F.normalize(torch.randn(B, D), dim=-1) * 10.0
 

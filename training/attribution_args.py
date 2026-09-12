@@ -38,17 +38,10 @@ def parse_args(argv=None):
     p.add_argument("--min_radius",     type=float, default=0.1)
     p.add_argument("--margin",         type=float, default=0.1)
     p.add_argument("--lambda_neg",     type=float, default=1.0)
-    p.add_argument("--lambda_cap_in_class", type=float, default=0.0,
-                   help="Cone loss: weight of caption-in-class positive and negative terms.")
-    p.add_argument("--lambda_img_in_cap",   type=float, default=0.0,
-                   help="Cone loss: weight of image-in-caption terms, using other batch "
-                        "captions as negatives.")
     p.add_argument("--no_captions", action="store_true", default=False,
-                   help="Set both caption-loss weights to zero; --require_caption can still "
-                        "restrict training rows.")
+                   help="Compatibility flag: training is image-only; this has no effect.")
     p.add_argument("--require_caption", action="store_true", default=False,
-                   help="Restrict training to captioned images even when caption loss weights "
-                        "are zero.")
+                   help="Restrict training rows to images with captions; captions are not encoded.")
     p.add_argument("--anchor_init",
                    choices=["text", "image_centroid", "text_free", "random", "simplex"],
                    default="text",
@@ -80,21 +73,11 @@ def parse_args(argv=None):
                    help="Cone loss: weight of the spatial anchor-norm regularizer (0 disables).")
     p.add_argument("--target_norm",    type=float, default=0.0,
                    help="Cone loss: target Lorentz spatial-coordinate norm, not tangent-space norm.")
-    p.add_argument("--lambda_axis",    type=float, default=0.0,
-                   help="Cone loss: weight of hyperbolic distance from each image to its "
-                        "correct anchor's outward axis ray.")
-    p.add_argument("--lambda_hinge",   type=float, default=1.0,
-                   help="Cone loss: scale of the image-in-class term, including its weighted "
-                        "negatives.")
     p.add_argument("--norm_mode", choices=["floor", "bilateral"], default="floor",
                    help="Cone loss: penalize norms below the target (floor) or deviations on "
                         "both sides (bilateral).")
-    p.add_argument("--target_norm_family", type=float, default=0.0,
-                   help="Family spatial-coordinate norm target, used by bilateral norm "
-                        "regularization.")
     p.add_argument("--lambda_sep",     type=float, default=0.0,
-                   help="Weight of pairwise angular separation penalties; cone loss also "
-                        "applies --theta_max.")
+                   help="Axis loss: weight of the pairwise angular separation penalty.")
     p.add_argument("--separation_margin", type=float, default=0.0,
                    help="Angular gap in degrees added to pairwise aperture sums for separation "
                         "and calibration checks.")
@@ -107,19 +90,9 @@ def parse_args(argv=None):
     p.add_argument("--lambda_center", type=float, default=1.0,
                    help="Axis loss: weight of the mean pull toward the correct axis, with "
                         "aperture detached.")
-    p.add_argument("--theta_max",      type=float, default=150.0,
-                   help="Cone loss: upper bound in degrees for the anchor-pair separation penalty.")
-    p.add_argument("--hierarchy", choices=["none", "hifi", "emergent"], default="none",
-                   help="Family mapping for cone loss: none, HiFi-Net level 3, or --hierarchy_json.")
-    p.add_argument("--hierarchy_json", default="data/tree_emergent.json")
-    p.add_argument("--lambda_family",  type=float, default=0.0,
-                   help="Cone loss: weight of model-anchor containment in family cones plus "
-                        "image-to-family cross-entropy.")
     p.add_argument("--loss", choices=["cone", "axis"], default="cone",
                    help="cone: exterior-angle objective; axis: normalized chord score "
                         "q=(1-cos(theta))/(1-cos(psi)), with q=1 at the wall.")
-    p.add_argument("--pos_mode", choices=["hinge", "axis"], default="hinge",
-                   help="Cone loss positive term: max(0,xi-psi) for hinge or xi squared for axis.")
     p.add_argument("--psi_range", type=float, nargs=2, default=[5.0, 60.0],
                    metavar=("MIN_DEG", "MAX_DEG"),
                    help="Axis loss: half-aperture bounds in degrees; learned apertures start at "
@@ -141,11 +114,9 @@ def parse_args(argv=None):
                    help="Random negatives retained per sample (0 uses all); full pairwise "
                         "scores are still computed.")
     p.add_argument("--lambda_ce",      type=float, default=0.0,
-                   help="Weight of cross-entropy with logits -score/tau (xi for cone, q for "
-                        "axis); tau is learned.")
+                   help="Axis loss: cross-entropy weight for logits -q/tau; tau is learned.")
     p.add_argument("--ce_tau_init",    type=float, default=1.0,
-                   help="Initial positive temperature for ranking and family cross-entropy; "
-                        "parameterized with softplus.")
+                   help="Axis loss: initial positive CE temperature, parameterized with softplus.")
     p.add_argument("--batch_size",     type=int,   default=256)
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
@@ -191,10 +162,12 @@ def parse_args(argv=None):
 
 
 def validate_args(args):
-    """Validate mode combinations and apply --no_captions."""
+    """Validate mode combinations before loading data or model weights."""
     if min(args.fixed_image_radius, args.radial_margin, args.separation_margin,
            args.inside_margin) < 0:
         raise ValueError("radius and angular margins must be non-negative")
+    if args.loss == "cone" and (args.lambda_ce != 0 or args.lambda_sep != 0):
+        raise ValueError("--lambda_ce and --lambda_sep are only supported by --loss axis")
     if args.fixed_image_radius > 0 and args.init_depth > 0:
         raise ValueError("Use --fixed_image_radius or --init_depth, not both")
     if args.anchors_only and args.anchor_init == "text":
@@ -242,6 +215,3 @@ def validate_args(args):
                 f"--fixed_image_radius {args.fixed_image_radius:g} must be at least "
                 f"{required:.3f}: deepest anchor {max_anchor_radius:.3f} + "
                 f"radial margin {args.radial_margin:g}")
-    if args.no_captions:
-        args.lambda_cap_in_class = 0.0
-        args.lambda_img_in_cap = 0.0
