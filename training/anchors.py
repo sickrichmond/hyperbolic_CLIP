@@ -14,7 +14,6 @@ from checkpoint_io import atomic_torch_save
 from data.iab_clip_dataset import IABCLIPDataset
 from geometry.lorentz import exp_map0, half_aperture
 from losses.attribution_loss import _pairwise_xi
-from losses.axis_cone_loss import axis_cone_q, depth_from_sin_psi, regular_simplex
 
 
 def build_anchors(generators: list[str],
@@ -110,7 +109,7 @@ def make_balanced_sampler(dataset: IABCLIPDataset) -> WeightedRandomSampler:
 
 
 class AnchorState:
-    """Class anchor tensors and axis apertures used by training.
+    """Class anchor tensors used by training.
 
     Text anchors are encoded by the model on demand. Free anchors store tangent
     parameters; text_free adds a learned scaled offset to a fixed reference.
@@ -132,9 +131,6 @@ class AnchorState:
                     g = torch.Generator().manual_seed(args.seed)
                     t0 = torch.randn(len(class_names), args.hyperbolic_dim,
                                      generator=g).to(device)
-                elif args.anchor_init == "simplex":
-                    t0 = regular_simplex(len(class_names), args.hyperbolic_dim,
-                                         device=device, dtype=torch.float32)
                 elif args.anchor_init == "image_centroid":
                     t0 = model.projection(
                         class_centroids(model, train_ds, class_names, args, device).to(device))
@@ -144,7 +140,7 @@ class AnchorState:
                     t0 = F.normalize(t0, dim=-1) * args.anchor_init_norm
                 t0 = t0.detach().float()
 
-            if args.anchor_init in ("image_centroid", "random", "simplex"):
+            if args.anchor_init in ("image_centroid", "random"):
                 self.anchor_tangent = nn.Parameter(t0, requires_grad=not args.freeze_anchors)
             else:
                 self.anchor_t0 = t0                                        # fixed reference
@@ -159,57 +155,17 @@ class AnchorState:
                 cos = (d @ d.T).clamp(-1, 1)
                 iu = torch.triu_indices(len(class_names), len(class_names), offset=1)
                 ang = torch.arccos(cos[iu[0], iu[1]])     # off-diagonal pairs only
-            psi_lo_d, psi_hi_d = args.psi_range
-            if args.loss == "axis" and args.fixed_psi:
-                psi_txt = f"ψ={args.fixed_psi:.1f}° (fixed during classifier training)"
-            elif args.loss == "axis":
-                psi_txt = f"ψ={0.5 * (psi_lo_d + psi_hi_d):.1f}° (free, mid --psi_range)"
-            else:
-                psi_txt = f"ψ={math.degrees(psi0.mean()):.1f}° (=asin(2K/‖a‖))"
+            psi_txt = f"ψ={math.degrees(psi0.mean()):.1f}° (=asin(2K/‖a‖))"
             print(f"Anchor init ({args.anchor_init}): ‖t‖={t0.norm(dim=-1).mean():.2f}  "
                   f"{psi_txt}  min∠={math.degrees(ang.min()):.1f}°  "
                   f"mean∠={math.degrees(ang.mean()):.1f}°  (K={len(class_names)})")
             if args.freeze_anchors:
-                print("Anchor directions: frozen")
-            if args.freeze_anchors and args.fixed_psi:
-                required_sep = 2 * args.fixed_psi + args.separation_margin
-                if math.degrees(ang.min()) + 1e-4 < required_sep:
-                    raise ValueError(f"Fixed cones overlap at init: min axis angle "
-                                     f"{math.degrees(ang.min()):.2f}° < required "
-                                     f"{required_sep:.2f}°")
-            if args.loss != "axis" and ang.min() < 2 * psi0.mean():
+                print("Anchor parameters: frozen")
+            if ang.min() < 2 * psi0.mean():
                 print(f"  ⚠️  closest anchor pair is inside "
                       f"2ψ={math.degrees(2 * psi0.mean()):.1f}° — those cones overlap at init")
             if self.anchor_drift is not None:
                 print(f"  drift scale s={F.softplus(self.anchor_drift).item():.3f} (learned)")
-
-        self.anchor_psi_raw = None
-        self.fixed_sin_psi = None
-        self.psi_lo, self.psi_hi = (math.radians(v) for v in args.psi_range)
-        if args.loss == "axis":
-            if args.fixed_psi:
-                self.fixed_sin_psi = torch.full(
-                    (len(class_names),), math.sin(math.radians(args.fixed_psi)), device=device)
-            else:
-                self.anchor_psi_raw = nn.Parameter(torch.zeros(len(class_names), device=device))
-            if self.anchor_tangent is not None:
-                with torch.no_grad():
-                    rc = args.curv ** 0.5
-                    sp0 = (self.fixed_sin_psi if self.fixed_sin_psi is not None else
-                           torch.sin(self.psi_lo + (self.psi_hi - self.psi_lo)
-                                     * torch.sigmoid(self.anchor_psi_raw)))
-                    want = torch.asinh(rc * depth_from_sin_psi(sp0, args.min_radius)) / rc
-                    self.anchor_tangent.mul_(
-                        want.unsqueeze(1)
-                        / self.anchor_tangent.norm(dim=-1, keepdim=True).clamp_min(1e-8))
-
-    def sin_psi(self):
-        """(K,) sine of each half-aperture, or None outside the axis loss."""
-        if self.fixed_sin_psi is not None:
-            return self.fixed_sin_psi
-        if self.anchor_psi_raw is None:
-            return None
-        return torch.sin(self.psi_lo + (self.psi_hi - self.psi_lo) * torch.sigmoid(self.anchor_psi_raw))
 
     def tangent(self):
         """Current tangent anchors (K, D_hyp), or None in plain 'text' mode."""
@@ -219,15 +175,8 @@ class AnchorState:
 
     @torch.no_grad()
     def project_(self, args):
-        """Update free anchor depths from apertures or clamp cone tangent norms."""
-        if args.loss == "axis" and self.anchor_tangent is not None:
-            with torch.no_grad():
-                rc = args.curv ** 0.5
-                want = torch.asinh(
-                    rc * depth_from_sin_psi(self.sin_psi(), args.min_radius)) / rc
-                n = self.anchor_tangent.norm(dim=-1, keepdim=True).clamp_min(1e-8)
-                self.anchor_tangent.mul_(want.unsqueeze(1) / n)
-        elif args.anchor_norm_range and self.anchor_tangent is not None:
+        """Clamp free anchor tangent norms to the configured range."""
+        if args.anchor_norm_range and self.anchor_tangent is not None:
             lo, hi = args.anchor_norm_range
             with torch.no_grad():
                 n = self.anchor_tangent.norm(dim=-1, keepdim=True)
@@ -236,13 +185,8 @@ class AnchorState:
     def parameters(self):
         """Trainable geometric tensors, in optimizer/checkpoint-compatible order."""
         return [p for p in (self.anchor_tangent, self.anchor_delta,
-                            self.anchor_drift, self.anchor_psi_raw)
+                            self.anchor_drift)
                 if p is not None and p.requires_grad]
-
-    def snapshot_psi(self):
-        """Return axis half-apertures in radians, or None for cone loss."""
-        value = self.sin_psi()
-        return torch.arcsin(value).detach().float().cpu().numpy() if value is not None else None
 
 
 def calibrate_image_depth(model, train_loader, anchors, args, device):
@@ -261,13 +205,9 @@ def calibrate_image_depth(model, train_loader, anchors, args, device):
         t_now = anchors.tangent()
         x_anc0 = (exp_map0(t_now.float(), curv=args.curv) if t_now is not None
                   else model.encode_text(anchors.anchor_ids, anchors.anchor_mask)[0])
-        if args.loss == "axis":
-            psi0 = torch.arcsin(anchors.sin_psi())
-            q0 = axis_cone_q(x_probe, x_anc0, anchors.sin_psi())
-        else:
-            psi0 = half_aperture(x_anc0, curv=args.curv, min_radius=args.min_radius)
-            xi0 = _pairwise_xi(x_anc0, x_probe, curv=args.curv)
-            pinned = (xi0 > math.pi - 5e-3).float().mean().item()
+        psi0 = half_aperture(x_anc0, curv=args.curv, min_radius=args.min_radius)
+        xi0 = _pairwise_xi(x_anc0, x_probe, curv=args.curv)
+        pinned = (xi0 > math.pi - 5e-3).float().mean().item()
     if args.anchors_only:
         model.requires_grad_(False)
         model.eval()
@@ -280,26 +220,20 @@ def calibrate_image_depth(model, train_loader, anchors, args, device):
     x_anc_max = x_anc0.norm(dim=-1).max().item()
     print(f"Image depth at init: ‖t_img‖={t_img:.3f} ‖x_img‖={x_img:.3f}  vs  "
           f"‖x_anc‖={x_anc_n:.3f} (max {x_anc_max:.3f})")
-    if args.loss == "axis":
-        print(f"  q(image, cone) median {q0.median().item():.3f}  "
-              f"min {q0.min().item():.3f}  "
-              f"ψ∈[{math.degrees(psi0.min()):.1f},{math.degrees(psi0.max()):.1f}]°  "
-              f"(q=1 is the cone wall)")
-    else:
-        print(f"  ξ(anchor→image) median {xi0.median().item():.3f} rad "
-              f"({math.degrees(xi0.median().item()):.1f}°)  ψ={psi0.median().item():.3f}  "
-              f"{100 * pinned:.0f}% pinned at π   (images must be DEEPER than anchors)")
-        if x_img <= x_anc_max:
-            want = 1.5 * math.asinh(x_anc_max)
-            raise ValueError(
-                f"containment INVERTED: median image depth ‖x_img‖={x_img:.4f} is not "
-                f"above the DEEPEST anchor ‖x_anc‖={x_anc_max:.4f}. An entailment cone "
-                f"holds the points farther from the origin than its apex, so every ξ "
-                f"sits at π and oxy_angle's acos clamp makes the gradient exactly zero "
-                f"— no learning rate moves it.\n"
-                f"    Fix: --init_depth {want:.2f}  (1.5x the deepest anchor's tangent "
-                f"norm, giving ‖x_img‖≈{math.sinh(want):.1f})."
-            )
-        if pinned > 0.05:
-            print(f"  ⚠️  {100 * pinned:.0f}% of the ξ matrix is pinned at π even though "
-                  f"the depth ordering is right — check the anchor spread.")
+    print(f"  ξ(anchor→image) median {xi0.median().item():.3f} rad "
+          f"({math.degrees(xi0.median().item()):.1f}°)  ψ={psi0.median().item():.3f}  "
+          f"{100 * pinned:.0f}% pinned at π   (images must be DEEPER than anchors)")
+    if x_img <= x_anc_max:
+        want = 1.5 * math.asinh(x_anc_max)
+        raise ValueError(
+            f"containment INVERTED: median image depth ‖x_img‖={x_img:.4f} is not "
+            f"above the DEEPEST anchor ‖x_anc‖={x_anc_max:.4f}. An entailment cone "
+            f"holds the points farther from the origin than its apex, so every ξ "
+            f"sits at π and oxy_angle's acos clamp makes the gradient exactly zero "
+            f"— no learning rate moves it.\n"
+            f"    Fix: --init_depth {want:.2f}  (1.5x the deepest anchor's tangent "
+            f"norm, giving ‖x_img‖≈{math.sinh(want):.1f})."
+        )
+    if pinned > 0.05:
+        print(f"  ⚠️  {100 * pinned:.0f}% of the ξ matrix is pinned at π even though "
+              f"the depth ordering is right — check the anchor spread.")

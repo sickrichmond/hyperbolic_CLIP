@@ -1,8 +1,7 @@
-"""Train a hyperbolic image-attribution classifier with cone or axis losses.
+"""Train a hyperbolic image-attribution classifier with the entailment-cone hinge loss.
 
 Supports text and free class anchors, image-only training, validation-based
 checkpoint selection, and Poincare diagnostics."""
-import math
 from pathlib import Path
 
 import torch
@@ -17,7 +16,6 @@ from data.iab_clip_dataset import IABCLIPDataset
 from geometry.lorentz import exp_map0
 from models.attribution_clip import AttributionCLIP
 from losses.attribution_loss import EntailmentConeLoss
-from losses.axis_cone_loss import AxisConeLoss, axis_chord2, axis_cone_q, cone_inner_wall_chord2
 from training.attribution_args import parse_args, validate_args
 from training.anchors import AnchorState, build_anchors, make_balanced_sampler, calibrate_image_depth
 from training.attribution_diagnostics import (
@@ -33,13 +31,9 @@ def main():
     print(f"Seed: {args.seed}")
 
     class_names, anchor_texts = build_anchors(args.generators, args.anchor_prompts)
-    if args.anchor_init == "simplex" and args.hyperbolic_dim < len(class_names) - 1:
-        raise ValueError(f"{len(class_names)} simplex anchors need --hyperbolic_dim >= "
-                         f"{len(class_names) - 1}")
     name_to_idx = {n: i for i, n in enumerate(class_names)}
-    if args.anchor_init in ("image_centroid", "simplex"):
-        kind = "image centroids" if args.anchor_init == "image_centroid" else "regular simplex"
-        print(f"Class anchors: {kind} (text-free), {len(class_names)} classes")
+    if args.anchor_init == "image_centroid":
+        print(f"Class anchors: image centroids (text-free), {len(class_names)} classes")
         for i, c in enumerate(class_names):
             print(f"  [{i}] {c}")
     else:
@@ -133,35 +127,15 @@ def main():
     core = model.module if isinstance(model, nn.DataParallel) else model
     core.print_trainable_summary()
 
-    if args.loss == "axis":
-        cone_loss = AxisConeLoss(
-            min_radius=args.min_radius, lambda_neg=args.lambda_neg,
-            neg_samples=args.neg_samples, lambda_aperture=args.lambda_aperture,
-            nu=args.nu, lambda_sep=args.lambda_sep,
-            separation_margin=args.separation_margin,
-            inside_margin=args.inside_margin,
-            lambda_ce=args.lambda_ce, ce_tau_init=args.ce_tau_init,
-            lambda_cover=args.lambda_cover, lambda_center=args.lambda_center,
-        ).to(device)
-        val_predict = lambda xi_, xa_: axis_cone_q(
-            xi_, xa_, anchors.sin_psi().detach()).argmin(1)
-        def val_inside(xi_, xa_, labels_):
-            chord = axis_chord2(xi_, xa_).gather(1, labels_.unsqueeze(1)).squeeze(1)
-            wall = cone_inner_wall_chord2(
-                anchors.sin_psi().detach(), math.radians(args.inside_margin))
-            return chord <= wall[labels_]
-    else:
-        val_predict = None
-        val_inside = None
-        cone_loss = EntailmentConeLoss(
-            curv=args.curv, min_radius=args.min_radius,
-            margin=args.margin, lambda_neg=args.lambda_neg,
-            lambda_norm=args.lambda_norm, target_norm=args.target_norm,
-            norm_mode=args.norm_mode, neg_samples=args.neg_samples,
-        ).to(device)
+    cone_loss = EntailmentConeLoss(
+        curv=args.curv, min_radius=args.min_radius,
+        margin=args.margin, lambda_neg=args.lambda_neg,
+        lambda_norm=args.lambda_norm, target_norm=args.target_norm,
+        norm_mode=args.norm_mode, neg_samples=args.neg_samples,
+    ).to(device)
 
-    # Include learned loss temperatures; geometric tensors use their own LR and no decay.
-    backbone = core.trainable_parameters() + list(cone_loss.parameters())
+    # Geometric tensors use their own LR and no weight decay.
+    backbone = core.trainable_parameters()
     geometric = anchors.parameters()
     anchor_lr = args.lr if args.anchor_lr is None else args.anchor_lr
     groups = []
@@ -203,11 +177,6 @@ def main():
         )
         print(f"LR schedule: cosine {args.lr} → {args.lr_min}")
     scaler = GradScaler("cuda")
-    if args.lambda_ce > 0:
-        print(f"CE ranking term: λ_ce={args.lambda_ce}  τ_init={args.ce_tau_init} (learned)")
-    if args.loss == "axis" and args.lambda_cover > 0:
-        print(f"Coverage term: λ_cover={args.lambda_cover}  "
-              f"λ_center={args.lambda_center}  effective wall=ψ-{args.inside_margin:g}°")
     print("Image-only attribution training.")
 
     plot_epoch_snapshot = None
@@ -234,26 +203,16 @@ def main():
               f"{Path(args.diag_plot_dir) / 'stats.csv'}")
 
     best_balanced = -1.0
-    best_min_coverage = -1.0
-    best_meets_coverage = False
     out_path = Path(args.output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    axis = args.loss == "axis"
-    if axis:
-        base_keys = ["loss_pos", "loss_cover", "loss_neg", "loss_ap", "q_pos", "inside_img",
-                     "viol_mass", "cone_acc", "loss_sep", "sep_overlap",
-                     "psi_min_deg", "psi_deg", "psi_max_deg",
-                     "sep_min_deg", "sep_mean_deg", "anc_norm"]
-    else:
-        base_keys = ["loss_img_in_cls", "loss_pos", "loss_neg", "xi_sat",
-                     "psi_min_deg", "psi_max_deg",
-                     "sep_min_deg", "sep_mean_deg", "sep_overlap",
-                     "loss_norm",
-                     "cone_acc", "inside_img", "mean_psi_anc", "mean_xi_img_anc",
-                     "mean_anc_norm"]
-    ce_keys = ["loss_ce", "ce_tau"] if axis and args.lambda_ce > 0 else []
-    stat_csv_keys = base_keys + ce_keys
+    base_keys = ["loss_img_in_cls", "loss_pos", "loss_neg", "xi_sat",
+                 "psi_min_deg", "psi_max_deg",
+                 "sep_min_deg", "sep_mean_deg", "sep_overlap",
+                 "loss_norm",
+                 "cone_acc", "inside_img", "mean_psi_anc", "mean_xi_img_anc",
+                 "mean_anc_norm"]
+    stat_csv_keys = base_keys
 
     if snap_every and plot_epoch_snapshot is not None:
         model.eval()
@@ -272,7 +231,7 @@ def main():
                 torch.cat(e0).numpy(), l0, xa0, class_names,
                 Path(args.diag_plot_dir) / "step_0000000.png",
                 curv=args.curv, min_radius=args.min_radius,
-                psi=anchors.snapshot_psi(), state=None, seed=args.seed, title="init (step 0)")
+                state=None, seed=args.seed, title="init (step 0)")
         if not args.anchors_only:
             model.train()
 
@@ -299,8 +258,7 @@ def main():
                 # Hyperbolic lifting requires float32 even during mixed-precision training.
                 with autocast("cuda", enabled=False):
                     x_anc = exp_map0(t_anc.float(), curv=args.curv)
-            loss, stats = (cone_loss(x_img, x_anc, labels, anchors.sin_psi()) if axis
-                           else cone_loss(x_img, x_anc, labels))
+            loss, stats = cone_loss(x_img, x_anc, labels)
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -336,29 +294,20 @@ def main():
                         x_anc.detach(), class_names,
                         Path(args.diag_plot_dir) / f"step_{global_step:07d}.png",
                         curv=args.curv, min_radius=args.min_radius,
-                        psi=anchors.snapshot_psi(), state=diag_state, seed=args.seed,
+                        state=diag_state, seed=args.seed,
                         title=f"epoch {epoch} · step {global_step}")
 
             if step % 25 == 0 or step == steps_per_epoch:
-                if axis:
-                    post = {
-                        "loss": f"{sums['loss']/step:.3f}",
-                        "cover": f"{sums['loss_cover']/step:.3f}",
-                        "q":    f"{sums['q_pos']/step:.3f}",
-                        "acc":  f"{sums['cone_acc']/step:.3f}",
-                        "ψ":    f"{sums['psi_deg']/step:.1f}°",
-                    }
-                else:
-                    post = {
-                        "loss": f"{sums['loss']/step:.3f}",
-                        "ic":   f"{sums['loss_img_in_cls']/step:.3f}",
-                        "acc":  f"{sums['cone_acc']/step:.3f}",
-                        "ψa":   f"{sums['mean_psi_anc']/step:.3f}",
-                    }
+                post = {
+                    "loss": f"{sums['loss']/step:.3f}",
+                    "ic":   f"{sums['loss_img_in_cls']/step:.3f}",
+                    "acc":  f"{sums['cone_acc']/step:.3f}",
+                    "ψa":   f"{sums['mean_psi_anc']/step:.3f}",
+                }
                 bar.set_postfix(**post)
 
         avg = {k: v / steps_per_epoch for k, v in sums.items()}
-        report_epoch(avg, args, epoch, scheduler.get_last_lr()[0], anchors)
+        report_epoch(avg, epoch, scheduler.get_last_lr()[0], anchors)
 
         # Re-encode text anchors with dropout disabled for validation.
         core.eval()
@@ -369,8 +318,7 @@ def main():
             else:
                 x_anc_val = exp_map0(t_anc_val.float(), curv=args.curv)
         val = run_validation(core, val_loader, x_anc_val, class_names, device, args.curv,
-                             collect=4000 if plot_epoch_snapshot else 0,
-                             predict=val_predict, inside=val_inside)
+                             collect=4000 if plot_epoch_snapshot else 0)
         report_validation(val)
 
         if plot_epoch_snapshot is not None:
@@ -378,28 +326,11 @@ def main():
                 val["emb"], val["emb_labels"], x_anc_val, class_names,
                 Path(args.diag_plot_dir) / f"epoch_{epoch:02d}.png",
                 curv=args.curv, min_radius=args.min_radius,
-                psi=anchors.snapshot_psi(), state=diag_state, seed=args.seed,
+                state=diag_state, seed=args.seed,
                 title=f"epoch {epoch}")
 
-        # Prefer accuracy among coverage-feasible checkpoints; otherwise improve worst coverage.
-        coverage_selection = axis and args.lambda_cover > 0
-        meets_coverage = (coverage_selection
-                          and val["min_coverage"] >= 1.0 - args.nu - 1e-12)
-        if coverage_selection:
-            save_best = ((meets_coverage and not best_meets_coverage)
-                         or (meets_coverage and best_meets_coverage
-                             and val["balanced_acc"] > best_balanced)
-                         or (not meets_coverage and not best_meets_coverage
-                             and (val["min_coverage"] > best_min_coverage + 1e-12
-                                  or (abs(val["min_coverage"] - best_min_coverage) <= 1e-12
-                                      and val["balanced_acc"] > best_balanced))))
-        else:
-            save_best = val["balanced_acc"] > best_balanced
-        if save_best:
+        if val["balanced_acc"] > best_balanced:
             best_balanced = val["balanced_acc"]
-            if coverage_selection:
-                best_min_coverage = val["min_coverage"]
-                best_meets_coverage = meets_coverage
             atomic_torch_save(
                 {
                     "lora_state":      core.clip.state_dict(),
@@ -425,20 +356,9 @@ def main():
                                         if t_anc_val is not None else None),
                     "anchor_drift":    (F.softplus(anchors.anchor_drift).item()
                                         if anchors.anchor_drift is not None else None),
-                    "lambda_ce":       args.lambda_ce,
-                    "ce_tau":          (F.softplus(cone_loss.ce_tau_raw).item()
-                                        if args.lambda_ce > 0 else None),
-                    "lambda_hinge":    1.0,
-                    "loss":            args.loss,
-                    "lambda_aperture": args.lambda_aperture,
-                    "lambda_cover":    args.lambda_cover,
-                    "lambda_center":   args.lambda_center,
-                    "nu":              args.nu,
+                    "loss":            "cone",
                     "lr_min":          args.lr_min,
-                    "anchor_sin_psi":  (anchors.sin_psi().detach().cpu() if axis else None),
-                    "fixed_psi":       args.fixed_psi,
                     "freeze_anchors":  args.freeze_anchors,
-                    "psi_range":       args.psi_range,
                     "pos_mode":        "hinge",
                     "neg_samples":     args.neg_samples,
                     "optimizer":       args.optimizer,
@@ -447,9 +367,6 @@ def main():
                     "norm_mode":       args.norm_mode,
                     "target_norm":     args.target_norm,
                     "lambda_norm":     args.lambda_norm,
-                    "lambda_sep":      args.lambda_sep,
-                    "separation_margin": args.separation_margin,
-                    "inside_margin":  args.inside_margin,
                     "theta_max":       150.0,
                     "hierarchy":         "none",
                     "family_names":      [],
@@ -462,31 +379,21 @@ def main():
                     "generators":      args.generators,
                     "semantics":       args.semantics,
                     "val_balanced":    val["balanced_acc"],
-                    "val_balanced_coverage": val.get("balanced_coverage"),
-                    "val_min_coverage": val.get("min_coverage"),
                     "epoch":           epoch,
                 },
                 out_path,
             )
-            reason = (f", worst coverage={100*best_min_coverage:.1f}%"
-                      if coverage_selection else "")
-            print(f"  ↳ saved checkpoint (balanced val={100*best_balanced:.1f}%"
-                  f"{reason}) → {out_path}")
+            print(f"  ↳ saved checkpoint (balanced val={100*best_balanced:.1f}%) → {out_path}")
 
-    if args.plot_all_train or args.calibrate_psi:
-        finalize_training(args, model, core, train_ds, val_loader, class_names,
+    if args.plot_all_train:
+        finalize_training(args, model, core, train_ds, class_names,
                           name_to_idx, device, out_path, anchors, plot_epoch_snapshot)
 
     if stat_csv is not None:
         stat_csv.close()
         print(f"Step-level trace: {Path(args.diag_plot_dir) / 'stats.csv'}")
 
-    if axis and args.lambda_cover > 0:
-        status = "coverage target met" if best_meets_coverage else "best available coverage"
-        print(f"\nSelected checkpoint: balanced val={100*best_balanced:.1f}%  "
-              f"worst-class coverage={100*best_min_coverage:.1f}% ({status})  ({out_path})")
-    else:
-        print(f"\nBest balanced val accuracy: {100*best_balanced:.1f}%  ({out_path})")
+    print(f"\nBest balanced val accuracy: {100*best_balanced:.1f}%  ({out_path})")
 
 if __name__ == "__main__":
     main()

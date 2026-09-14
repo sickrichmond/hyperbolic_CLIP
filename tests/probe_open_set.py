@@ -6,8 +6,8 @@ Compare min(xi), -max(cosine), -spatial_norm and min(xi-psi); larger values
 indicate unknowns. Report AUROC, FPR at an empirical 95% unknown recall,
 zero-margin rejection and predicted-class counts.
 
-The implementation uses oxy_angle and depth-coupled apertures, not the
-axis-loss decision rule. Unknown-class predictions do not establish whether
+The implementation uses oxy_angle and depth-coupled apertures.
+Unknown-class predictions do not establish whether
 two generators are duplicates. --selfcheck checks score orientations.
 
 Usage: python -m tests.probe_open_set --help

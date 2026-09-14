@@ -5,7 +5,7 @@ head fixed. Re-encode default text templates at each alpha, score with
 -oxy_angle, and save accuracy/AUC and degraded/clean accuracy ratios.
 
 This is adapter interpolation, not a zero-shot classifier at alpha=0.
-The diagnostic does not restore custom prompts/free anchors or axis scoring.
+The diagnostic does not restore custom prompts or free anchors.
 It reuses the frequency diagnostic's degradation overrides, which require
 workers to inherit globals through fork. Accuracy ratios alone do not
 identify learned shortcuts.

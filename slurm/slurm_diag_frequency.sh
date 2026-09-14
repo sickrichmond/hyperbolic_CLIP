@@ -3,7 +3,7 @@
 #
 # Runs comparison.training.diag_frequency with a blur-sigma sweep and JPEG
 # quality sweep, plus family-based error routing. The evaluator uses exterior
-# angles with default text anchors, not stored free anchors or axis-loss scoring.
+# angles with default text anchors, not stored free anchors.
 # Worker degradation overrides require the fork start method.
 # CKPT overrides the checkpoint path.
 #

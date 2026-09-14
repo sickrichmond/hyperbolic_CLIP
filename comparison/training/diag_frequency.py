@@ -5,7 +5,7 @@ family, or another family. Reuse a test loader with degradation overrides;
 workers must inherit the configured globals through fork.
 
 This diagnostic encodes default text templates and always uses -oxy_angle.
-It does not restore custom prompt/free-anchor semantics or axis-loss scoring.
+It does not restore custom prompts or free anchors.
 Use comparison.training.test_hypclip for checkpoint-native evaluation.
 The curves describe sensitivity; they do not establish its cause.
 

@@ -137,6 +137,10 @@ class AttributionCLIP(nn.Module):
         Missing optional keys use the model defaults; absent lora_target selects
         q/v projections in both encoders.
         """
+        if ckpt.get("loss", "cone") != "cone":
+            raise ValueError(
+                f"Unsupported checkpoint loss {ckpt['loss']!r}; "
+                "only entailment-cone checkpoints are supported.")
         return cls(
             clip_name=ckpt["clip_name"],
             lora_r=ckpt.get("lora_r", 8),

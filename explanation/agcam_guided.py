@@ -6,7 +6,7 @@ min-max-normalized spatial heatmaps.
 
 The forward path normalizes CLIP features, applies the projection and exp_map0,
 and requests attention tensors. It does not apply fixed image-radius
-normalization or axis-loss scoring. Call outside no_grad/inference_mode with
+normalization. Call outside no_grad/inference_mode with
 eager attention and gradient-bearing model parameters.
 encode_anchors accepts text prompts; checkpoint free anchors must be supplied
 separately by a caller that supports them.

@@ -16,7 +16,7 @@ from torch.utils.data import Dataset
 
 import train_attribution as trainer
 from geometry.lorentz import exp_map0
-from losses.axis_cone_loss import regular_simplex
+from models.attribution_clip import AttributionCLIP
 from training.attribution_args import parse_args, validate_args
 
 
@@ -119,24 +119,19 @@ def run_tiny_training(module, directory, options, manifest=False):
 
 
 class AttributionTrainingTests(unittest.TestCase):
-    def test_feasible_aperture_calibration(self):
-        axes = regular_simplex(3, 4)
-
-        def aligned_images(model, pixel):
-            tangent = 3 * axes[pixel.argmax(1)] + 0 * model.projection[0].weight.sum()
-            return exp_map0(tangent, curv=model.curv), tangent
-
-        options = ["--loss", "axis", "--anchor_init", "simplex", "--freeze_anchors",
-                   "--fixed_psi", "45", "--lambda_aperture", "0",
-                   "--lambda_cover", "5", "--inside_margin", "2",
-                   "--separation_margin", "2", "--calibrate_psi"]
-        with tempfile.TemporaryDirectory() as directory, patch.object(
-                TinyModel, "encode_image", aligned_images):
-            checkpoint, _, _ = run_tiny_training(trainer, directory, options)
-        self.assertTrue(checkpoint["aperture_calibration"]["applied"])
-        self.assertEqual(checkpoint["val_balanced_calibrated"], 1.0)
-        self.assertTrue(all(x == 1.0 for x in
-                            checkpoint["aperture_calibration"]["train_coverage"]))
+    def test_checkpoint_loss_compatibility(self):
+        # Reject incompatible scoring rules before downloading model weights.
+        for loss in ("axis", "unknown"):
+            with self.subTest(loss=loss), patch.object(
+                    AttributionCLIP, "__init__", return_value=None) as construct:
+                with self.assertRaisesRegex(ValueError, "Unsupported checkpoint loss"):
+                    AttributionCLIP.from_checkpoint({"loss": loss})
+                construct.assert_not_called()
+        for metadata in ({}, {"loss": "cone"}):
+            with self.subTest(metadata=metadata), patch.object(
+                    AttributionCLIP, "__init__", return_value=None) as construct:
+                AttributionCLIP.from_checkpoint({"clip_name": "test", **metadata})
+                construct.assert_called_once()
 
     def test_cli_help_and_constraints(self):
         with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as cm:
@@ -147,24 +142,25 @@ class AttributionTrainingTests(unittest.TestCase):
         validate_args(args)
         for flag in ("--lambda_cap_in_class", "--lambda_img_in_cap",
                      "--lambda_axis", "--lambda_hinge", "--pos_mode",
-                     "--lambda_family", "--hierarchy", "--theta_max"):
+                     "--lambda_family", "--hierarchy", "--theta_max",
+                     "--loss", "--lambda_ce", "--ce_tau_init", "--lambda_sep",
+                     "--lambda_cover", "--lambda_center", "--lambda_aperture",
+                     "--inside_margin", "--separation_margin", "--nu",
+                     "--psi_range", "--fixed_psi", "--calibrate_psi"):
             with self.subTest(flag=flag), contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     parse_args(base + [flag, "1"])
-        for flag in ("--lambda_ce", "--lambda_sep"):
-            with self.subTest(flag=flag), self.assertRaises(ValueError):
-                validate_args(parse_args(base + [flag, "1"]))
-            validate_args(parse_args(base + ["--loss", "axis", flag, "1"]))
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            parse_args(base + ["--anchor_init", "simplex"])
         args.fixed_image_radius, args.init_depth = 4, 3
         with self.assertRaises(ValueError):
             validate_args(args)
 
     def test_training_modes_and_dataset_paths(self):
         cases = [
-            (["--loss", "axis", "--anchor_init", "simplex", "--freeze_anchors",
-              "--fixed_psi", "45", "--lambda_aperture", "0", "--lambda_cover", "5",
-              "--lambda_ce", "0.5", "--calibrate_psi"], True),
-            (["--loss", "axis", "--anchor_init", "random", "--anchors_only"], False),
+            (["--anchor_init", "random", "--anchors_only",
+              "--anchor_norm_range", "1", "2", "--fixed_image_radius", "4"], False),
+            (["--anchor_init", "random", "--freeze_anchors"], False),
             (["--anchor_init", "text", "--lambda_norm", "0.5",
               "--target_norm", "4", "--norm_mode", "bilateral"], True),
             (["--anchor_init", "text_free", "--neg_samples", "1"], False),
@@ -180,9 +176,10 @@ class AttributionTrainingTests(unittest.TestCase):
                 self.assertEqual(checkpoint["hierarchy"], "none")
                 self.assertEqual(checkpoint["family_names"], [])
                 self.assertIsNone(checkpoint["family_of"])
-                if checkpoint["loss"] == "cone":
-                    self.assertEqual(checkpoint["lambda_ce"], 0)
-                    self.assertIsNone(checkpoint["ce_tau"])
+                self.assertEqual(checkpoint["loss"], "cone")
+                for key in ("anchor_sin_psi", "fixed_psi", "lambda_ce", "ce_tau",
+                            "lambda_cover", "aperture_calibration"):
+                    self.assertNotIn(key, checkpoint)
                 self.assertEqual(frames[-1][0], "train_all_final.png")
                 self.assertEqual(len(frames[-1][1]), 12)
                 self.assertEqual(set(frames[-1][2]), {0, 1, 2})
@@ -194,8 +191,6 @@ class AttributionTrainingTests(unittest.TestCase):
                 if manifest:
                     self.assertEqual(calls[0]["include_paths"], {"train-row"})
                     self.assertEqual(calls[1]["include_paths"], {"val-row"})
-                if "--calibrate_psi" in options:
-                    self.assertIn("aperture_calibration", checkpoint)
                 rows = (Path(directory) / "stats.csv").read_text().splitlines()
                 self.assertEqual(len(rows), 5)
                 self.assertTrue(rows[0].startswith("step,epoch,lr,loss,"))

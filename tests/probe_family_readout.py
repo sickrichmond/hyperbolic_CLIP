@@ -7,8 +7,7 @@ and reorder family_of to the harness class order.
 
 Abstain when min(xi_leaf-psi_leaf) > 0. Report macro recall, rejection rate,
 leaf recall among retained samples and family recall among rejected samples.
-This is a cone-hierarchy diagnostic, not an axis-loss evaluator; rejection at
-the cone wall is not automatically calibrated for unknown generators.
+Rejection at the cone wall is not automatically calibrated for unknown generators.
 
 Usage: python -m tests.probe_family_readout --help
 """

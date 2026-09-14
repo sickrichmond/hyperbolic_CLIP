@@ -15,7 +15,6 @@ import torch.nn.functional as F
 
 from geometry.lorentz import half_aperture, oxy_angle
 
-
 def _pairwise_xi(apex: torch.Tensor, point: torch.Tensor, curv: float) -> torch.Tensor:
     """Pairwise oxy_angle: result[a, p] = oxy_angle(apex[a], point[p]).
     apex (A, D), point (P, D) → (A, P)."""
@@ -43,6 +42,7 @@ class EntailmentConeLoss(nn.Module):
         margin: float = 0.1,
         lambda_neg: float = 1.0,
         lambda_norm: float = 0.0,
+        lambda_cosine: float = 0.0,
         target_norm: float = 0.0,
         norm_mode: str = "floor",
         neg_samples: int = 0,
@@ -60,6 +60,7 @@ class EntailmentConeLoss(nn.Module):
         self.margin = margin
         self.lambda_neg = lambda_neg
         self.lambda_norm = lambda_norm
+        self.lambda_cosine = lambda_cosine
         self.target_norm = target_norm
         self.norm_mode = norm_mode
         self.neg_samples = neg_samples
@@ -94,28 +95,42 @@ class EntailmentConeLoss(nn.Module):
             if self.norm_mode == "floor":
                 deviation = deviation.clamp_min(0)
             L_norm = deviation.square().mean()
-        loss = L_img_in_class + self.lambda_norm * L_norm
+            
+        L_cosine = x_anc.new_zeros(())
+        if self.lambda_cosine > 0 and K > 1:
+            anc_dir = F.normalize(x_anc, dim=-1)
+            cos_sim = anc_dir @ anc_dir.T
+            iu = torch.triu_indices(K, K, offset=1, device=device)
+            pairwise_cos = cos_sim[iu[0], iu[1]]
+            L_cosine = pairwise_cos.clamp_min(0.0).mean()
+
+        loss = L_img_in_class + self.lambda_norm * L_norm + self.lambda_cosine * L_cosine
 
         # Pairwise separation is measured, not optimized.
         with torch.no_grad():
             directions = F.normalize(x_anc, dim=-1)
             iu = torch.triu_indices(K, K, offset=1, device=device)
-            angles = torch.arccos(
-                (directions @ directions.T).clamp(-1 + 1e-6, 1 - 1e-6)[iu[0], iu[1]])
+            cos_eval = (directions @ directions.T)[iu[0], iu[1]] if K > 1 else x_anc.new_zeros(1)
+            angles = torch.arccos(cos_eval.clamp(-1 + 1e-6, 1 - 1e-6))
+            
             stats = {
                 "loss_img_in_cls": L_img_in_class.detach(),
                 "loss_pos": L_pos.detach(),
                 "loss_neg": L_neg.detach(),
                 "loss_norm": L_norm.detach(),
+                "loss_cosine": L_cosine.detach(),
+                "mean_anc_cos_sim": cos_eval.mean(),
+                "max_anc_cos_sim": cos_eval.max(),
                 "inside_img": (xi_pos < psi_pos).float().mean(),
                 "cone_acc": (xi.argmin(1) == labels).float().mean(),
                 "xi_sat": (xi > math.pi - 5e-3).float().mean(),
                 "mean_psi_anc": psi_anc.mean(),
                 "psi_min_deg": torch.rad2deg(psi_anc.min()),
                 "psi_max_deg": torch.rad2deg(psi_anc.max()),
-                "sep_min_deg": torch.rad2deg(angles.min()),
-                "sep_mean_deg": torch.rad2deg(angles.mean()),
-                "sep_overlap": (angles < psi_anc[iu[0]] + psi_anc[iu[1]]).float().mean(),
+                "sep_min_deg": torch.rad2deg(angles.min()) if K > 1 else x_anc.new_zeros(()),
+                "sep_mean_deg": torch.rad2deg(angles.mean()) if K > 1 else x_anc.new_zeros(()),
+                "sep_overlap": ((angles < psi_anc[iu[0]] + psi_anc[iu[1]]).float().mean() 
+                                if K > 1 else x_anc.new_zeros(())),
                 "mean_xi_img_anc": xi_pos.mean(),
                 "mean_anc_norm": anc_norms.mean(),
             }

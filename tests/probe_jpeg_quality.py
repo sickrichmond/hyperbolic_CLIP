@@ -4,8 +4,7 @@ Evaluate qualities 95, 85, 75, 65 and 30 on the same fixed-seed subset of up to
 4,000 harness test images. Report harness metrics, class recalls, spatial image
 norms and exterior-angle diagnostics. Uses FAST/datasets/iab_dataset.
 
-This probe always scores with oxy_angle and derives apertures from depth;
-it does not implement the axis-loss checkpoint decision rule. Quality curves
+This probe scores with oxy_angle and derives apertures from depth. Quality curves
 alone do not distinguish signal removal from compression-induced cues.
 
 Usage: IAB_EXCLUDE_GENERATORS=dalle3 python -m tests.probe_jpeg_quality CHECKPOINT
@@ -43,7 +42,7 @@ def main(ckpt_path):
     names = harness_class_names()
     real_idx = names.index('real')
 
-    # Report depth-coupled apertures; these are not free axis-loss widths.
+    # Report depth-coupled apertures.
     mr = ckpt.get('min_radius', 0.1)
     psi = half_aperture(x_anc, curv=curv, min_radius=mr)
     order = torch.argsort(psi, descending=True)

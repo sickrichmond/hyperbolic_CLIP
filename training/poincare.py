@@ -264,16 +264,15 @@ def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0,
 
 def plot_epoch_snapshot(x_img, labels, x_anc, class_names, out_png, curv=1.0,
                         min_radius=0.1, state=None, seed=42, max_points=1500,
-                        title=None, psi=None):
+                        title=None):
     """Project all supplied images and anchors, returning reusable (pca, mu) state.
 
     Inputs are Lorentz spatial coordinates and integer class labels. Fit and
     center on at most max_points images; project every row. Reusing state keeps
-    consecutive frames in the same coordinates. psi supplies axis half-apertures
-    in radians; otherwise derive entailment half-apertures from the anchors."""
+    consecutive frames in the same coordinates. Half-apertures are derived from
+    the high-dimensional anchors."""
     x_anc_c = x_anc.detach().float().cpu()
-    if psi is None:
-        psi = half_aperture(x_anc_c, curv=curv, min_radius=min_radius).numpy()
+    psi = half_aperture(x_anc_c, curv=curv, min_radius=min_radius).numpy()
 
     p_imgs = lorentz_to_poincare(np.asarray(x_img), curv=curv)
     p_ancs = lorentz_to_poincare(x_anc_c.numpy(), curv=curv)

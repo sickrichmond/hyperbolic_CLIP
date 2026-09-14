@@ -2,7 +2,7 @@
 
 Load a checkpoint, re-encode its text prompts, predict with exterior angles,
 and explain a selected class or every class. Save heatmap/overlay PNGs and JSON.
-The CLI does not restore free anchors or axis-loss scoring. Its attention
+The CLI does not restore free anchors. Its attention
 forward omits fixed image-radius normalization.
 
 Usage: python -m explanation.explain_image --help

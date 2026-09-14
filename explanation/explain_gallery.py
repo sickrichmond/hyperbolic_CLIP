@@ -5,7 +5,7 @@ explain its own-class score, and save heatmaps, overlays, a grid and JSON.
 --image_index chooses the sample; titles compare the prediction with its label.
 
 The CLI re-encodes checkpoint text prompts and uses exterior-angle scoring.
-It does not restore free-anchor/axis-loss semantics; its attention forward
+It does not restore free anchors; its attention forward
 also omits fixed image-radius normalization.
 
 Usage: python -m explanation.explain_gallery --help

@@ -4,10 +4,9 @@ Reuse the harness image enumeration, configured split, degradations and metrics
 through the hypclip dataset adapter. The active class map is controlled by
 IAB_EXCLUDE_GENERATORS; saved anchors are reordered into that map.
 
-For loss=axis, logits are -q with apertures recovered from spatial anchor depths.
-Otherwise logits are -oxy_angle. Neither branch applies the learned training
-CE temperature. Argmax selects the class; the metric helper applies softmax
-for AUC/AP. Result files contain per-level metrics and confusion matrices.
+Logits are negative exterior angles. Argmax selects the class; the metric
+helper applies softmax for AUC/AP. Result files contain per-level metrics and
+confusion matrices.
 
 --pre_resize optionally resizes the shortest edge before CLIP preprocessing,
 preserving aspect ratio. Record it as a separate preprocessing control.
@@ -28,7 +27,6 @@ from comparison.training.metrics.base_metrics_class import calculate_metrics_for
 
 from models.attribution_clip import AttributionCLIP
 from geometry.lorentz import exp_map0, oxy_angle
-from losses.axis_cone_loss import axis_cone_q, sin_psi_from_depth
 from data.degradations import LEVEL_LABELS
 from transformers import CLIPTokenizer
 
@@ -127,21 +125,7 @@ def main():
     x_anc = load_anchors(ckpt, model, curv, device)                    # (K, D)
     K = x_anc.shape[0]
 
-    # The decision rule has to match the loss the checkpoint was trained with, or the
-    # eval silently reports a plausible number for the wrong quantity.
-    loss_kind = ckpt.get('loss', 'cone')
-    min_radius = ckpt.get('min_radius', 0.1)
-    sin_psi = None
-    if loss_kind == 'axis':
-        # Recovered from the anchors AFTER load_anchors permuted them into harness order.
-        # The trainer keeps ‖a‖ = 2K/sin psi, so this is exact and cannot get out of step
-        # with the anchors the way a separately stored, separately permuted vector could.
-        sin_psi = sin_psi_from_depth(x_anc, min_radius)
-        psi_deg = torch.rad2deg(torch.arcsin(sin_psi))
-        print(f"Decision rule: argmin q (axis cone), min_radius={min_radius}, "
-              f"psi in [{psi_deg.min():.1f}, {psi_deg.max():.1f}] deg")
-    else:
-        print("Decision rule: argmin xi")
+    print("Decision rule: argmin xi")
 
     os.makedirs(args.log_dir, exist_ok=True)
     config = {'model_name': 'hypclip', 'clip_name': clip_name, 'num_classes': K,
@@ -177,12 +161,9 @@ def main():
             pixel = batch['image'].to(device)
             x_img, _ = model.encode_image(pixel)                        # (B, D)
             B = x_img.shape[0]
-            if loss_kind == 'axis':
-                score = axis_cone_q(x_img, x_anc, sin_psi)           # (B, K)
-            else:
-                x_anc_t = x_anc.unsqueeze(0).expand(B, K, -1).reshape(B * K, -1)
-                x_img_t = x_img.unsqueeze(1).expand(B, K, -1).reshape(B * K, -1)
-                score = oxy_angle(x_anc_t, x_img_t, curv=curv).reshape(B, K)
+            x_anc_t = x_anc.unsqueeze(0).expand(B, K, -1).reshape(B * K, -1)
+            x_img_t = x_img.unsqueeze(1).expand(B, K, -1).reshape(B * K, -1)
+            score = oxy_angle(x_anc_t, x_img_t, curv=curv).reshape(B, K)
             all_logits.append((-score).cpu())
             all_labels.append(batch['label'].cpu())
             all_sem.append(batch['semantic_label'].cpu())

@@ -3,7 +3,7 @@
 #
 # Scale LoRA contributions from alpha=1 to alpha=0 with the projection head
 # fixed. Compare clean and JPEG accuracy and their ratio at each alpha.
-# The probe uses exterior-angle scores; it is not an axis-loss evaluator.
+# The probe uses exterior-angle scores.
 # CKPT overrides the checkpoint path.
 #
 # Submit: sbatch slurm/slurm_probe_wiseft.sh

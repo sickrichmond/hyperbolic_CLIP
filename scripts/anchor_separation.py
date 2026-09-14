@@ -1,7 +1,7 @@
 """Report high-dimensional anchor angles and angular cone-overlap diagnostics.
 
-Read saved anchor tangents and apertures, deriving depth-coupled apertures when
-needed. Angular-cap overlap is tested against the sum of pairwise half-apertures;
+Read saved anchor tangents and derive depth-coupled apertures. Angular-cap overlap
+is tested against the sum of pairwise half-apertures;
 it is not inferred from a 2-D projection.
 
 Usage: python scripts/anchor_separation.py checkpoint.pt [more.pt ...]
@@ -12,6 +12,8 @@ import torch.nn.functional as F
 
 for path in sys.argv[1:]:
     ck = torch.load(path, map_location="cpu", weights_only=False)
+    if ck.get("loss", "cone") != "cone":
+        raise ValueError(f"{path}: only entailment-cone checkpoints are supported")
     t = ck["anchor_tangent"]                      # (K, D); exp_map0 is radial, so the
     d = F.normalize(t.float(), dim=-1)            # tangent direction IS the axis direction
     K = d.shape[0]
@@ -19,23 +21,16 @@ for path in sys.argv[1:]:
     iu = torch.triu_indices(K, K, offset=1)
     ang = torch.rad2deg(torch.arccos(cos[iu[0], iu[1]]))
 
-    # --loss axis stores a free aperture; --loss cone couples it to the depth, so
-    # re-derive it there rather than printing nothing (the coupled psi is what was in
-    # force during a cone run, and the overlap check below is the whole point).
-    sin_psi = ck.get("anchor_sin_psi")
-    if sin_psi is None:
-        # half_aperture divides by ||x||*sqrt(c) and exp_map0 gives ||x|| =
-        # sinh(sqrt(c)*||t||)/sqrt(c), so the two sqrt(c) cancel exactly.
-        rc = ck.get("curv", 1.0) ** 0.5
-        sin_psi = (2.0 * ck["min_radius"]
-                   / torch.sinh(rc * t.float().norm(dim=-1))).clamp(max=1.0)
+    # exp_map0 and half_aperture have cancelling sqrt(curvature) factors.
+    rc = ck.get("curv", 1.0) ** 0.5
+    sin_psi = (2.0 * ck["min_radius"]
+               / torch.sinh(rc * t.float().norm(dim=-1))).clamp(max=1.0)
     psi = torch.rad2deg(torch.arcsin(sin_psi.clamp(max=1.0)))
     print(f"\n{path}   K={K}")
-    print(f"  sep  min {ang.min():.1f}  mean {ang.mean():.1f}  max {ang.max():.1f} deg"
-          f"   (random 128-d init ~ 90; simplex ideal {torch.rad2deg(torch.arccos(torch.tensor(-1/(K-1)))):.1f})")
+    print(f"  sep  min {ang.min():.1f}  mean {ang.mean():.1f}  max {ang.max():.1f} deg")
     print(f"  psi  min {psi.min():.1f}  mean {psi.mean():.1f}  max {psi.max():.1f} deg"
           f"   spread {psi.max()-psi.min():.1f}"
-          f"   ({'free' if ck.get('anchor_sin_psi') is not None else 'coupled, re-derived'})")
+          f"   (depth-coupled)")
     # A pair overlaps when its axes are closer than the sum of the two apertures.
     need = psi[iu[0]] + psi[iu[1]]
     print(f"  overlapping pairs: {(ang < need).sum()}/{len(ang)}"

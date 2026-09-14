@@ -1,11 +1,9 @@
 """Compare checkpoint classification with nearest-anchor cosine classification.
 
 Use the same fixed-seed subset of up to 8,000 harness test images for both
-rules. Cone checkpoints minimize the exterior angle xi; axis checkpoints
-minimize q, reconstructing apertures from stored anchor depths. Report accuracy,
-prediction agreement and per-class disagreements. Equal axis apertures make
-q ranking equivalent to cosine ranking; observed agreement alone does not
-establish a cause or a benefit from geometry.
+rules. Cone checkpoints minimize the exterior angle xi. Report accuracy,
+prediction agreement and per-class disagreements. Observed agreement alone
+does not establish a cause or a benefit from geometry.
 
 Usage: IAB_EXCLUDE_GENERATORS=dalle3 python -m tests.probe_cone_vs_cosine CHECKPOINT
 """
@@ -20,7 +18,6 @@ from tqdm import tqdm
 from comparison.dataset.ImageAttributionDataset.dataloader import get_dataloader
 from comparison.training.test_hypclip import harness_class_names, load_anchors
 from geometry.lorentz import half_aperture, oxy_angle
-from losses.axis_cone_loss import axis_cone_q, sin_psi_from_depth
 from models.attribution_clip import AttributionCLIP
 
 N_IMAGES = 8000          # fixed-seed subset, comparable across checkpoints
@@ -65,34 +62,18 @@ def main(ckpt_path):
     # its tangent vector: cosine on x_anc/x_img IS cosine in tangent space.
     anc_dir = F.normalize(x_anc, dim=-1)
 
-    # The cone rule depends on which loss trained the checkpoint: argmin xi for the
-    # entailment-cone loss, argmin q for the axis loss. Reading the wrong one would
-    # answer the wrong question without failing.
-    loss_kind = ckpt.get('loss', 'cone')
-    min_radius = ckpt.get('min_radius', 0.1)
-    rule = 'argmin q (axis cone)' if loss_kind == 'axis' else 'argmin ξ'
-    # ‖a‖ = 2K/sin psi is maintained by the trainer, so the aperture comes back from the
-    # anchors themselves — no second array to keep in the same class order.
-    sin_psi = sin_psi_from_depth(x_anc, min_radius) if loss_kind == 'axis' else None
+    rule = "argmin ξ"
     print(f"Cone rule: {rule}")
-    if sin_psi is not None:
-        psi_deg = torch.rad2deg(torch.arcsin(sin_psi))
-        print(f"  ψ per class: min {psi_deg.min():.1f}°  mean {psi_deg.mean():.1f}°  "
-              f"max {psi_deg.max():.1f}°  (a SPREAD here is what lets argmin q differ "
-              f"from argmax cos at all)")
 
     cone_pred, cos_pred, all_labels = [], [], []
     with torch.no_grad():
         for b in tqdm(loader, desc="probe", leave=False):
             x_img, _ = model.encode_image(b['image'].to(device))
             B = x_img.shape[0]
-            if loss_kind == 'axis':
-                score = axis_cone_q(x_img, x_anc, sin_psi)
-            else:
-                score = oxy_angle(
-                    x_anc.unsqueeze(0).expand(B, K, -1).reshape(B * K, -1),
-                    x_img.unsqueeze(1).expand(B, K, -1).reshape(B * K, -1),
-                    curv=curv).reshape(B, K)
+            score = oxy_angle(
+                x_anc.unsqueeze(0).expand(B, K, -1).reshape(B * K, -1),
+                x_img.unsqueeze(1).expand(B, K, -1).reshape(B * K, -1),
+                curv=curv).reshape(B, K)
             cone_pred.append(score.argmin(1).cpu())
             cos_pred.append((F.normalize(x_img, dim=-1) @ anc_dir.T).argmax(1).cpu())
             all_labels.append(b['label'].cpu())
