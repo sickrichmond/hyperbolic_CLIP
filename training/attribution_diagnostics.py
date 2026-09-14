@@ -82,11 +82,18 @@ def collect_plot_embeddings(model, loader, name_to_idx, device):
 
 
 def report_epoch(avg, epoch, lr, anchors):
-    """Print averaged training statistics for the entailment-cone loss."""
+    """Print epoch averages of the per-batch entailment-cone statistics.
+
+    L_cosine is unweighted. cos_max_avg averages per-batch pairwise maxima,
+    rather than reporting the largest cosine observed during the epoch.
+    """
     line1 = (f"\nEpoch {epoch}: train loss={avg['loss']:.4f}  "
              f"L_img_cls={avg['loss_img_in_cls']:.4f}"
              f"  (pos={avg['loss_pos']:.4f} neg={avg['loss_neg']:.4f})")
     line1 += f"  L_norm={avg['loss_norm']:.4f}"
+    line1 += (f"  L_cosine={avg['loss_cosine']:.4f}"
+              f"  cos_mean={avg['mean_anc_cos_sim']:.4f}"
+              f"  cos_max_avg={avg['max_anc_cos_sim']:.4f}")
     line1 += (f"  min∠={avg['sep_min_deg']:.1f}°"
               f"  mean∠={avg['sep_mean_deg']:.1f}°"
               f"  overlap={100*avg['sep_overlap']:.0f}%"

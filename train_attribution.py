@@ -1,7 +1,9 @@
 """Train a hyperbolic image-attribution classifier with the entailment-cone hinge loss.
 
 Supports text and free class anchors, image-only training, validation-based
-checkpoint selection, and Poincare diagnostics."""
+checkpoint selection, and Poincare diagnostics. The pairwise positive-cosine
+anchor penalty is enabled by default with weight 0.2; --lambda_cosine 0 disables it.
+"""
 from pathlib import Path
 
 import torch
@@ -131,6 +133,7 @@ def main():
         curv=args.curv, min_radius=args.min_radius,
         margin=args.margin, lambda_neg=args.lambda_neg,
         lambda_norm=args.lambda_norm, target_norm=args.target_norm,
+        lambda_cosine=args.lambda_cosine,
         norm_mode=args.norm_mode, neg_samples=args.neg_samples,
     ).to(device)
 
@@ -209,7 +212,7 @@ def main():
     base_keys = ["loss_img_in_cls", "loss_pos", "loss_neg", "xi_sat",
                  "psi_min_deg", "psi_max_deg",
                  "sep_min_deg", "sep_mean_deg", "sep_overlap",
-                 "loss_norm",
+                 "loss_norm", "loss_cosine", "mean_anc_cos_sim", "max_anc_cos_sim",
                  "cone_acc", "inside_img", "mean_psi_anc", "mean_xi_img_anc",
                  "mean_anc_norm"]
     stat_csv_keys = base_keys
@@ -367,6 +370,7 @@ def main():
                     "norm_mode":       args.norm_mode,
                     "target_norm":     args.target_norm,
                     "lambda_norm":     args.lambda_norm,
+                    "lambda_cosine":   args.lambda_cosine,
                     "theta_max":       150.0,
                     "hierarchy":         "none",
                     "family_names":      [],

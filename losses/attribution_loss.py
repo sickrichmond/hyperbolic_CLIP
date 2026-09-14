@@ -1,7 +1,11 @@
-"""Image-class entailment-cone hinges with optional anchor-norm regularization.
+"""Image-class entailment-cone hinges with anchor-norm and cosine regularization.
 
 Positive pairs pay max(0, xi-psi); wrong-class pairs pay max(0, psi+margin-xi).
-Total loss is positive + lambda_neg * negative + lambda_norm * norm_penalty.
+The cosine penalty averages max(0, cosine(a_i, a_j)) over unique anchor pairs.
+Total loss is positive + lambda_neg * negative + lambda_norm * norm_penalty
+              + lambda_cosine * cosine_penalty.
+Cosine penalizes directions less than 90 degrees apart, independent of anchor
+norms; it does not constrain apertures or guarantee non-overlapping cones.
 Apertures depend on anchor depth. Prediction minimizes the exterior angle xi.
 Inputs use Lorentz spatial coordinates; returned diagnostics are detached.
 """
@@ -47,10 +51,12 @@ class EntailmentConeLoss(nn.Module):
         norm_mode: str = "floor",
         neg_samples: int = 0,
     ):
-        """Configure hinges and a floor or bilateral spatial anchor-norm penalty.
+        """Configure hinges, spatial anchor-norm and pairwise cosine penalties.
 
         neg_samples=0 uses all wrong classes; otherwise subsample per image.
         The norm penalty is enabled when both lambda_norm and target_norm are positive.
+        Positive lambda_cosine enables the cosine penalty when at least two anchors
+        exist. This constructor defaults to zero; the training CLI defaults to 0.2.
         """
         super().__init__()
         if norm_mode not in ("floor", "bilateral"):
@@ -71,7 +77,11 @@ class EntailmentConeLoss(nn.Module):
         x_anc: torch.Tensor,  # (K, D)
         labels: torch.Tensor,  # (B,) class indices
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Return the weighted loss and image/cone geometry diagnostics."""
+        """Return the weighted loss and detached image/cone geometry diagnostics.
+
+        loss_cosine is unweighted. Mean/max cosine statistics use all unique
+        anchor pairs, including negative similarities; both report zero for K=1.
+        """
         B = x_img.shape[0]
         K = x_anc.shape[0]
         device = x_img.device
@@ -106,7 +116,7 @@ class EntailmentConeLoss(nn.Module):
 
         loss = L_img_in_class + self.lambda_norm * L_norm + self.lambda_cosine * L_cosine
 
-        # Pairwise separation is measured, not optimized.
+        # These geometry diagnostics do not contribute gradients to the loss.
         with torch.no_grad():
             directions = F.normalize(x_anc, dim=-1)
             iu = torch.triu_indices(K, K, offset=1, device=device)

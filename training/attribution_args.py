@@ -76,6 +76,9 @@ def parse_args(argv=None):
     p.add_argument("--neg_samples",    type=int,   default=0,
                    help="Random negatives retained per sample (0 uses all); full pairwise "
                         "scores are still computed.")
+    p.add_argument("--lambda_cosine", type=float, default=0.2,
+                   help="Weight of mean positive cosine similarity over unique anchor pairs "
+                        "(default: 0.2; 0 disables).")
     p.add_argument("--batch_size",     type=int,   default=256)
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
