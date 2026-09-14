@@ -44,13 +44,13 @@ AUG_POLICY=${AUG_POLICY:-corruption}
 if [ "$AUGMENT" = 1 ]; then
     AUG_FLAG="--train_augment --aug_policy $AUG_POLICY"
     if [ "$AUG_POLICY" = omnidfa ]; then
-        CKPT=$OUT/attribution_22cls_cosine_penalty_omniaug_vitl14.pt
+        CKPT=$OUT/attribution_22cls_cos02_structural_omniaug_vitl14.pt
     else
-        CKPT=$OUT/attribution_22cls_cosine_penalty_aug_vitl14.pt
+        CKPT=$OUT/attribution_22cls_cos02_structural_aug_vitl14.pt
     fi
 else
     AUG_FLAG=
-    CKPT=$OUT/attribution_22cls_cosine_penalty_vitl14.pt
+    CKPT=$OUT/attribution_22cls_cos02_structural_vitl14.pt
 fi
 
 mkdir -p $OUT
@@ -96,6 +96,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --optimizer sgd \
     --momentum 0.9 \
     --init_depth 3.0 \
+    --anchor_prompts $REPO/data/anchor_prompts_structural.json \
     --output          $CKPT
 
 echo "Done: $CKPT"

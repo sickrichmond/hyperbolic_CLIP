@@ -14,7 +14,6 @@
 
   "real": "A real photograph taken with a camera",
   "4o": "GPT-4o drew this picture inside a chat conversation",
-  "dalle3": "DALL-E 3 turned a written prompt into this rendering",
   "CogView3_PLUS": "CogView3-Plus, a relay diffusion system, output this frame",
   "FLUX": "FLUX rendered this image quickly in just four steps",
   "KANDINSKY": "Kandinsky painted this scene through a latent prior",
