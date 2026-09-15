@@ -1,26 +1,11 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — Attribution-CLIP fine-tuning (Stage 1), K=8 generators
-# CLIP ViT-L/14, LoRA on both encoders, hyperbolic entailment-cone loss.
+# CINECA Leonardo — ten-class cone training with caption terms.
 #
-# Classes (8): real + one cone per generator, spanning several architectures:
-#   real    — reference images
-#   FLUX    — DiT (FLUX.1 schnell)
-#   SD3_5   — LDM/DiT (Stable Diffusion 3.5-medium)
-#   SDXL    — LDM (Stable Diffusion XL base 1.0)
-#   4o      — GPT-4o native image generation (multimodal)
-#   grok3   — Grok-3 image (multimodal; watermark auto-cropped in dataset)
-#   infinity— Infinity-2B (autoregressive)
-#   dalle3  — DALL-E 3 (commercial t2i)
+# Classes: real, FLUX, SD3_5, SDXL, 4o, grok3, infinity, dalle3, PIXART, mid-6.0.
+# Uses the dataset's internal 80/20 split, not a comparison-harness manifest.
+# The class names are leaf labels; this recipe does not enable --hierarchy.
 #
-# Submit:  sbatch scripts/Slurm_cineca_more_families.sh
-#
-# Required data (download first if missing):
-#   python scripts/download_iab.py --dataset_path $WORK/hyp_fine_tuning/iab_dataset \
-#       --model_classes 4o grok3 infinity dalle3 SD3_5 SDXL \
-#       --semantic_classes COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
-#       --delete_zip
-# ============================================================================
+# Submit: sbatch slurm/slurm_cineca_more_families.sh
 
 #SBATCH --account=EUHPC_D26_009B
 #SBATCH --partition=boost_usr_prod       # A100 partition on Leonardo
@@ -54,10 +39,8 @@ mkdir -p $OUT
 cd $REPO
 
 # ── Training ──────────────────────────────────────────────────────────────────
-# 8-way attribution with hyperbolic entailment cones. Each image is pulled into
-# the cone of its class anchor and out of the other 7 cones. 80/20 split per
-# (generator, semantic). target_norm raised to 5.0 (vs 4.0 for K=4) so the cones
-# stay narrow enough to separate 8 classes: ψ ≈ arcsin(2·0.5/5) ≈ 11.5°.
+# Ten-way attribution with caption terms and an internal 80/20 split.
+# The norm penalty encourages spatial norms of at least 5; it is not a hard bound.
 
 CUDA_VISIBLE_DEVICES=0,1,2,3 python train_attribution.py \
     --dataset_path    $DATA \

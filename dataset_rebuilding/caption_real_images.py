@@ -1,46 +1,16 @@
-"""
-Re-caption the ImageAttributionBench **real** images with Qwen3.5-9B (vision)
-served by a local Ollama server.
+"""Caption IAB real images through an Ollama vision-language server.
 
-Why
----
-The original IAB captions are thin (~20-50 words) and generic, so the fakes
-generated from them are easy to spot. This script produces dense, per-class
-captions (see `caption_prompts.py`) that will later be used to regenerate
-harder synthetic counterparts.
+Use semantic-specific prompts and concurrent HTTP requests, cleaning reasoning
+tags and caption preambles from responses. Write per-semantic CSVs with
+ImgPath,Caption; ImageNet also carries a Label column from optional source CSVs.
+Images are JPEG-encoded for requests after optional downscaling.
 
-Output
-------
-One CSV per semantic class, written to `--output_dir`, with the SAME filenames
-and column schema as the original IAB caption CSVs so it is a drop-in
-replacement for `IABCLIPDataset(captions_dir=...)`:
+Flush each successful row and resume by skipping recorded stems. Failed rows
+are not written; --overwrite removes an existing class CSV before processing.
+Avoid concurrent writers to the same output files.
+slurm_caption.sh starts the server; this client does not allocate a GPU.
 
-    COCO.csv                 ImgPath,Caption
-    AnimalFace_cat.csv       ImgPath,Caption
-    ...
-    imagenet-1k.csv          ImgPath,Label,Caption   (Label carried over from the
-                                                      original CSV by filename stem)
-
-The loader keys captions by `Path(ImgPath).stem`, so ImgPath only needs a
-matching stem — we write the relative path `real/<...>/<file>` for readability.
-
-Resumability
-------------
-Captions are flushed to disk row-by-row. Re-running skips images whose stem is
-already present in the output CSV, and images that errored out (not written) are
-retried. Safe to relaunch after a SLURM timeout. Use --overwrite to start fresh.
-
-This script talks to Ollama over HTTP and needs no GPU itself — the SLURM job
-(`slurm_caption.sh`) starts `ollama serve` on the compute node's GPU first.
-
-Example
--------
-    python dataset_rebuilding/caption_real_images.py \\
-        --dataset_path $WORK/hyp_fine_tuning/iab_dataset \\
-        --output_dir   $WORK/hyp_fine_tuning/iab_captions_detailed \\
-        --orig_captions_dir $WORK/hyp_fine_tuning/iab_captions \\
-        --model qwen3.5:9b \\
-        --num_workers 4
+Usage: python dataset_rebuilding/caption_real_images.py --help
 """
 import argparse
 import base64

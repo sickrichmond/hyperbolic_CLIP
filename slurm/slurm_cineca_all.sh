@@ -1,21 +1,11 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — Attribution-CLIP fine-tuning (Stage 1), ALL generators
-# CLIP ViT-L/14, LoRA on both encoders, hyperbolic entailment-cone loss.
+# CINECA Leonardo — 22-class cone training with caption terms.
 #
-# 22 classes = real + 21 generators (the full IAB set MINUS dalle3, which is
-# left out on purpose: it is near-identical to 4o — both confuse heavily, see
-# the more_families eval where 4o↔dalle3 alone dragged balanced acc to 91.6%).
+# Uses all configured classes except dalle3 and the internal 80/20 split.
+# The positional dimension argument defaults to 4 and enters the checkpoint
+# filename. This recipe does not use a comparison-harness manifest.
 #
-# Submit:  sbatch slurm/slurm_cineca_all.sh
-#
-# Notes on the data (verified present, ~20k images/generator):
-#   - SDXL is missing the FFHQ semantic (18k instead of 20k) — harmless, it
-#     just contributes fewer SDXL face samples.
-#   - Expect some intrinsic confusion between near-twin generators that share a
-#     lineage: SD1_5↔SD2_1, SD3↔SD3_5, mid-5.2↔mid-6.0. This is real (visible
-#     in the confusion matrix), NOT a bug, and won't be fixed by hyperparams.
-# ============================================================================
+# Submit: sbatch slurm/slurm_cineca_all.sh 4
 
 #SBATCH --account=EUHPC_D26_009B
 #SBATCH --partition=boost_usr_prod       # A100 partition on Leonardo
@@ -46,9 +36,7 @@ CAPS=$WORK/hyp_fine_tuning/iab_captions
 OUT=$WORK/hyp_fine_tuning/checkpoints
 DIM=${1:-4}                 # embedding dimension; pass on the CLI, e.g.
                             #   sbatch slurm/slurm_cineca_all.sh 8
-                            # (default 4). Baked into the checkpoint name so runs at
-                            # different d don't clobber each other or the d=128
-                            # attribution_all_no_dalle.pt.
+                            # The dimension is included in the checkpoint name.
 
 mkdir -p $OUT
 cd $REPO

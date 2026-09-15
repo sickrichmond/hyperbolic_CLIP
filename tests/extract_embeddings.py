@@ -1,23 +1,15 @@
-"""
-Dump image embeddings of a checkpoint to a .npz file.
+"""Export image and anchor embeddings to an NPZ file.
 
-Runs the val split through the image encoder (image-only — no captions needed
-at inference) and writes:
-  - lorentz:     (N, D)  image embeddings, space components on the hyperboloid
-  - anchors:     (K, D)  class-anchor embeddings (same Lorentz space)
-  - labels:      (N,)    int class labels in [0, K)
-  - class_names: list[str]  e.g. ["real", "FLUX"]
-  - generators:  list[str]  per-sample generator string
-  - semantics:   list[str]  per-sample semantic class string
+Use IABCLIPDataset's internal train/val/all split (val by default); this CLI
+does not accept a comparison split manifest. Restore stored anchor tangents
+when present, otherwise encode checkpoint prompts in checkpoint class order.
+Generator enumeration is selected by CLI arguments, not inferred from the file.
 
-The downstream HoroPCA + UMAP visualisation works on these.
+Save lorentz (N,D), anchors (K,D), labels, class_names, anchor_texts, per-image
+generators/semantics and curv. This exporter is separate from training.poincare,
+which performs its own extraction and does not consume this NPZ.
 
-Usage:
-    python -m tests.extract_embeddings \\
-        --checkpoint   $WORK/hyp_fine_tuning/checkpoints/attribution_FLUX_vitl14_hier.pt \\
-        --dataset_path $WORK/hyp_fine_tuning/iab_dataset \\
-        --captions_dir $WORK/hyp_fine_tuning/iab_captions \\
-        --output       $WORK/hyp_fine_tuning/embeddings/val_hier.npz
+Usage: python -m tests.extract_embeddings --help
 """
 import argparse
 import warnings
@@ -32,6 +24,7 @@ from tqdm import tqdm
 warnings.filterwarnings("ignore", category=UserWarning, module="PIL")
 
 from models.attribution_clip import AttributionCLIP
+from geometry.lorentz import exp_map0
 from data.iab_clip_dataset import IABCLIPDataset
 
 
@@ -71,13 +64,7 @@ def main():
     print(f"  classes: {class_names}")
     print(f"  curv:    {curv}  hyperbolic_dim={ckpt.get('hyperbolic_dim')}")
 
-    model = AttributionCLIP(
-        clip_name=clip_name,
-        lora_r=ckpt.get("lora_r", 8),
-        lora_alpha=ckpt.get("lora_alpha", 16),
-        hyperbolic_dim=ckpt.get("hyperbolic_dim", 128),
-        curv=curv,
-    ).to(device)
+    model = AttributionCLIP.from_checkpoint(ckpt).to(device)
     model.clip.load_state_dict(ckpt["lora_state"])
     model.projection.load_state_dict(ckpt["projection"])
     model.eval()
@@ -99,11 +86,17 @@ def main():
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False,
                         num_workers=args.num_workers, pin_memory=True)
 
-    # Anchors
-    tok = tokenizer(anchor_texts, return_tensors="pt", padding="max_length",
-                    truncation=True, max_length=77)
-    x_anc, _ = model.encode_text(tok["input_ids"].to(device),
-                                 tok["attention_mask"].to(device))
+    # Anchors — same contract as comparison/training/test_hypclip.py:load_anchors.
+    # Free anchors (image_centroid / text_free / random) are in 'anchor_tangent';
+    # re-encoding the texts for those runs would dump anchors the model never had.
+    tangent = ckpt.get("anchor_tangent")
+    if tangent is not None:
+        x_anc = exp_map0(tangent.float().to(device), curv=curv)
+    else:
+        tok = tokenizer(anchor_texts, return_tensors="pt", padding="max_length",
+                        truncation=True, max_length=77)
+        x_anc, _ = model.encode_text(tok["input_ids"].to(device),
+                                     tok["attention_mask"].to(device))
     anchors = x_anc.detach().cpu().numpy()                # (K, D)
 
     # Image embeddings

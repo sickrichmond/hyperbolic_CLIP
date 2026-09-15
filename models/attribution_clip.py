@@ -8,15 +8,12 @@ from geometry.lorentz import exp_map0
 
 
 class AttributionCLIP(nn.Module):
-    """
-    CLIP (vision + text) with LoRA on both encoders, plus a shared projection
-    head to the Lorentz model of hyperbolic space.
+    """CLIP with configurable LoRA targets and a shared Lorentz projection head.
 
-    Image and text are encoded through CLIP+LoRA into the shared CLIP space,
-    then a small MLP head produces tangent vectors at the origin which are
-    lifted onto the hyperboloid by exp_map0. The same head is used for both
-    modalities so that image and text-anchor embeddings live in the same
-    hyperbolic space and entailment cones can be computed between them.
+    Normalize CLIP image/text features, project them to tangent vectors with
+    an MLP, and lift with exp_map0. image_radius optionally fixes image tangent
+    norms; text tangent norms are not fixed. Default LoRA targets are q/v in
+    both encoders; lora_target can restrict the encoder and layer range.
     """
 
     def __init__(
@@ -28,11 +25,14 @@ class AttributionCLIP(nn.Module):
         hyperbolic_dim: int = 128,
         curv: float = 1.0,
         init_scale: float = 0.1,
+        image_radius: float = 0.0,
         attn_implementation: str | None = None,
+        lora_target: str | None = None,
     ):
         super().__init__()
         self.curv = curv
         self.hyperbolic_dim = hyperbolic_dim
+        self.image_radius = image_radius
 
         # attn_implementation="eager" is required to read attention maps
         # (output_attentions=True), which the explainability pipeline needs.
@@ -44,10 +44,12 @@ class AttributionCLIP(nn.Module):
         for p in self.clip.parameters():
             p.requires_grad = False
 
+        # A string target is a full-match regex over base-model module names.
+        # Without one, adapt q/v projections in both encoders.
         lora_cfg = LoraConfig(
             r=lora_r,
             lora_alpha=lora_alpha,
-            target_modules=["q_proj", "v_proj"],
+            target_modules=lora_target or ["q_proj", "v_proj"],
             lora_dropout=lora_dropout,
             bias="none",
         )
@@ -80,7 +82,9 @@ class AttributionCLIP(nn.Module):
 
     # ── Hyperbolic projection ────────────────────────────────────────────────
 
-    def to_hyperbolic(self, clip_emb: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def to_hyperbolic(
+        self, clip_emb: torch.Tensor, radius: float = 0.0
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """clip_emb: (B, D_clip). Returns (x_hyp, tangent), both (B, D_hyp).
 
         Forces fp32 throughout: sinh/acosh/asin in the hyperbolic ops are unstable
@@ -89,11 +93,13 @@ class AttributionCLIP(nn.Module):
         with torch.amp.autocast("cuda", enabled=False):
             clip_emb = clip_emb.float()
             tangent = self.projection(clip_emb)
+            if radius > 0:
+                tangent = F.normalize(tangent, dim=-1) * radius
             x_hyp = exp_map0(tangent, curv=self.curv)
         return x_hyp, tangent
 
     def encode_image(self, pixel_values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.to_hyperbolic(self._clip_image(pixel_values))
+        return self.to_hyperbolic(self._clip_image(pixel_values), self.image_radius)
 
     def encode_text(
         self, input_ids: torch.Tensor, attention_mask: torch.Tensor
@@ -110,11 +116,11 @@ class AttributionCLIP(nn.Module):
         DataParallel-friendly forward.
 
         Image-only mode (caption_ids is None): returns x_img (B, D_hyp).
-        Hierarchical mode: returns (x_img, x_cap), both (B, D_hyp). Both inputs
+        Caption mode: returns (x_img, x_cap), both (B, D_hyp). Both inputs
         are sliced along dim 0 by DataParallel — same B for both.
 
         Anchors are NOT processed here: they have shape (K, *) not (B, *) and
-        must be encoded separately on the primary GPU via encode_text().
+        are supplied separately by the trainer's anchor state.
         """
         x_img, _ = self.encode_image(pixel_values)
         if caption_ids is None:
@@ -124,8 +130,35 @@ class AttributionCLIP(nn.Module):
 
     # ── Convenience ───────────────────────────────────────────────────────────
 
+    @classmethod
+    def from_checkpoint(cls, ckpt: dict, **overrides) -> "AttributionCLIP":
+        """Construct the checkpoint architecture without loading its weights.
+
+        Missing optional keys use the model defaults; absent lora_target selects
+        q/v projections in both encoders.
+        """
+        if ckpt.get("loss", "cone") != "cone":
+            raise ValueError(
+                f"Unsupported checkpoint loss {ckpt['loss']!r}; "
+                "only entailment-cone checkpoints are supported.")
+        return cls(
+            clip_name=ckpt["clip_name"],
+            lora_r=ckpt.get("lora_r", 8),
+            lora_alpha=ckpt.get("lora_alpha", 16),
+            hyperbolic_dim=ckpt.get("hyperbolic_dim", 128),
+            curv=ckpt.get("curv", 1.0),
+            image_radius=ckpt.get("image_radius", 0.0),
+            lora_target=ckpt.get("lora_target"),
+            **overrides,
+        )
+
     def trainable_parameters(self) -> list[nn.Parameter]:
         return [p for p in self.parameters() if p.requires_grad]
+
+    def n_lora_adapters(self) -> int:
+        """How many modules actually got an adapter. 72 for the full config on
+        ViT-L/14 (24 vision + 12 text blocks, q and v each), 24 for vision 12-23."""
+        return sum(1 for n, _ in self.clip.named_modules() if n.endswith("lora_A"))
 
     def print_trainable_summary(self) -> None:
         total = sum(p.numel() for p in self.parameters())
@@ -133,5 +166,6 @@ class AttributionCLIP(nn.Module):
         print(
             f"AttributionCLIP: {trainable:,} / {total:,} params trainable "
             f"({100 * trainable / total:.2f}%)  "
+            f"{self.n_lora_adapters()} lora adapters  "
             f"hyperbolic_dim={self.hyperbolic_dim}, curv={self.curv}"
         )

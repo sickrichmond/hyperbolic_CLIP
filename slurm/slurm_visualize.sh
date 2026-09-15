@@ -31,7 +31,7 @@ export HOROPCA_DIR=${HOROPCA_DIR:-$WORK/hyp_fine_tuning/horopca}
 
 cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
 
-# Override via env vars when needed, e.g. CKPT=... OUT=... sbatch scripts/slurm_visualize.sh
+# Override via env vars when needed, e.g. CKPT=... OUT=... sbatch slurm/slurm_visualize.sh
 CKPT=${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_k4_vitl14.pt}
 OUT=${OUT:-$WORK/hyp_fine_tuning/viz/k4_hier}
 GENERATORS=${GENERATORS:-"real FLUX SD3 gemini"}

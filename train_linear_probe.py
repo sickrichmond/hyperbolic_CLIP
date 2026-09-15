@@ -1,28 +1,15 @@
-"""
-Fase B — Linear probe on FROZEN CLIP features.
+"""Train a readout on cached image features without updating their encoder.
 
-This is the professor's baseline: it measures how much of the 22-way generator
-attribution is ALREADY linearly decodable from off-the-shelf CLIP image features,
-with NO LoRA fine-tuning and NO special geometry. If this probe already scores
-~98%, then fine-tuning + cones + dimension are all second-order.
+Read clip_features_{train,val}.pt from scripts.extract_clip_features. Each cache
+contains X (N, D), y (N,) and classes. The linear head is nn.Linear(D, K); the
+cone head learns tangent-space anchors and a temperature for exterior-angle
+logits. Use projection features for the cone head.
 
-Input: the two caches written by scripts/extract_clip_features.py
-    <features_dir>/clip_features_train.pt   {"X": (N,768), "y": (N,), "classes": [...]}
-    <features_dir>/clip_features_val.pt
+Training uses AdamW and cross-entropy with inverse-frequency class weights
+unless disabled. Select the checkpoint by balanced validation accuracy and
+report recalls and a confusion matrix.
 
-It trains a single nn.Linear(feat_dim -> num_classes) with class-balanced
-cross-entropy (the train set is imbalanced: real has ~8800 captioned images vs
-~16000 per generator), then reports overall / balanced / per-class accuracy and a
-confusion matrix — same metrics as tests/eval_attribution, so the number lines up
-directly against the hyperbolic and euclidean fine-tuned models.
-
-There is no CLIP here: we operate on the cached 768-d features, so it trains in a
-couple of minutes (seconds on a GPU).
-
-Usage:
-    python train_linear_probe.py \
-        --features_dir $WORK/hyp_fine_tuning/clip_features \
-        --output       $WORK/hyp_fine_tuning/checkpoints/linear_probe.pt
+Usage: python train_linear_probe.py --features_dir CACHE --output CHECKPOINT
 """
 import argparse
 from pathlib import Path
@@ -31,6 +18,34 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
+
+from geometry.lorentz import exp_map0
+from losses.attribution_loss import _pairwise_xi
+
+
+class ConeHead(nn.Module):
+    """Learn tangent anchors and temperature for logits -xi/exp(log_tau).
+
+    Lift cached features and anchors with exp_map0 before exterior-angle
+    scoring. Use tangent projection caches; input features remain frozen.
+    """
+
+    def __init__(self, init, curv=1.0, min_radius=0.5, tau_init=1.0):
+        super().__init__()
+        self.curv, self.min_radius = curv, min_radius
+        self.anchors = nn.Parameter(init.clone())
+        self.log_tau = nn.Parameter(torch.tensor(float(tau_init)).log())
+
+    def forward(self, x):
+        x_hyp = exp_map0(x, curv=self.curv)
+        a_hyp = exp_map0(self.anchors, curv=self.curv)
+        return -_pairwise_xi(a_hyp, x_hyp, curv=self.curv).T / self.log_tau.exp()
+
+
+def class_centroids(X, y, num_classes):
+    """Return per-class cached-feature means, with zeros for absent classes."""
+    c = torch.zeros(num_classes, X.shape[1]).index_add_(0, y, X)
+    return c / torch.bincount(y, minlength=num_classes).clamp(min=1).unsqueeze(1)
 
 
 def parse_args():
@@ -44,6 +59,11 @@ def parse_args():
     p.add_argument("--batch_size",    type=int,   default=4096)
     p.add_argument("--no_class_weight", action="store_true",
                    help="Disable class-balanced CE (plain cross-entropy).")
+    p.add_argument("--head", choices=["linear", "cone"], default="linear",
+                   help="'cone' = softmax over -ξ with FREE anchor norms, on the same "
+                        "frozen features. Use with the `projection` cache.")
+    p.add_argument("--curv",       type=float, default=1.0)
+    p.add_argument("--min_radius", type=float, default=0.5, help="--head cone only")
     p.add_argument("--eval_every",    type=int,   default=5)
     p.add_argument("--seed",          type=int,   default=42)
     p.add_argument("--output",        default="linear_probe.pt")
@@ -70,8 +90,7 @@ def evaluate(linear, X, y, num_classes, device):
 
 
 def print_report(classes, overall, balanced, recalls, conf, n_val, title):
-    """Print overall / balanced / per-class accuracy + confusion matrix.
-    Shared by train_linear_probe and eval_linear_probe."""
+    """Print validation accuracy, per-class recall and a confusion matrix."""
     print(f"\n=== {title} ===")
     print(f"Overall accuracy:  {100 * overall:.1f}%")
     print(f"Balanced accuracy: {100 * balanced:.1f}%   ({n_val} val samples)\n")
@@ -110,7 +129,11 @@ def main():
         print(f"Class weighting: ON  (train counts min={int(counts.min())} "
               f"max={int(counts.max())})")
 
-    linear = nn.Linear(feat_dim, num_classes).to(device)
+    if args.head == "cone":
+        linear = ConeHead(class_centroids(X_train, y_train, num_classes),
+                          curv=args.curv, min_radius=args.min_radius).to(device)
+    else:
+        linear = nn.Linear(feat_dim, num_classes).to(device)
     opt = torch.optim.AdamW(linear.parameters(), lr=args.lr,
                             weight_decay=args.weight_decay)
     ce = nn.CrossEntropyLoss(weight=weight)
@@ -140,7 +163,7 @@ def main():
                 best_balanced = balanced
                 torch.save({"state_dict": linear.state_dict(), "classes": classes,
                             "feat_dim": feat_dim, "val_balanced": balanced,
-                            "epoch": epoch}, out_path)
+                            "head": args.head, "epoch": epoch}, out_path)
 
     # ── Final detailed report on the best checkpoint ─────────────────────────
     best = torch.load(out_path, weights_only=False)
@@ -148,8 +171,15 @@ def main():
     overall, balanced, recalls, conf = evaluate(linear, X_val, y_val, num_classes, device)
 
     print_report(classes, overall, balanced, recalls, conf, len(X_val),
-                 f"Linear probe on FROZEN CLIP — best epoch {best['epoch']}")
+                 f"{args.head} probe on cached features — best epoch {best['epoch']}")
     print(f"\nBest balanced val accuracy: {100 * best_balanced:.1f}%  ({out_path})")
+    if args.head == "cone":
+        psi = (2 * args.min_radius
+               / exp_map0(linear.anchors.detach().cpu(), curv=args.curv).norm(dim=-1)
+               ).clamp(max=1.0).asin()
+        print(f"ψ across the 22 anchors: min={psi.min():.4f} max={psi.max():.4f} rad "
+              f"(the model's are pinned inside ±4%; a wide spread here means the free "
+              f"radii were actually used)")
 
 
 if __name__ == "__main__":

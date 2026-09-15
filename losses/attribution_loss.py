@@ -1,42 +1,23 @@
-"""
-Hierarchical entailment-cone loss for attribution (HySAC-style).
+"""Image-class entailment-cone hinges with anchor-norm and cosine regularization.
 
-Hierarchy:
-    class anchor (e.g. "A real image")               — broadest cone
-        ⊃ augmented caption ("Real image of ...")    — narrower cone, content-specific
-            ⊃ image embedding                         — leaf
-
-Loss terms (all use the same cone-violation primitive):
-
-  L_img_in_class:  image i must lie inside the cone of its class anchor y_i,
-                   and outside the cones of all other class anchors.
-                   (this is the term used at inference)
-
-  L_cap_in_class:  caption i must lie inside the cone of its class anchor y_i,
-                   and outside the cones of all other class anchors.
-
-  L_img_in_cap:    image i must lie inside the cone of its OWN augmented caption,
-                   and outside the cones of all other captions in the batch
-                   (which differ in content and/or class).
-
-For each term:
-  L_pos = max(0, ξ_pos - ψ_pos)
-  L_neg = max(0, ψ_neg + margin - ξ_neg)
-where ξ = oxy_angle(apex, point) and ψ = half_aperture(apex).
-
-Total:
-  L = L_img_in_class
-      + λ_cap_in_class * L_cap_in_class
-      + λ_img_in_cap   * L_img_in_cap
-      + λ_norm         * L_norm   (anchor norm regulariser)
+Positive pairs pay max(0, xi-psi); wrong-class pairs pay max(0, psi+margin-xi).
+The cosine penalty averages max(0, cosine(a_i, a_j)) over unique anchor pairs.
+Total loss is positive + lambda_neg * negative + lambda_norm * norm_penalty
+              + lambda_cosine * cosine_penalty.
+Cosine penalizes directions less than 90 degrees apart, independent of anchor
+norms; it does not constrain apertures or guarantee non-overlapping cones.
+Apertures depend on anchor depth. Prediction minimizes the exterior angle xi.
+Inputs use Lorentz spatial coordinates; returned diagnostics are detached.
 """
 from __future__ import annotations
 
+import math
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from geometry.lorentz import half_aperture, oxy_angle
-
 
 def _pairwise_xi(apex: torch.Tensor, point: torch.Tensor, curv: float) -> torch.Tensor:
     """Pairwise oxy_angle: result[a, p] = oxy_angle(apex[a], point[p]).
@@ -48,6 +29,15 @@ def _pairwise_xi(apex: torch.Tensor, point: torch.Tensor, curv: float) -> torch.
     return oxy_angle(apex_t, point_t, curv=curv).reshape(A, P)
 
 
+def _subsample(mask: torch.Tensor, k: int) -> torch.Tensor:
+    """Keep k random True entries per row (all of them if the row has fewer)."""
+    if k <= 0 or k >= mask.shape[1]:
+        return mask
+    noise = torch.rand(mask.shape, device=mask.device).masked_fill(~mask, -1.0)
+    keep = noise.topk(k, dim=1).indices
+    return torch.zeros_like(mask).scatter_(1, keep, True) & mask
+
+
 class EntailmentConeLoss(nn.Module):
     def __init__(
         self,
@@ -55,150 +45,108 @@ class EntailmentConeLoss(nn.Module):
         min_radius: float = 0.1,
         margin: float = 0.1,
         lambda_neg: float = 1.0,
-        lambda_cap_in_class: float = 0.0,
-        lambda_img_in_cap: float = 0.0,
         lambda_norm: float = 0.0,
+        lambda_cosine: float = 0.0,
         target_norm: float = 0.0,
+        norm_mode: str = "floor",
+        neg_samples: int = 0,
     ):
-        """
-        lambda_cap_in_class > 0 and lambda_img_in_cap > 0 enable the hierarchical
-        terms. They require x_cap to be passed to forward(). With both at 0
-        (default) the loss reduces to image-in-class-anchor only.
+        """Configure hinges, spatial anchor-norm and pairwise cosine penalties.
 
-        lambda_norm, target_norm: anchor-norm regulariser.
-          L_norm = mean_c max(0, target_norm - ‖t_c‖)²
+        neg_samples=0 uses all wrong classes; otherwise subsample per image.
+        The norm penalty is enabled when both lambda_norm and target_norm are positive.
+        Positive lambda_cosine enables the cosine penalty when at least two anchors
+        exist. This constructor defaults to zero; the training CLI defaults to 0.2.
         """
         super().__init__()
+        if norm_mode not in ("floor", "bilateral"):
+            raise ValueError("norm_mode must be 'floor' or 'bilateral'")
         self.curv = curv
         self.min_radius = min_radius
         self.margin = margin
         self.lambda_neg = lambda_neg
-        self.lambda_cap_in_class = lambda_cap_in_class
-        self.lambda_img_in_cap = lambda_img_in_cap
         self.lambda_norm = lambda_norm
+        self.lambda_cosine = lambda_cosine
         self.target_norm = target_norm
-
-    def _cone_term(
-        self,
-        xi_pos: torch.Tensor,      # (B,)        positive exterior angles
-        psi_pos: torch.Tensor,     # (B,)        cone aperture at the positive apex
-        xi_neg: torch.Tensor,      # (B, M)      exterior angles to all candidate apices
-        psi_neg_b: torch.Tensor,   # (B, M)      cone apertures at candidate apices
-        neg_mask: torch.Tensor,    # (B, M) bool only true where the apex is a negative
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns (L_pos, L_neg) — both scalars."""
-        L_pos = torch.clamp(xi_pos - psi_pos, min=0.0).mean()
-        if neg_mask.any():
-            L_neg = torch.clamp(psi_neg_b + self.margin - xi_neg, min=0.0)[neg_mask].mean()
-        else:
-            L_neg = torch.tensor(0.0, device=xi_pos.device)
-        return L_pos, L_neg
+        self.norm_mode = norm_mode
+        self.neg_samples = neg_samples
 
     def forward(
         self,
-        x_img: torch.Tensor,                     # (B, D)
-        x_anc: torch.Tensor,                     # (K, D)
-        labels: torch.Tensor,                    # (B,) int in [0, K)
-        x_cap: torch.Tensor | None = None,       # (B, D) augmented captions, optional
+        x_img: torch.Tensor,  # (B, D)
+        x_anc: torch.Tensor,  # (K, D)
+        labels: torch.Tensor,  # (B,) class indices
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        B, _ = x_img.shape
-        K, _ = x_anc.shape
+        """Return the weighted loss and detached image/cone geometry diagnostics.
+
+        loss_cosine is unweighted. Mean/max cosine statistics use all unique
+        anchor pairs, including negative similarities; both report zero for K=1.
+        """
+        B = x_img.shape[0]
+        K = x_anc.shape[0]
         device = x_img.device
+        psi_anc = half_aperture(x_anc, curv=self.curv, min_radius=self.min_radius)
+        xi = _pairwise_xi(x_anc, x_img, curv=self.curv).T
+        xi_pos = xi.gather(1, labels.unsqueeze(1)).squeeze(1)
+        psi_pos = psi_anc[labels]
+        L_pos = (xi_pos - psi_pos).clamp_min(0).mean()
 
-        psi_anc = half_aperture(x_anc, curv=self.curv, min_radius=self.min_radius)   # (K,)
-        psi_anc_b = psi_anc.unsqueeze(0).expand(B, K)                                # (B, K)
-        pos_idx   = labels.unsqueeze(1)                                              # (B, 1)
-        psi_anc_pos = psi_anc_b.gather(1, pos_idx).squeeze(1)                        # (B,)
+        neg_mask = torch.ones(B, K, device=device, dtype=torch.bool)
+        neg_mask.scatter_(1, labels.unsqueeze(1), False)
+        neg_mask = _subsample(neg_mask, self.neg_samples)
+        L_neg = ((psi_anc.unsqueeze(0) + self.margin - xi).clamp_min(0)[neg_mask].mean()
+                 if neg_mask.any() else xi.new_zeros(()))
+        L_img_in_class = L_pos + self.lambda_neg * L_neg
 
-        neg_mask_anc = torch.ones(B, K, device=device, dtype=torch.bool)
-        neg_mask_anc.scatter_(1, pos_idx, False)
-
-        # ───── 1) L_img_in_class ─────────────────────────────────────────────
-        # xi_ia[i, c] = oxy_angle(anchor_c, img_i)
-        xi_ia = _pairwise_xi(x_anc, x_img, curv=self.curv).T                          # (B, K)
-        xi_ia_pos = xi_ia.gather(1, pos_idx).squeeze(1)                               # (B,)
-        L_imgcls_pos, L_imgcls_neg = self._cone_term(
-            xi_ia_pos, psi_anc_pos, xi_ia, psi_anc_b, neg_mask_anc
-        )
-        L_img_in_class = L_imgcls_pos + self.lambda_neg * L_imgcls_neg
-
-        with torch.no_grad():
-            inside_img = (xi_ia_pos < psi_anc_pos).float().mean()
-            cone_acc   = (xi_ia.argmin(dim=1) == labels).float().mean()
-
-        # ───── 2 & 3) hierarchical caption-based terms (optional) ────────────
-        L_cap_in_class = torch.tensor(0.0, device=device)
-        L_img_in_cap   = torch.tensor(0.0, device=device)
-        stats_extra = {}
-
-        use_caps = (
-            x_cap is not None
-            and (self.lambda_cap_in_class > 0 or self.lambda_img_in_cap > 0)
-        )
-        if use_caps:
-            # 2) L_cap_in_class — caption inside its class anchor's cone
-            xi_ca = _pairwise_xi(x_anc, x_cap, curv=self.curv).T                      # (B, K)
-            xi_ca_pos = xi_ca.gather(1, pos_idx).squeeze(1)
-            L_capcls_pos, L_capcls_neg = self._cone_term(
-                xi_ca_pos, psi_anc_pos, xi_ca, psi_anc_b, neg_mask_anc
-            )
-            L_cap_in_class = L_capcls_pos + self.lambda_neg * L_capcls_neg
-
-            # 3) L_img_in_cap — image inside its OWN caption's cone; other batch
-            #    captions act as negatives.
-            psi_cap = half_aperture(x_cap, curv=self.curv, min_radius=self.min_radius)  # (B,)
-            # xi_ic[i, j] = oxy_angle(cap_j, img_i)
-            xi_ic = _pairwise_xi(x_cap, x_img, curv=self.curv).T                       # (B, B)
-            xi_ic_pos = xi_ic.diagonal()                                               # (B,)
-            psi_cap_b = psi_cap.unsqueeze(0).expand(B, B)                              # (B, B)
-            neg_mask_ic = ~torch.eye(B, dtype=torch.bool, device=device)
-            L_imgcap_pos, L_imgcap_neg = self._cone_term(
-                xi_ic_pos, psi_cap, xi_ic, psi_cap_b, neg_mask_ic
-            )
-            L_img_in_cap = L_imgcap_pos + self.lambda_neg * L_imgcap_neg
-
-            with torch.no_grad():
-                inside_cap     = (xi_ca_pos < psi_anc_pos).float().mean()
-                inside_img_cap = (xi_ic_pos < psi_cap).float().mean()
-                stats_extra = {
-                    "inside_cap":      inside_cap.detach(),
-                    "inside_img_cap":  inside_img_cap.detach(),
-                    "mean_psi_cap":    psi_cap.mean().detach(),
-                    "mean_xi_cap_anc": xi_ca_pos.mean().detach(),
-                    "mean_xi_img_cap": xi_ic_pos.mean().detach(),
-                    "mean_cap_norm":   x_cap.norm(dim=-1).mean().detach(),
-                }
-
-        # ───── 4) Anchor-norm regulariser ────────────────────────────────────
         anc_norms = x_anc.norm(dim=-1)
+        L_norm = xi.new_zeros(())
         if self.lambda_norm > 0 and self.target_norm > 0:
-            L_norm = torch.clamp(self.target_norm - anc_norms, min=0.0).pow(2).mean()
-        else:
-            L_norm = torch.tensor(0.0, device=device)
+            deviation = self.target_norm - anc_norms
+            if self.norm_mode == "floor":
+                deviation = deviation.clamp_min(0)
+            L_norm = deviation.square().mean()
+            
+        L_cosine = x_anc.new_zeros(())
+        if self.lambda_cosine > 0 and K > 1:
+            anc_dir = F.normalize(x_anc, dim=-1)
+            cos_sim = anc_dir @ anc_dir.T
+            iu = torch.triu_indices(K, K, offset=1, device=device)
+            pairwise_cos = cos_sim[iu[0], iu[1]]
+            L_cosine = pairwise_cos.clamp_min(0.0).mean()
 
-        loss = (
-            L_img_in_class
-            + self.lambda_cap_in_class * L_cap_in_class
-            + self.lambda_img_in_cap   * L_img_in_cap
-            + self.lambda_norm         * L_norm
-        )
+        loss = L_img_in_class + self.lambda_norm * L_norm + self.lambda_cosine * L_cosine
 
-        stats = {
-            "loss_img_in_cls": L_img_in_class.detach(),
-            "loss_cap_in_cls": L_cap_in_class.detach(),
-            "loss_img_in_cap": L_img_in_cap.detach(),
-            "loss_norm":       L_norm.detach(),
-            "inside_img":      inside_img.detach(),
-            "cone_acc":        cone_acc.detach(),
-            "mean_psi_anc":    psi_anc.mean().detach(),
-            "mean_xi_img_anc": xi_ia_pos.mean().detach(),
-            "mean_anc_norm":   anc_norms.mean().detach(),
-            **stats_extra,
-        }
+        # These geometry diagnostics do not contribute gradients to the loss.
+        with torch.no_grad():
+            directions = F.normalize(x_anc, dim=-1)
+            iu = torch.triu_indices(K, K, offset=1, device=device)
+            cos_eval = (directions @ directions.T)[iu[0], iu[1]] if K > 1 else x_anc.new_zeros(1)
+            angles = torch.arccos(cos_eval.clamp(-1 + 1e-6, 1 - 1e-6))
+            
+            stats = {
+                "loss_img_in_cls": L_img_in_class.detach(),
+                "loss_pos": L_pos.detach(),
+                "loss_neg": L_neg.detach(),
+                "loss_norm": L_norm.detach(),
+                "loss_cosine": L_cosine.detach(),
+                "mean_anc_cos_sim": cos_eval.mean(),
+                "max_anc_cos_sim": cos_eval.max(),
+                "inside_img": (xi_pos < psi_pos).float().mean(),
+                "cone_acc": (xi.argmin(1) == labels).float().mean(),
+                "xi_sat": (xi > math.pi - 5e-3).float().mean(),
+                "mean_psi_anc": psi_anc.mean(),
+                "psi_min_deg": torch.rad2deg(psi_anc.min()),
+                "psi_max_deg": torch.rad2deg(psi_anc.max()),
+                "sep_min_deg": torch.rad2deg(angles.min()) if K > 1 else x_anc.new_zeros(()),
+                "sep_mean_deg": torch.rad2deg(angles.mean()) if K > 1 else x_anc.new_zeros(()),
+                "sep_overlap": ((angles < psi_anc[iu[0]] + psi_anc[iu[1]]).float().mean() 
+                                if K > 1 else x_anc.new_zeros(())),
+                "mean_xi_img_anc": xi_pos.mean(),
+                "mean_anc_norm": anc_norms.mean(),
+            }
         return loss, stats
 
 
 def predict_class(x_img: torch.Tensor, x_anc: torch.Tensor, curv: float = 1.0) -> torch.Tensor:
     """Image-only inference: pick the anchor with smallest exterior angle."""
-    xi = _pairwise_xi(x_anc, x_img, curv=curv).T   # (B, K)
-    return xi.argmin(dim=1)
+    return _pairwise_xi(x_anc, x_img, curv=curv).T.argmin(dim=1)

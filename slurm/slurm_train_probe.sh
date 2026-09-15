@@ -1,19 +1,16 @@
 #!/bin/bash
-# ============================================================================
-# CINECA Leonardo — Train the LINEAR PROBE on cached frozen-CLIP features
-# (Fase B). No CLIP here: it loads $WORK/hyp_fine_tuning/clip_features and trains a single
-# nn.Linear with class-balanced cross-entropy, then prints overall / balanced /
-# per-class accuracy + confusion — same metrics as the fine-tuned evals.
+# CINECA Leonardo — train a readout on cached features.
 #
-# Requires the cache from slurm_extract_features.sh to exist first.
+# SOURCE selects clip_features_SOURCE. HEAD=linear fits a linear classifier;
+# HEAD=cone learns exterior-angle anchors and temperature on projection features.
+# The readout uses weighted CE and reports cached validation metrics, not
+# harness test results. No image encoder is run during training.
 #
-# It's tiny (operates on 768-d vectors), so 1 GPU + 30 min is plenty; you can
-# re-run with different --lr / --epochs / --no_class_weight cheaply.
-#
-# Submit:  sbatch slurm/slurm_train_probe.sh
-# ============================================================================
-#SBATCH --account=EUHPC_D26_009B
+# Submit: sbatch --export=ALL,SOURCE=projection,HEAD=linear slurm/slurm_train_probe.sh
+
+#SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
+#SBATCH --qos=boost_qos_lprod
 #SBATCH --job-name=train_probe
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -30,17 +27,24 @@ module load cuda/12.6
 source $WORK/hyp_fine_tuning/bin/activate
 
 export TOKENIZERS_PARALLELISM=false
+export IAB_EXCLUDE_GENERATORS=dalle3
 
-cd $WORK/hyp_fine_tuning/hyperbolic_CLIP
+REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
+SOURCE=${SOURCE:-frozen}
+HEAD=${HEAD:-linear}
+FEAT=$WORK/hyp_fine_tuning/clip_features_${SOURCE}
+OUT=$WORK/hyp_fine_tuning/checkpoints
 
-mkdir -p $WORK/hyp_fine_tuning/checkpoints
+mkdir -p $OUT
+cd $REPO
 
 python train_linear_probe.py \
-    --features_dir $WORK/hyp_fine_tuning/clip_features \
-    --epochs       8 \
+    --features_dir $FEAT \
+    --head         $HEAD \
+    --epochs       30 \
     --lr           1e-3 \
     --weight_decay 1e-4 \
     --batch_size   4096 \
-    --output       $WORK/hyp_fine_tuning/checkpoints/linear_probe.pt
+    --output       $OUT/${HEAD}_probe_${SOURCE}.pt
 
-echo "Done: $WORK/hyp_fine_tuning/checkpoints/linear_probe.pt"
+echo "Done: $OUT/${HEAD}_probe_${SOURCE}.pt"

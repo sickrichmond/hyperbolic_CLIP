@@ -1,23 +1,9 @@
-"""
-Per-semantic-class captioning prompts for re-captioning the IAB **real** images
-with a vision-language model (Qwen3.5-9B via Ollama).
+"""Semantic-specific instructions for caption_real_images.py.
 
-Rationale
----------
-The original ImageAttributionBench captions (Qwen-VL-Chat) are single, generic
-sentences of ~20-50 words. Synthetic images generated from such thin prompts are
-easy to tell apart from real ones, which makes the attribution task trivial.
-
-To make the task harder we re-caption every real image with a *dense* prompt
-(40-80 words, diffusion-prompt style) that could be used to regenerate a
-visually similar image with FLUX / Stable Diffusion. Each semantic class gets a
-prompt tailored to what matters for that domain (faces → facial attributes,
-scenes → architecture/layout, objects → the dominant subject, ...).
-
-Editing
--------
-These strings are meant to be iterated on. Tune the attribute checklists or the
-word budget per class; `caption_real_images.py` only needs `PROMPT_BY_SEMANTIC`.
+PROMPT_BY_SEMANTIC selects prompts for faces, animals, scenes, COCO and
+ImageNet subjects. Each requests a 40–80-word descriptive paragraph. The face
+prompt carries its own output rules; other prompts share _OUTPUT_RULES.
+These strings are model inputs, not guarantees about generated captions.
 """
 
 # ── Shared output contract ────────────────────────────────────────────────────

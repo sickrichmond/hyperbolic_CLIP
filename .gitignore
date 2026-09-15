@@ -41,3 +41,9 @@ external/
 *.npz
 *.png
 *.pdf
+
+# experimental results
+*.csv
+
+# codex files
+AGENTS.md

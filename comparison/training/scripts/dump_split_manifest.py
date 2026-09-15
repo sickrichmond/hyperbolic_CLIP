@@ -1,0 +1,77 @@
+"""Export the comparison loader's train, validation and test paths to JSON.
+
+Paths are relative to root_dir. Reuse the same dataset contents, active class
+map, cap, seed and semantic-split options when training/evaluating from this
+manifest; matching a seed alone does not ensure matching rows.
+
+Run: python -m comparison.training.scripts.dump_split_manifest \\
+    --root_dir DATASET --out MANIFEST.json
+"""
+import os
+import json
+import argparse
+
+from comparison.dataset.ImageAttributionDataset.dataloader import get_dataloader
+from comparison.dataset.ImageAttributionDataset.semantic_split import get_semantic
+
+
+def rel_paths(loader, root_dir):
+    subset = loader.dataset            # torch Subset
+    full = subset.dataset              # the (deep-copied) full dataset
+    return sorted(os.path.relpath(full.samples[i][0], root_dir) for i in subset.indices)
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument('--root_dir', required=True)
+    p.add_argument('--out', required=True)
+    p.add_argument('--model_name', default='resnet50',
+                   help="Dataset adapter used to enumerate the split. resnet50 avoids "
+                        "a CLIP download; match enumeration settings when reusing paths.")
+    p.add_argument('--num_images_per_semantic_per_class', '-n', type=int, default=2000)
+    p.add_argument('--seed', type=int, default=42)
+    p.add_argument('--use_semantic_split', action='store_true', default=False)
+    p.add_argument('--task_id', type=int, default=1)
+    args = p.parse_args()
+
+    train_semantics = test_semantics = None
+    if args.use_semantic_split:
+        train_semantics, test_semantics = get_semantic(args.task_id)
+
+    train_loader, val_loader, test_loader = get_dataloader(
+        root_dir=args.root_dir,
+        model_name=args.model_name,
+        num_images_per_semantic_per_class=args.num_images_per_semantic_per_class,
+        batch_size=1,
+        degraded=0,
+        config={'model_name': args.model_name},
+        num_workers=0,
+        seed=args.seed,
+        use_semantic_split=args.use_semantic_split,
+        train_semantics=train_semantics,
+        test_semantics=test_semantics,
+    )
+
+    manifest = {
+        'root_dir': args.root_dir,
+        'seed': args.seed,
+        'use_semantic_split': args.use_semantic_split,
+        'task_id': args.task_id if args.use_semantic_split else None,
+        'num_images_per_semantic_per_class': args.num_images_per_semantic_per_class,
+        # all paths RELATIVE to root_dir.
+        #   'train' — allowlist: train ours on exactly these (strict data parity)
+        #   'val'/'test' — the baselines' eval images; keep ours' training off them
+        'train': rel_paths(train_loader, args.root_dir),
+        'val': rel_paths(val_loader, args.root_dir),
+        'test': rel_paths(test_loader, args.root_dir),
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    with open(args.out, 'w') as f:
+        json.dump(manifest, f)
+    print(f"Wrote manifest → {args.out}")
+    print(f"  train={len(manifest['train'])}  val={len(manifest['val'])}  "
+          f"test={len(manifest['test'])}")
+
+
+if __name__ == '__main__':
+    main()

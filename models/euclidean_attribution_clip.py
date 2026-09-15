@@ -6,28 +6,12 @@ from peft import LoraConfig, get_peft_model
 
 
 class EuclideanAttributionCLIP(nn.Module):
-    """
-    EUCLIDEAN ablation of AttributionCLIP — the baseline used to isolate the
-    contribution of hyperbolic geometry.
+    """CLIP with q/v LoRA in both encoders and a shared spherical MLP head.
 
-    Everything is held identical to models.attribution_clip.AttributionCLIP:
-      - same backbone: CLIP (vision + text) frozen, LoRA on q_proj/v_proj of
-        both encoders (same r / alpha / dropout / target modules);
-      - same projection-head capacity: a shared MLP clip_dim → clip_dim → embed_dim
-        applied to both modalities, with the same small init on the last layer.
-
-    The ONLY differences are the geometry of the embedding space and the matching
-    rule:
-      - AttributionCLIP lifts the head's output onto the Lorentz hyperboloid
-        (exp_map0) and classifies by entailment-cone exterior angle (oxy_angle);
-      - this model L2-normalises the head's output onto the unit sphere and
-        classifies by COSINE SIMILARITY to the (also L2-normalised) text anchors,
-        with a learnable temperature (logit_scale) — i.e. exactly zero-shot CLIP's
-        classification rule, made trainable through LoRA + the projection head.
-
-    Because the backbone, parameter count, anchors, data and training budget are
-    matched, any accuracy gap against AttributionCLIP is attributable to the
-    hyperbolic geometry rather than to extra capacity or data.
+    Normalize CLIP image/text features, apply Linear-GELU-Linear, and normalize
+    the resulting embeddings. The external loss scales their dot products by
+    exp(logit_scale), capped at use time. Backbone weights are frozen; LoRA,
+    projection parameters and logit_scale are trainable.
     """
 
     def __init__(
@@ -62,14 +46,13 @@ class EuclideanAttributionCLIP(nn.Module):
             nn.GELU(),
             nn.Linear(clip_dim, embed_dim),
         )
-        # Same small init as the hyperbolic head, purely to start training from
-        # the same place; on the sphere it only sets the initial pre-norm scale.
+        # init_scale sets the last layer's initial pre-normalization scale.
         with torch.no_grad():
             self.projection[-1].weight.mul_(init_scale)
             if self.projection[-1].bias is not None:
                 self.projection[-1].bias.zero_()
 
-        # Learnable temperature, exactly as in CLIP. Clamped at use time.
+        # Learned log inverse-temperature; its exponential is capped by the loss.
         self.logit_scale = nn.Parameter(torch.tensor(float(logit_scale_init)))
 
     # ── CLIP-space encoding (L2-normalised, in shared CLIP space) ─────────────

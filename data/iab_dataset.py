@@ -3,8 +3,9 @@ from typing import Optional
 
 import torch
 from torch.utils.data import Dataset
-from PIL import Image
 from transformers import CLIPImageProcessor
+
+from data.image_io import open_image_retry
 
 # Mirrors the SEMANTIC_TO_SUPER mapping from IAB's download.py.
 # Flat semantics (COCO, ImageNet-1k) live directly under the generator dir.
@@ -91,7 +92,7 @@ class IABDataset(Dataset):
 
     def __getitem__(self, idx: int) -> dict:
         path, generator = self.samples[idx]
-        img = Image.open(path).convert("RGB")
+        img = open_image_retry(path)
         pixel = self.processor(images=img, return_tensors="pt")["pixel_values"][0]
         return {
             "pixel_values": pixel,

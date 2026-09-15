@@ -1,37 +1,14 @@
-"""
-Per-class explanation gallery for AttributionCLIP.
+"""Build per-class AGCAM or Guided explanation galleries.
 
-Unlike explain_image.py (which explains ONE image against all class cones),
-this script picks one representative image *per class* — a real FLUX sample for
-the FLUX class, a real SD3 sample for the SD3 class, etc. — explains each with
-its own class heatmap, and assembles a side-by-side comparison grid.
+Choose one sorted image per requested class within one semantic directory,
+explain its own-class score, and save heatmaps, overlays, a grid and JSON.
+--image_index chooses the sample; titles compare the prediction with its label.
 
-By default it runs all three explanation methods (AGCAM, Guided and Chefer) and
-lays them out next to the original image, one row per class:
+The CLI re-encodes checkpoint text prompts and uses exterior-angle scoring.
+It does not restore free anchors; its attention forward
+also omits fixed image-radius normalization.
 
-    class │ Original │ AGCAM │ GUIDED │ CHEFER
-
-so you can compare, on the same genuine sample of each generator, what the
-methods highlight and how they differ from the raw image.
-
-Usage
------
-    python -m explanation.explain_gallery \\
-        --checkpoint    $WORK/checkpoints/attribution_all_no_dalle_d16.pt \\
-        --dataset_path  $WORK/iab_dataset \\
-        --semantic      COCO \\
-        --output_dir    $WORK/outputs/gallery/d16          # AGCAM + Chefer
-
-    # Restrict to a single method if you only want one:
-    python -m explanation.explain_gallery ... --methods chefer
-
-Notes
------
-* One semantic is fixed (default COCO) so every class is shown on the same kind
-  of content — a fair comparison. Override with --semantic.
-* --image_index selects which sample per class (default 0 = first file).
-* The model's predicted class is annotated per row; a green label means the
-  prediction matches the row's true class, red means it does not.
+Usage: python -m explanation.explain_gallery --help
 """
 from __future__ import annotations
 
