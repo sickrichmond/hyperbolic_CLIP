@@ -44,13 +44,13 @@ AUG_POLICY=${AUG_POLICY:-corruption}
 if [ "$AUGMENT" = 1 ]; then
     AUG_FLAG="--train_augment --aug_policy $AUG_POLICY"
     if [ "$AUG_POLICY" = omnidfa ]; then
-        CKPT=$OUT/attribution_22cls_cos02_random_omniaug_vitl14.pt
+        CKPT=$OUT/attribution_22cls_cos02_random_adamw_omniaug_vitl14.pt
     else
-        CKPT=$OUT/attribution_22cls_cos02_random_aug_vitl14.pt
+        CKPT=$OUT/attribution_22cls_cos02_random_adamw_aug_vitl14.pt
     fi
 else
     AUG_FLAG=
-    CKPT=$OUT/attribution_22cls_cos02_random_vitl14.pt
+    CKPT=$OUT/attribution_22cls_cos02_random_adamw_vitl14.pt
 fi
 
 mkdir -p $OUT
@@ -91,7 +91,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --diag_plot_dir "$WORK/hyp_fine_tuning/viz/cosine_penalty_${SLURM_JOB_ID}" \
     --log_every 10 \
     --lr_schedule constant \
-    --optimizer sgd \
+    --optimizer adamw \
     --momentum 0.9 \
     --init_depth 3.0 \
     --output          $CKPT
