@@ -21,7 +21,8 @@ from losses.attribution_loss import EntailmentConeLoss
 from training.attribution_args import parse_args, validate_args
 from training.anchors import AnchorState, build_anchors, make_balanced_sampler, calibrate_image_depth
 from training.attribution_diagnostics import (
-    run_validation, report_epoch, report_validation, finalize_training,
+    run_validation, report_epoch, report_validation, collect_plot_embeddings,
+    finalize_training,
 )
 
 
@@ -183,14 +184,18 @@ def main():
     print("Image-only attribution training.")
 
     plot_epoch_snapshot = None
-    diag_state = None
+    plot_loader = None
     snap_every = 0
     if args.diag_plot_dir:
-        from training.poincare import plot_epoch_snapshot, _load_horopca
-        _load_horopca()
+        from training.poincare import plot_epoch_snapshot
         Path(args.diag_plot_dir).mkdir(parents=True, exist_ok=True)
         snap_every = args.snapshot_every
-        print(f"Per-epoch Poincare snapshots → {args.diag_plot_dir}"
+        plot_loader = DataLoader(
+            train_ds, batch_size=args.batch_size, shuffle=False,
+            num_workers=args.num_workers, pin_memory=True,
+        )
+        print(f"Per-epoch Poincare snapshots of all {len(train_ds)} clean training images "
+              f"with a fresh PCA fit → {args.diag_plot_dir}"
               + (f" (+ every {snap_every} steps)" if snap_every else ""))
         if args.plot_all_train:
             print("Final Poincare snapshot will include every clean training image "
@@ -230,11 +235,10 @@ def main():
             t_now0 = anchors.tangent()
             xa0 = (exp_map0(t_now0.float(), curv=args.curv) if t_now0 is not None
                    else core.encode_text(anchors.anchor_ids, anchors.anchor_mask)[0])
-            diag_state = plot_epoch_snapshot(
+            plot_epoch_snapshot(
                 torch.cat(e0).numpy(), l0, xa0, class_names,
                 Path(args.diag_plot_dir) / "step_0000000.png",
-                curv=args.curv, min_radius=args.min_radius,
-                state=None, seed=args.seed, title="init (step 0)")
+                curv=args.curv, title="init (step 0)")
         if not args.anchors_only:
             model.train()
 
@@ -292,12 +296,11 @@ def main():
             if (snap_every and plot_epoch_snapshot is not None
                     and global_step % snap_every == 0):
                 with torch.no_grad():
-                    diag_state = plot_epoch_snapshot(
+                    plot_epoch_snapshot(
                         x_img.detach().float().cpu().numpy(), labels.tolist(),
                         x_anc.detach(), class_names,
                         Path(args.diag_plot_dir) / f"step_{global_step:07d}.png",
-                        curv=args.curv, min_radius=args.min_radius,
-                        state=diag_state, seed=args.seed,
+                        curv=args.curv,
                         title=f"epoch {epoch} · step {global_step}")
 
             if step % 25 == 0 or step == steps_per_epoch:
@@ -320,16 +323,21 @@ def main():
                 x_anc_val, _ = core.encode_text(anchors.anchor_ids, anchors.anchor_mask)
             else:
                 x_anc_val = exp_map0(t_anc_val.float(), curv=args.curv)
-        val = run_validation(core, val_loader, x_anc_val, class_names, device, args.curv,
-                             collect=4000 if plot_epoch_snapshot else 0)
+        val = run_validation(core, val_loader, x_anc_val, class_names, device, args.curv)
         report_validation(val)
 
-        if plot_epoch_snapshot is not None:
-            diag_state = plot_epoch_snapshot(
-                val["emb"], val["emb_labels"], x_anc_val, class_names,
+        if plot_epoch_snapshot is not None and plot_loader is not None:
+            was_augment, train_ds.train_augment = train_ds.train_augment, False
+            try:
+                plot_emb, plot_labels = collect_plot_embeddings(
+                    model, plot_loader, name_to_idx, device,
+                )
+            finally:
+                train_ds.train_augment = was_augment
+            plot_epoch_snapshot(
+                plot_emb, plot_labels, x_anc_val, class_names,
                 Path(args.diag_plot_dir) / f"epoch_{epoch:02d}.png",
-                curv=args.curv, min_radius=args.min_radius,
-                state=diag_state, seed=args.seed,
+                curv=args.curv,
                 title=f"epoch {epoch}")
 
         if val["balanced_acc"] > best_balanced:

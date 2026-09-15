@@ -112,11 +112,9 @@ def parse_args(argv=None):
                    help="Write instantaneous statistics every N steps and at step 1 (0 "
                         "disables); requires --diag_plot_dir.")
     p.add_argument("--snapshot_every", type=int,   default=0,
-                   help="Plot the current training batch every N steps (0 disables); fit the "
-                        "shared projection before training.")
+                   help="Plot the current training batch every N steps (0 disables).")
     p.add_argument("--diag_plot_dir",  type=str,   default=None,
-                   help="Directory for epoch validation snapshots; requires HoroPCA. See "
-                        "training/poincare.py.")
+                   help="Directory for fresh per-epoch PCA plots of all clean training images.")
     p.add_argument("--plot_all_train", action="store_true", default=False,
                    help="Plot all clean training rows from the selected checkpoint in "
                         "train_all_final.png; adds one full data pass.")

@@ -2,7 +2,7 @@
 
 Run python -m training.poincare --help for dataset and checkpoint options.
 HoroPCA is loaded from HOROPCA_DIR, external/HoroPCA, or the WORK directory.
-Training uses plot_epoch_snapshot with a shared projection across frames."""
+Training uses plot_epoch_snapshot with a fresh all-image PCA per epoch."""
 import argparse
 import os
 import sys
@@ -127,6 +127,21 @@ def run_horopca_2d(fit_pts: np.ndarray, project_pts: np.ndarray,
         return pca.map_to_ball(X_all).cpu().numpy(), pca
 
 
+def run_pca_2d(fit_pts: np.ndarray, project_pts: np.ndarray) -> np.ndarray:
+    """Fit ordinary PCA on every fit point and project points through its axes."""
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    fit = torch.as_tensor(fit_pts, dtype=torch.float32, device=device)
+    centered = fit - fit.mean(0)
+    _, basis = torch.linalg.eigh(centered.T @ centered)
+    basis = basis[:, -2:].flip(1)
+    # Eigenvector signs are arbitrary; fix them for reproducible plots.
+    signs = basis.gather(0, basis.abs().argmax(0, keepdim=True)).sign()
+    basis = basis * signs
+    with torch.no_grad():
+        points = torch.as_tensor(project_pts, dtype=torch.float32, device=device)
+        return (points @ basis).cpu().numpy()
+
+
 def _poincare_module():
     """Import HoroPCA's Poincaré helpers (ensures the repo is on sys.path)."""
     _load_horopca()  # idempotent; only needed for its sys.path side effect
@@ -190,13 +205,8 @@ def _class_colors(classes):
 
 
 def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0,
-                       psi=None, origin_2d=None, title=None):
-    """Draw images and anchors in a unit-disk projection.
-
-    zoom=0 frames the data automatically. Optional psi values are the original
-    half-apertures in radians; origin_2d locates the projected model origin.
-    Shading uses straight Euclidean wedges from each anchor, oriented away from
-    that origin. These are approximate overlays, not projected cone boundaries."""
+                       origin_2d=None, title=None, projection="HoroPCA"):
+    """Draw images and anchors in a unit-disk projection without cone overlays."""
     _, ax = plt.subplots(figsize=(11, 11))
     ax.add_patch(Circle((0, 0), 1.0, fill=False, color="black", linewidth=1.2))
 
@@ -205,26 +215,6 @@ def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0,
 
     colors = _class_colors(classes)
     many_points = len(imgs_2d) > 10_000
-
-    if psi is not None:
-        # ponytail: straight wedges approximate geodesics near the disk center;
-        # use geodesic contours if accurate boundary overlays are required.
-        o = np.zeros(2) if origin_2d is None else np.asarray(origin_2d).reshape(2)
-        L = 3.0 * lim
-        for i, c in enumerate(classes):
-            radial = ancs_2d[i] - o
-            if not np.any(radial):
-                continue
-            th = np.arctan2(radial[1], radial[0])
-            edge = [ancs_2d[i] + L * np.array([np.cos(th + sgn * psi[i]),
-                                               np.sin(th + sgn * psi[i])])
-                    for sgn in (+1.0, -1.0)]
-            ax.fill([ancs_2d[i, 0], edge[0][0], edge[1][0]],
-                    [ancs_2d[i, 1], edge[0][1], edge[1][1]],
-                    color=colors[c], alpha=0.08, lw=0, zorder=1)
-            for e in edge:
-                ax.plot([ancs_2d[i, 0], e[0]], [ancs_2d[i, 1], e[1]],
-                        color=colors[c], lw=0.8, alpha=0.55, zorder=2)
 
     for c in classes:
         m = np.array([g == c for g in gt])
@@ -249,11 +239,9 @@ def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0,
     ax.set_aspect("equal")
     ax.set_xticks([]); ax.set_yticks([])
     zoom_note = "" if lim >= 0.98 else f"  —  zoomed to max radius {max_r:.2f} of unit disk"
-    head = "Poincaré disk projection (Lorentz → Poincaré ball → 2-D HoroPCA)"
+    head = f"Poincaré disk projection (Lorentz → Poincaré ball → 2-D {projection})"
     if title:
         head = f"{head}  —  {title}"
-    if psi is not None:
-        head += f"\ncones at the true 128-d ψ: {np.degrees(psi).min():.1f}°–{np.degrees(psi).max():.1f}°"
     ax.set_title(head + zoom_note)
     ax.legend(loc="lower right", fontsize=8, framealpha=0.85)
     plt.tight_layout()
@@ -263,41 +251,22 @@ def plot_poincare_disk(imgs_2d, ancs_2d, gt, classes, out_path, zoom=0.0,
 
 
 def plot_epoch_snapshot(x_img, labels, x_anc, class_names, out_png, curv=1.0,
-                        min_radius=0.1, state=None, seed=42, max_points=1500,
                         title=None):
-    """Project all supplied images and anchors, returning reusable (pca, mu) state.
-
-    Inputs are Lorentz spatial coordinates and integer class labels. Fit and
-    center on at most max_points images; project every row. Reusing state keeps
-    consecutive frames in the same coordinates. Half-apertures are derived from
-    the high-dimensional anchors."""
+    """Fit fresh PCA axes on all supplied images and draw their Poincaré projection."""
     x_anc_c = x_anc.detach().float().cpu()
-    psi = half_aperture(x_anc_c, curv=curv, min_radius=min_radius).numpy()
 
     p_imgs = lorentz_to_poincare(np.asarray(x_img), curv=curv)
     p_ancs = lorentz_to_poincare(x_anc_c.numpy(), curv=curv)
     p_orig = lorentz_to_poincare(np.zeros((1, p_imgs.shape[1])), curv=curv)
 
-    rng = np.random.default_rng(seed)
-    fit_idx = rng.choice(len(p_imgs), size=min(max_points, len(p_imgs)), replace=False)
-
-    pca, mu = state if state is not None else (None, None)
-    if mu is None:
-        mu = poincare_frechet_mean(p_imgs[fit_idx])
-    p_imgs, p_ancs, p_orig = (center_poincare(a, mu) for a in (p_imgs, p_ancs, p_orig))
-
-    coords, pca = run_horopca_2d(
-        np.concatenate([p_imgs[fit_idx], p_ancs], axis=0),
-        np.concatenate([p_imgs, p_ancs, p_orig], axis=0),
-        pca=pca,
-    )
+    coords = run_pca_2d(p_imgs, np.concatenate([p_imgs, p_ancs, p_orig], axis=0))
     n_i, n_a = len(p_imgs), len(p_ancs)
     imgs_2d, ancs_2d, orig_2d = coords[:n_i], coords[n_i:n_i + n_a], coords[n_i + n_a]
 
     plot_poincare_disk(imgs_2d, ancs_2d, [class_names[i] for i in labels],
                        class_names, out_png,
-                       psi=psi, origin_2d=orig_2d, title=title)
-    return pca, mu
+                       origin_2d=orig_2d, title=title,
+                       projection="PCA fitted on all plotted images")
 
 
 def compute_umap_3d(x_imgs: np.ndarray) -> np.ndarray:
