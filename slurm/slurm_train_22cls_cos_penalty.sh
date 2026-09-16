@@ -113,7 +113,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --split_manifest  $MANIFEST \
     --diag_plot_dir "$WORK/hyp_fine_tuning/viz/cosine_penalty_${SLURM_JOB_ID}" \
     --log_every 10 \
-    --lr_schedule constant \
+    --lr_schedule cosine \
     --optimizer "$OPTIMIZER" \
     --momentum 0.9 \
     --init_depth 3.0 \
