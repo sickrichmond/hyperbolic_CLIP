@@ -6,6 +6,8 @@
 #
 # Submit: sbatch slurm/slurm_train_22cls_cos_penalty.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_22cls_cos_penalty.sh
+#         sbatch --export=ALL,OPTIMIZER=sgd,LAMBDA_COSINE=0.5,ANCHOR_INIT=random slurm/slurm_train_22cls_cos_penalty.sh
+# Defaults: OPTIMIZER=adamw, LAMBDA_COSINE=0.2, ANCHOR_INIT=random.
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -41,17 +43,38 @@ MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 # Validation is clean; report the augmentation policy with robustness results.
 AUGMENT=${AUGMENT:-0}
 AUG_POLICY=${AUG_POLICY:-corruption}
+OPTIMIZER=${OPTIMIZER:-adamw}
+LAMBDA_COSINE=${LAMBDA_COSINE:-0.2}
+ANCHOR_INIT=${ANCHOR_INIT:-random}
+
+case "$OPTIMIZER" in
+    adamw|sgd) ;;
+    *) echo "ERROR: OPTIMIZER must be adamw or sgd (got: $OPTIMIZER)" >&2; exit 2 ;;
+esac
+case "$ANCHOR_INIT" in
+    text|image_centroid|text_free|random) ;;
+    *) echo "ERROR: ANCHOR_INIT must be text, image_centroid, text_free, or random (got: $ANCHOR_INIT)" >&2; exit 2 ;;
+esac
+if [[ ! "$LAMBDA_COSINE" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
+    echo "ERROR: LAMBDA_COSINE must be a non-negative number (got: $LAMBDA_COSINE)" >&2
+    exit 2
+fi
+
+LAMBDA_TAG=${LAMBDA_COSINE//./p}
+RUN_TAG="cos${LAMBDA_TAG}_${ANCHOR_INIT}_${OPTIMIZER}"
 if [ "$AUGMENT" = 1 ]; then
     AUG_FLAG="--train_augment --aug_policy $AUG_POLICY"
     if [ "$AUG_POLICY" = omnidfa ]; then
-        CKPT=$OUT/attribution_22cls_cos02_random_adamw_omniaug_vitl14.pt
+        CKPT=$OUT/attribution_22cls_${RUN_TAG}_omniaug_vitl14.pt
     else
-        CKPT=$OUT/attribution_22cls_cos02_random_adamw_aug_vitl14.pt
+        CKPT=$OUT/attribution_22cls_${RUN_TAG}_aug_vitl14.pt
     fi
 else
     AUG_FLAG=
-    CKPT=$OUT/attribution_22cls_cos02_random_adamw_vitl14.pt
+    CKPT=$OUT/attribution_22cls_${RUN_TAG}_vitl14.pt
 fi
+
+echo "Training with optimizer=$OPTIMIZER, lambda_cosine=$LAMBDA_COSINE, anchor_init=$ANCHOR_INIT"
 
 mkdir -p $OUT
 cd $REPO
@@ -68,7 +91,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
                       ideogram infinity janus-pro kling mid-5.2 mid-6.0 \
     --semantics       COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
     --clip_name       openai/clip-vit-large-patch14 \
-    --anchor_init random \
+    --anchor_init "$ANCHOR_INIT" \
     --lora_target 'vision_model\.encoder\.layers\.[0-9]+\.self_attn\.(q_proj|v_proj)' \
     --lora_r          16 \
     --lora_alpha      32 \
@@ -79,7 +102,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --lambda_neg      1.0 \
     --lambda_norm     0.5 \
     --target_norm     4.0 \
-    --lambda_cosine   0.2 \
+    --lambda_cosine   "$LAMBDA_COSINE" \
     --no_captions \
     $AUG_FLAG \
     --batch_size      256 \
@@ -91,7 +114,7 @@ CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
     --diag_plot_dir "$WORK/hyp_fine_tuning/viz/cosine_penalty_${SLURM_JOB_ID}" \
     --log_every 10 \
     --lr_schedule constant \
-    --optimizer adamw \
+    --optimizer "$OPTIMIZER" \
     --momentum 0.9 \
     --init_depth 3.0 \
     --output          $CKPT
