@@ -83,7 +83,10 @@ if [ ! -f "$MANIFEST" ]; then
     echo "ERROR: 22-class manifest not found at $MANIFEST"; exit 1
 fi
 
-CUDA_VISIBLE_DEVICES=0,1 python train_attribution.py \
+echo "Node: $(hostname)"
+echo "Slurm GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
+
+python train_attribution.py \
     --dataset_path    $DATA \
     --captions_dir    $CAPS \
     --generators      real 4o CogView3_PLUS FLUX KANDINSKY PIXART PLAYGROUND_2_5 \
