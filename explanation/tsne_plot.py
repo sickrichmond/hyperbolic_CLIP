@@ -30,6 +30,7 @@ def parse_args():
     p.add_argument("--batch_size",    type=int,   default=128)
     p.add_argument("--num_workers",   type=int,   default=4)
     p.add_argument("--output_dir",    required=True)
+    p.add_argument("--output_name",   default="tsne_plot.png")
 
     return p.parse_args()
 
@@ -38,10 +39,12 @@ def plot_tsne(embeddings: np.ndarray, labels: list[str], output_path: Path, seed
     res = TSNE(n_components=2, random_state=seed).fit_transform(embeddings)
     plt.figure(figsize=(12, 10))
     labels_array = np.asarray(labels)
-    for name in dict.fromkeys(labels):
+    names = list(dict.fromkeys(labels))
+    colors = plt.colormaps["hsv"](np.linspace(0, 1, len(names), endpoint=False))
+    for name, color in zip(names, colors):
         mask = labels_array == name
         plt.scatter(res[mask, 0], res[mask, 1], label=name,
-                    s=2, alpha=0.3, rasterized=True)
+                    color=color, s=2, alpha=0.3, rasterized=True)
 
     plt.title(f"t-SNE of Poincaré coordinates ({len(embeddings)} images)")
     plt.xlabel("t-SNE 1")
@@ -99,9 +102,8 @@ def main():
                         num_workers=args.num_workers, pin_memory=True)
     image_embeddings, labels, _ = extract_embeddings(model, loader, device)
     poincare_points = lorentz_to_poincare(image_embeddings, curv)
-    plot_tsne(poincare_points, labels, output_path=out_dir / "tsne_plot.png", seed=args.seed)
+    plot_tsne(poincare_points, labels, output_path=out_dir / args.output_name, seed=args.seed)
 
 
 if __name__ == "__main__":
     main()
-

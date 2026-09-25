@@ -24,6 +24,7 @@ fi
 CKPT=$(realpath "$1")
 CKPT_STEM=${CKPT##*/}
 CKPT_STEM=${CKPT_STEM%.*}
+CKPT_STEM=${CKPT_STEM#attribution_22cls_}
 
 module load python/3.11.7
 module load cuda/12.6
@@ -37,7 +38,7 @@ export HF_DATASETS_OFFLINE=1
 REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
 DATA=$FAST/datasets/iab_dataset
 CAPS=$WORK/hyp_fine_tuning/iab_captions
-OUT=${OUT:-$WORK/hyp_fine_tuning/outputs/tsne/$CKPT_STEM}
+OUT=${OUT:-$WORK/hyp_fine_tuning/outputs/tsne}
 
 cd "$REPO"
 
@@ -47,6 +48,7 @@ python -m explanation.tsne_plot \
     --captions_dir "$CAPS" \
     --batch_size 128 \
     --num_workers 8 \
-    --output_dir "$OUT"
+    --output_dir "$OUT" \
+    --output_name "tsne_plot_$CKPT_STEM.png"
 
-echo "Saved $OUT/tsne_plot.png"
+echo "Saved $OUT/tsne_plot_$CKPT_STEM.png"
