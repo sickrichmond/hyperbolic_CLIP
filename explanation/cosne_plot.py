@@ -1,9 +1,13 @@
 """Exact, tiled CO-SNE plot of non-DALL-E checkpoint image embeddings.
 
-Implements the objective in Guo, Guo & Yu (CVPR 2022), not code copied from
-their unlicensed demonstration repository. Every pair contributes; tiling only
-limits peak memory. The all-image run is O(N^2) *per iteration* and can require
-many Slurm allocations. Resubmit with --resume after a time-limit exit.
+Uses the affinities of Guo, Guo & Yu (CVPR 2022) and their stagewise update:
+Riemannian KL descent, then a separate Euclidean radius correction after 500
+iterations. The paper's mean radius loss and its printed update differ by N;
+we follow the update. No code is copied from the authors' repository
+(yunhuiguo/CO-SNE, commit 796a43b), which has no repository-wide license.
+Every pair contributes; tiling limits peak memory. The all-image run is
+O(N^2) per iteration and may require multiple Slurm allocations. Resume with
+--resume after a time-limit exit.
 """
 
 import argparse
@@ -45,8 +49,8 @@ def parse_args():
     p.add_argument("--gamma", type=float, default=0.1)
     p.add_argument("--lambda-kl", type=float, default=10.0)
     p.add_argument("--lambda-radius", type=float, default=0.01)
-    p.add_argument("--learning-rate", type=float, default=None,
-                   help="Default N / (20 * lambda-kl), scaling the authors' N=100 demo")
+    p.add_argument("--learning-rate", type=float, default=0.1,
+                   help="Common multiplier for the separate KL and radius updates (default: 0.1)")
     return p.parse_args()
 
 
@@ -57,7 +61,7 @@ def _validate_args(args):
         raise ValueError("batch size and row block must be positive; workers nonnegative")
     if args.perplexity <= 1 or args.gamma <= 0 or args.lambda_kl <= 0:
         raise ValueError("perplexity, gamma and lambda-kl must be positive")
-    if args.lambda_radius < 0 or (args.learning_rate is not None and args.learning_rate <= 0):
+    if args.lambda_radius < 0 or args.learning_rate <= 0:
         raise ValueError("lambda-radius must be nonnegative and learning-rate positive")
 
 
@@ -177,14 +181,15 @@ def _exact_step(x, y, beta, log_norm, gamma, lambda_kl, lambda_radius,
 
     if not torch.isfinite(sum_w) or sum_w <= 0:
         raise FloatingPointError("CO-SNE output affinity normalization failed")
-    grad = lambda_kl * (attract - repel / sum_w)
-    radius_loss = torch.zeros_like(sum_w)
+    kl_grad = lambda_kl * (attract - repel / sum_w) * a.square()[:, None] / 4
+    delta = x_sq - y_sq
+    radius_loss = delta.square().mean()
+    radius_grad = torch.zeros_like(y)
     if add_radius:
-        delta = x_sq - y_sq
-        radius_loss = delta.square().mean()
-        grad += lambda_radius * (-4 / n) * delta[:, None] * y
-    # Poincaré Riemannian gradient of the complete scalar objective.
-    grad *= a.square()[:, None] / 4
+        # Equation 14 is a separate Euclidean update, not the gradient of
+        # the mean radius loss reported above (which would contain 1 / N).
+        radius_grad = -4 * lambda_radius * delta[:, None] * y
+    grad = kl_grad + radius_grad
     if not torch.isfinite(grad).all():
         raise FloatingPointError("Non-finite CO-SNE gradient; previous state is preserved")
     updated = y - learning_rate * grad
@@ -193,7 +198,24 @@ def _exact_step(x, y, beta, log_norm, gamma, lambda_kl, lambda_radius,
     if not torch.isfinite(updated).all():
         raise FloatingPointError("Non-finite CO-SNE update; previous state is preserved")
     kl = kl_partial + sum_p * sum_w.log()
-    return updated, float(kl), float(radius_loss)
+    return (updated, float(kl), float(radius_loss),
+            learning_rate * float(torch.linalg.vector_norm(kl_grad)),
+            learning_rate * float(torch.linalg.vector_norm(radius_grad)))
+
+
+def _convergence(completed, kl, radius, kl_norm, radius_norm, best_score,
+                 best_iteration):
+    """Check both update terms after the radius stage has begun."""
+    if completed <= 500 or completed % 50:
+        return best_score, best_iteration, None
+    score = kl + radius
+    if score < best_score:
+        best_score, best_iteration = score, completed
+    if kl_norm <= 1e-7 and radius_norm <= 1e-7:
+        return best_score, best_iteration, "small_update"
+    if completed - best_iteration > 300:
+        return best_score, best_iteration, "no_progress"
+    return best_score, best_iteration, None
 
 
 def _plot(y, labels, path):
@@ -216,14 +238,15 @@ def _plot(y, labels, path):
 
 
 def main():
+    args = parse_args()
+    _validate_args(args)
+
     from torch.utils.data import DataLoader
 
     from data.iab_clip_dataset import IABCLIPDataset
     from models.attribution_clip import AttributionCLIP
     from training.poincare import extract_embeddings, lorentz_to_poincare
 
-    args = parse_args()
-    _validate_args(args)
     stop_requested = False
 
     def request_stop(signum, _frame):
@@ -238,12 +261,16 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = ckpt_path.stem.removeprefix("attribution_22cls_")
     selection = "all" if args.max_per_class is None else f"perclass{args.max_per_class}"
-    prefix = output_dir / f"cosne_plot_{stem}_{selection}_seed{args.seed}"
-    embedding_path = Path(f"{prefix}.embeddings.pt")
+    base_prefix = output_dir / f"cosne_plot_{stem}_{selection}_seed{args.seed}"
+    embedding_path = Path(f"{base_prefix}.embeddings.pt")
+    prefix = Path(f"{base_prefix}.cosne-v2")
     affinity_path = Path(f"{prefix}.affinities.pt")
     state_path = Path(f"{prefix}.state.pt")
     result_path = Path(f"{prefix}.points.pt")
     figure_path = Path(f"{prefix}.png")
+    if (args.resume and not state_path.exists() and not affinity_path.exists()
+            and Path(f"{base_prefix}.state.pt").exists()):
+        raise ValueError("Legacy CO-SNE optimizer state cannot resume as cosne-v2; start a new run")
     if state_path.exists() and not args.resume:
         raise FileExistsError(f"Existing optimizer state: {state_path}; use --resume")
     ckpt_stat = ckpt_path.stat()
@@ -310,8 +337,9 @@ def main():
         raise ValueError("Cached embeddings are not finite points inside the unit ball")
     del ckpt, dataset
 
-    learning_rate = args.learning_rate or n / (20 * args.lambda_kl)
-    settings = {"signature": signature, "perplexity": args.perplexity,
+    learning_rate = args.learning_rate
+    settings = {"algorithm": "cosne-v2", "signature": signature,
+                "perplexity": args.perplexity,
                 "gamma": args.gamma, "lambda_kl": args.lambda_kl,
                 "lambda_radius": args.lambda_radius, "learning_rate": learning_rate,
                 "n": n}
@@ -348,42 +376,61 @@ def main():
 
     if args.resume and state_path.exists():
         saved = torch.load(state_path, map_location="cpu", weights_only=False)
-        if saved["settings"] != settings:
+        if saved.get("settings") != settings:
             raise ValueError("Optimizer checkpoint settings differ from this run")
         y = saved["points"].to(device)
         completed = saved["completed"]
+        best_score = saved["best_score"]
+        best_iteration = saved["best_iteration"]
+        stop_reason = saved["stop_reason"]
         if y.shape != (n, 2) or not 0 <= completed <= 1000:
             raise ValueError("Optimizer checkpoint has an invalid shape or iteration")
+        if not 0 <= best_iteration <= completed or stop_reason not in (
+                None, "small_update", "no_progress", "max_iterations"):
+            raise ValueError("Optimizer checkpoint has invalid convergence state")
     else:
         rng = torch.Generator(device="cpu").manual_seed(args.seed)
         y = (torch.randn((n, 2), generator=rng, dtype=x.dtype) * 0.01).to(device)
         completed = 0
+        best_score, best_iteration, stop_reason = math.inf, 0, None
 
     print(f"CO-SNE: {n} images, device={device}, row_block={args.row_block}, "
           f"learning_rate={learning_rate:g}, starting iteration={completed}", flush=True)
     if n > 100000:
         print(f"Exact mode evaluates {n * (n - 1):,} directed pairs per iteration; "
               "this may need many 24-hour jobs. Re-submit with --resume.", flush=True)
-    for iteration in range(completed, 1000):
+    for iteration in range(completed, 1000 if stop_reason is None else completed):
         started = time.monotonic()
-        y, kl, radius = _exact_step(x, y, beta, log_norm, args.gamma,
-                                    args.lambda_kl, args.lambda_radius,
-                                    learning_rate, args.row_block,
-                                    add_radius=iteration >= 500)
+        y, kl, radius, kl_norm, radius_norm = _exact_step(
+            x, y, beta, log_norm, args.gamma, args.lambda_kl,
+            args.lambda_radius, learning_rate, args.row_block,
+            add_radius=iteration >= 500)
         completed = iteration + 1
+        best_score, best_iteration, stop_reason = _convergence(
+            completed, kl, radius, kl_norm, radius_norm,
+            best_score, best_iteration)
+        if completed == 1000 and stop_reason is None:
+            stop_reason = "max_iterations"
         print(f"iteration {completed}/1000  KL={kl:.6f}  radius={radius:.6f}  "
+              f"KL_update_norm={kl_norm:.6g}  radius_update_norm={radius_norm:.6g}  "
               f"seconds={time.monotonic() - started:.1f}", flush=True)
-        if completed % 10 == 0 or completed == 1000 or stop_requested:
+        if completed % 10 == 0 or stop_reason or stop_requested:
             atomic_torch_save({"settings": settings, "completed": completed,
-                               "points": y.cpu()}, state_path)
+                               "points": y.cpu(), "best_score": best_score,
+                               "best_iteration": best_iteration,
+                               "stop_reason": stop_reason}, state_path)
         if stop_requested:
             print("CO-SNE paused; resubmit with --resume", flush=True)
             raise SystemExit(75)
+        if stop_reason:
+            print(f"CO-SNE stopped: {stop_reason} at iteration {completed}", flush=True)
+            break
 
     labels = [gen for _, gen, _ in manifest]
     coordinates = y.cpu().numpy()
     atomic_torch_save({"settings": settings, "coordinates": y.cpu(),
-                       "manifest": manifest}, result_path)
+                       "manifest": manifest, "completed": completed,
+                       "stop_reason": stop_reason}, result_path)
     _plot(coordinates, labels, figure_path)
     print(f"Saved {figure_path} and {result_path}", flush=True)
 
