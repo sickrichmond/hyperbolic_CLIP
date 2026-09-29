@@ -3,7 +3,8 @@
 Uses the affinities of Guo, Guo & Yu (CVPR 2022) and their stagewise update:
 Riemannian KL descent, then a separate Euclidean radius correction after 500
 iterations. The paper's mean radius loss and its printed update differ by N;
-we follow the update. No code is copied from the authors' repository
+we follow the update. The KL rate scales with dataset size; the radius rate
+does not. No code is copied from the authors' repository
 (yunhuiguo/CO-SNE, commit 796a43b), which has no repository-wide license.
 Every pair contributes; tiling limits peak memory. The all-image run is
 O(N^2) per iteration and may require multiple Slurm allocations. Resume with
@@ -49,8 +50,9 @@ def parse_args():
     p.add_argument("--gamma", type=float, default=0.1)
     p.add_argument("--lambda-kl", type=float, default=10.0)
     p.add_argument("--lambda-radius", type=float, default=0.01)
-    p.add_argument("--learning-rate", type=float, default=0.1,
-                   help="Common multiplier for the separate KL and radius updates (default: 0.1)")
+    p.add_argument("--learning-rate", type=float, default=None,
+                   help="KL learning rate (default: N / (20 * lambda-kl)); "
+                        "lambda-radius sets the separate radius step size")
     return p.parse_args()
 
 
@@ -61,7 +63,7 @@ def _validate_args(args):
         raise ValueError("batch size and row block must be positive; workers nonnegative")
     if args.perplexity <= 1 or args.gamma <= 0 or args.lambda_kl <= 0:
         raise ValueError("perplexity, gamma and lambda-kl must be positive")
-    if args.lambda_radius < 0 or args.learning_rate <= 0:
+    if args.lambda_radius < 0 or (args.learning_rate is not None and args.learning_rate <= 0):
         raise ValueError("lambda-radius must be nonnegative and learning-rate positive")
 
 
@@ -189,10 +191,10 @@ def _exact_step(x, y, beta, log_norm, gamma, lambda_kl, lambda_radius,
         # Equation 14 is a separate Euclidean update, not the gradient of
         # the mean radius loss reported above (which would contain 1 / N).
         radius_grad = -4 * lambda_radius * delta[:, None] * y
-    grad = kl_grad + radius_grad
-    if not torch.isfinite(grad).all():
+    update = learning_rate * kl_grad + radius_grad
+    if not torch.isfinite(update).all():
         raise FloatingPointError("Non-finite CO-SNE gradient; previous state is preserved")
-    updated = y - learning_rate * grad
+    updated = y - update
     lengths = updated.norm(dim=1, keepdim=True)
     updated = updated / (lengths / (1 - 1e-6)).clamp_min(1)
     if not torch.isfinite(updated).all():
@@ -200,7 +202,7 @@ def _exact_step(x, y, beta, log_norm, gamma, lambda_kl, lambda_radius,
     kl = kl_partial + sum_p * sum_w.log()
     return (updated, float(kl), float(radius_loss),
             learning_rate * float(torch.linalg.vector_norm(kl_grad)),
-            learning_rate * float(torch.linalg.vector_norm(radius_grad)))
+            float(torch.linalg.vector_norm(radius_grad)))
 
 
 def _convergence(completed, kl, radius, kl_norm, radius_norm, best_score,
@@ -263,14 +265,15 @@ def main():
     selection = "all" if args.max_per_class is None else f"perclass{args.max_per_class}"
     base_prefix = output_dir / f"cosne_plot_{stem}_{selection}_seed{args.seed}"
     embedding_path = Path(f"{base_prefix}.embeddings.pt")
-    prefix = Path(f"{base_prefix}.cosne-v2")
+    prefix = Path(f"{base_prefix}.cosne-v3")
     affinity_path = Path(f"{prefix}.affinities.pt")
     state_path = Path(f"{prefix}.state.pt")
     result_path = Path(f"{prefix}.points.pt")
     figure_path = Path(f"{prefix}.png")
     if (args.resume and not state_path.exists() and not affinity_path.exists()
-            and Path(f"{base_prefix}.state.pt").exists()):
-        raise ValueError("Legacy CO-SNE optimizer state cannot resume as cosne-v2; start a new run")
+            and any(Path(f"{base_prefix}{suffix}").exists() for suffix in
+                    (".state.pt", ".cosne-v2.state.pt"))):
+        raise ValueError("Older CO-SNE optimizer state cannot resume as cosne-v3; start a new run")
     if state_path.exists() and not args.resume:
         raise FileExistsError(f"Existing optimizer state: {state_path}; use --resume")
     ckpt_stat = ckpt_path.stat()
@@ -337,8 +340,8 @@ def main():
         raise ValueError("Cached embeddings are not finite points inside the unit ball")
     del ckpt, dataset
 
-    learning_rate = args.learning_rate
-    settings = {"algorithm": "cosne-v2", "signature": signature,
+    learning_rate = args.learning_rate or n / (20 * args.lambda_kl)
+    settings = {"algorithm": "cosne-v3", "signature": signature,
                 "perplexity": args.perplexity,
                 "gamma": args.gamma, "lambda_kl": args.lambda_kl,
                 "lambda_radius": args.lambda_radius, "learning_rate": learning_rate,

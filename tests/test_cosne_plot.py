@@ -51,13 +51,13 @@ def test_tiled_step_matches_dense_autograd():
             for add_radius in (False, True):
                 projected, tiled_kl, tiled_radius, kl_norm, radius_norm = _exact_step(
                     x, y, beta, log_norm, gamma, 10, 0.01, rate, block, add_radius)
-                expected = 10 * kl_grad + (0.01 * radius_grad if add_radius else 0)
-                assert torch.allclose((y - projected) / rate, expected,
+                expected = rate * 10 * kl_grad + (0.01 * radius_grad if add_radius else 0)
+                assert torch.allclose(y - projected, expected,
                                       rtol=1e-6, atol=1e-8)
                 assert abs(tiled_kl - kl.detach().item()) < 1e-9
                 assert abs(tiled_radius - radius.detach().item()) < 1e-12
                 assert abs(kl_norm - (rate * 10 * kl_grad).detach().norm().item()) < 1e-8
-                assert abs(radius_norm - ((rate * 0.01 * radius_grad).norm().item()
+                assert abs(radius_norm - ((0.01 * radius_grad).norm().item()
                                           if add_radius else 0)) < 1e-12
                 assert (projected.norm(dim=1) < 1).all()
 
@@ -68,9 +68,9 @@ def test_tiled_step_matches_dense_autograd():
         state = Path(directory) / "state.pt"
         atomic_torch_save({"completed": 1, "points": tiled_y,
                            "best_score": float("inf"), "best_iteration": 0,
-                           "stop_reason": None, "settings": {"algorithm": "cosne-v2"}}, state)
+                           "stop_reason": None, "settings": {"algorithm": "cosne-v3"}}, state)
         restored = torch.load(state, weights_only=True)
-        assert restored["settings"]["algorithm"] == "cosne-v2"
+        assert restored["settings"]["algorithm"] == "cosne-v3"
         resumed, *_ = _exact_step(x, restored["points"], beta, log_norm,
                                   0.1, 10, 0.01, rate, 3, True)
     assert torch.equal(direct, resumed)
@@ -89,14 +89,15 @@ def test_radius_correction_and_convergence():
         d2.fill_diagonal_(torch.inf)
         beta = torch.ones(n, dtype=x.dtype)
         log_norm = torch.logsumexp(-d2, dim=1)
-        updated, _, _, kl_norm, radius_norm = _exact_step(
-            x, y, beta, log_norm, 0.1, 0, 0.01, 1, 2, True)
         expected = y + 4 * 0.01 * (x_radii.square() - y_radii.square())[:, None] * y
-        assert torch.allclose(updated, expected, atol=1e-12)
-        assert updated[0].norm() > y[0].norm()
-        assert updated[1].norm() < y[1].norm()
-        assert torch.equal(updated[2:], y[2:])
-        assert kl_norm == 0 and radius_norm > 0
+        for rate in (0.1, 1, 110):
+            updated, _, _, kl_norm, radius_norm = _exact_step(
+                x, y, beta, log_norm, 0.1, 0, 0.01, rate, 2, True)
+            assert torch.allclose(updated, expected, atol=1e-12)
+            assert updated[0].norm() > y[0].norm()
+            assert updated[1].norm() < y[1].norm()
+            assert torch.equal(updated[2:], y[2:])
+            assert kl_norm == 0 and radius_norm > 0
     assert _convergence(500, 1, 0.1, 0, 0, float("inf"), 0)[2] is None
     best, iteration, stop = _convergence(550, 1, 0.1, 1, 1, float("inf"), 0)
     assert (best, iteration, stop) == (1.1, 550, None)
