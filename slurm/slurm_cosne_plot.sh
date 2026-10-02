@@ -9,9 +9,10 @@
 #SBATCH --job-name=cosne_plot
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=8
 #SBATCH --gpus-per-node=1
-#SBATCH --time=24:00:00
+#SBATCH --mem=64G
+#SBATCH --time=8:00:00
 #SBATCH --signal=USR1@600
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
