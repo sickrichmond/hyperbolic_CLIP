@@ -148,15 +148,13 @@ def test_diagnostics_preserve_coordinates():
         for completed, suffix, stop in ((500, ".iter500", None),
                                         (900, "", "no_progress")):
             prefix = Path(directory) / f"diagnostic{suffix}"
-            plot_scale = 1.0 if completed == 500 else 0.9
             _save_diagnostics(prefix, coordinates, manifest, settings,
-                              completed, input_radii, stop, plot_scale)
+                              completed, input_radii, stop)
             saved = torch.load(f"{prefix}.points.pt", weights_only=True)
             assert torch.equal(saved["coordinates"], original)
             assert saved["manifest"] == manifest and saved["settings"] == settings
             assert saved["completed"] == completed and saved["stop_reason"] == stop
             summary = json.loads(Path(f"{prefix}.radii.json").read_text())
-            assert summary["plot_scale"] == plot_scale
             assert summary["radius_stage_iterations"] == max(0, completed - 500)
             assert summary["input"]["min"] == 0.2
             assert summary["output"]["median"] == 0.5

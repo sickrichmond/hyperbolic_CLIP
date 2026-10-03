@@ -11,8 +11,6 @@ O(N^2) per iteration and may require multiple Slurm allocations. Resume with
 --resume after a time-limit exit.
 Diagnostics save the KL-only layout at iteration 500 and the final layout,
 each with radius summaries and class-highlighted disk panels.
---plot-scale contracts only the displayed coordinates; saved points and radius
-summaries describe the original CO-SNE geometry.
 """
 
 import argparse
@@ -58,9 +56,6 @@ def parse_args():
     p.add_argument("--learning-rate", type=float, default=None,
                    help="KL learning rate (default: N / (20 * lambda-kl)); "
                         "lambda-radius sets the separate radius step size")
-    p.add_argument("--plot-scale", type=float, default=1.0,
-                   help="Display scale in (0, 1], e.g. 0.9 moves points inward in the "
-                        "plots while keeping the unit-circle border fixed")
     return p.parse_args()
 
 
@@ -73,8 +68,6 @@ def _validate_args(args):
         raise ValueError("perplexity, gamma and lambda-kl must be positive")
     if args.lambda_radius < 0 or (args.learning_rate is not None and args.learning_rate <= 0):
         raise ValueError("lambda-radius must be nonnegative and learning-rate positive")
-    if not math.isfinite(args.plot_scale) or not 0 < args.plot_scale <= 1:
-        raise ValueError("plot-scale must be finite and in (0, 1]")
 
 
 def _select_subset(dataset, cap, seed):
@@ -240,21 +233,19 @@ def _radius_summary(radii):
     }
 
 
-def _plot(y, labels, path, completed=None, plot_scale=1.0):
-    display = y * plot_scale
+def _plot(y, labels, path, completed=None):
     fig, ax = plt.subplots(figsize=(12, 12))
     label_array = np.asarray(labels)
     names = list(dict.fromkeys(labels))
     colors = plt.colormaps["hsv"](np.linspace(0, 1, len(names), endpoint=False))
     for name, color in zip(names, colors):
         mask = label_array == name
-        ax.scatter(display[mask, 0], display[mask, 1], label=name, color=color,
+        ax.scatter(y[mask, 0], y[mask, 1], label=name, color=color,
                    s=2, alpha=0.3, rasterized=True)
     ax.add_patch(plt.Circle((0, 0), 1, fill=False, color="black", linewidth=1))
     iteration = "" if completed is None else f"; iteration {completed}"
-    scale_label = "" if plot_scale == 1 else f"\nDisplay scale {plot_scale:g}x; unit-circle border fixed"
     ax.set(xlim=(-1.02, 1.02), ylim=(-1.02, 1.02),
-           title=f"CO-SNE of hyperbolic image embeddings ({len(y)} images{iteration}){scale_label}")
+           title=f"CO-SNE of hyperbolic image embeddings ({len(y)} images{iteration})")
     ax.set_aspect("equal")
     ax.legend(markerscale=3, fontsize=8, ncol=2)
     fig.tight_layout()
@@ -262,8 +253,7 @@ def _plot(y, labels, path, completed=None, plot_scale=1.0):
     plt.close(fig)
 
 
-def _plot_classes(y, labels, path, completed, plot_scale=1.0):
-    display = y * plot_scale
+def _plot_classes(y, labels, path, completed):
     label_array = np.asarray(labels)
     names = list(dict.fromkeys(labels))
     colors = plt.colormaps["hsv"](np.linspace(0, 1, len(names), endpoint=False))
@@ -275,30 +265,28 @@ def _plot_classes(y, labels, path, completed, plot_scale=1.0):
         mask = label_array == name
         ax.add_patch(plt.Circle((0, 0), 1, fill=False, color="0.75",
                                linewidth=0.6, linestyle="--", zorder=0))
-        ax.scatter(display[~mask, 0], display[~mask, 1], color="0.65", s=0.5,
+        ax.scatter(y[~mask, 0], y[~mask, 1], color="0.65", s=0.5,
                    alpha=0.1, rasterized=True, zorder=1)
-        ax.scatter(display[mask, 0], display[mask, 1], color=color, s=2,
+        ax.scatter(y[mask, 0], y[mask, 1], color=color, s=2,
                    alpha=0.65, rasterized=True, zorder=2)
         ax.set(xlim=(-1.02, 1.02), ylim=(-1.02, 1.02),
                xticks=[-1, 0, 1], yticks=[-1, 0, 1],
                title=f"{name} ({int(mask.sum()):,})", aspect="equal")
     for ax in list(axes.flat)[len(names):]:
         ax.set_axis_off()
-    scale_label = "" if plot_scale == 1 else f"; display scale {plot_scale:g}x (border fixed)"
     fig.suptitle(f"CO-SNE class highlights ({len(y):,} images; iteration {completed})\n"
-                 f"Grey points show the other classes{scale_label}")
+                 "Grey points show the other classes")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
 def _save_diagnostics(prefix, y, manifest, settings, completed, input_radii,
-                      stop_reason=None, plot_scale=1.0):
+                      stop_reason=None):
     coordinates = y.detach().cpu().numpy()
     output_radii = np.linalg.norm(coordinates, axis=1)
     summary = {
         "settings": settings, "completed": completed, "stop_reason": stop_reason,
-        "plot_scale": plot_scale,
         "radius_stage_iterations": max(0, completed - 500),
         "input": _radius_summary(input_radii),
         "output": _radius_summary(output_radii),
@@ -315,8 +303,8 @@ def _save_diagnostics(prefix, y, manifest, settings, completed, input_radii,
           f"fraction>=0.999={radii['fraction_ge_0.999']:.1%} "
           f"radius_MAE={summary['radius_mae']:.8f}", flush=True)
     labels = [gen for _, gen, _ in manifest]
-    _plot(coordinates, labels, Path(f"{prefix}.png"), completed, plot_scale)
-    _plot_classes(coordinates, labels, Path(f"{prefix}.classes.png"), completed, plot_scale)
+    _plot(coordinates, labels, Path(f"{prefix}.png"), completed)
+    _plot_classes(coordinates, labels, Path(f"{prefix}.classes.png"), completed)
     print(f"Saved diagnostics: {prefix}.{{points.pt,radii.json,png,classes.png}}", flush=True)
 
 
@@ -484,8 +472,7 @@ def main():
         best_score, best_iteration, stop_reason = math.inf, 0, None
 
     if completed == 500:
-        _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii,
-                          plot_scale=args.plot_scale)
+        _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii)
     elif completed > 500 and not Path(f"{stage1_prefix}.points.pt").exists():
         print(f"Iteration-500 snapshot unavailable: resuming from iteration {completed}. "
               "A new run is needed to capture the KL-only layout.", flush=True)
@@ -516,8 +503,7 @@ def main():
                                "best_iteration": best_iteration,
                                "stop_reason": stop_reason}, state_path)
         if completed == 500:
-            _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii,
-                              plot_scale=args.plot_scale)
+            _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii)
         if stop_requested:
             print("CO-SNE paused; resubmit with --resume", flush=True)
             raise SystemExit(75)
@@ -525,8 +511,7 @@ def main():
             print(f"CO-SNE stopped: {stop_reason} at iteration {completed}", flush=True)
             break
 
-    _save_diagnostics(prefix, y, manifest, settings, completed, input_radii,
-                      stop_reason, args.plot_scale)
+    _save_diagnostics(prefix, y, manifest, settings, completed, input_radii, stop_reason)
 
 
 if __name__ == "__main__":
