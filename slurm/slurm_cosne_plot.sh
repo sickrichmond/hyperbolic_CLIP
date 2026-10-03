@@ -2,6 +2,10 @@
 # CINECA Leonardo. Full: sbatch slurm/slurm_cosne_plot.sh /path/to/checkpoint.pt
 # Subset: sbatch slurm/slurm_cosne_plot.sh /path/to/checkpoint.pt --max-per-class 1000
 # Continue after timeout: repeat the command with --resume.
+# Diagnostics: .iter500.* captures the KL-only stage; .classes.png highlights
+# each class, and .radii.json reports input/output radii for both stages.
+# --resume on a completed v3 run regenerates its final diagnostics.
+# Add --plot-scale 0.9 to display points inside the unit-circle border.
 #
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod

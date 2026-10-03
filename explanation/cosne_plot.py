@@ -9,9 +9,14 @@ does not. No code is copied from the authors' repository
 Every pair contributes; tiling limits peak memory. The all-image run is
 O(N^2) per iteration and may require multiple Slurm allocations. Resume with
 --resume after a time-limit exit.
+Diagnostics save the KL-only layout at iteration 500 and the final layout,
+each with radius summaries and class-highlighted disk panels.
+--plot-scale contracts only the displayed coordinates; saved points and radius
+summaries describe the original CO-SNE geometry.
 """
 
 import argparse
+import json
 import math
 import random
 import re
@@ -53,6 +58,9 @@ def parse_args():
     p.add_argument("--learning-rate", type=float, default=None,
                    help="KL learning rate (default: N / (20 * lambda-kl)); "
                         "lambda-radius sets the separate radius step size")
+    p.add_argument("--plot-scale", type=float, default=1.0,
+                   help="Display scale in (0, 1], e.g. 0.9 moves points inward in the "
+                        "plots while keeping the unit-circle border fixed")
     return p.parse_args()
 
 
@@ -65,6 +73,8 @@ def _validate_args(args):
         raise ValueError("perplexity, gamma and lambda-kl must be positive")
     if args.lambda_radius < 0 or (args.learning_rate is not None and args.learning_rate <= 0):
         raise ValueError("lambda-radius must be nonnegative and learning-rate positive")
+    if not math.isfinite(args.plot_scale) or not 0 < args.plot_scale <= 1:
+        raise ValueError("plot-scale must be finite and in (0, 1]")
 
 
 def _select_subset(dataset, cap, seed):
@@ -220,23 +230,94 @@ def _convergence(completed, kl, radius, kl_norm, radius_norm, best_score,
     return best_score, best_iteration, None
 
 
-def _plot(y, labels, path):
+def _radius_summary(radii):
+    quantiles = np.quantile(radii, [0, 0.01, 0.5, 0.99, 1])
+    return {
+        **dict(zip(("min", "p01", "median", "p99", "max"), map(float, quantiles))),
+        "mean": float(np.mean(radii)),
+        "fraction_ge_0.99": float(np.mean(radii >= 0.99)),
+        "fraction_ge_0.999": float(np.mean(radii >= 0.999)),
+    }
+
+
+def _plot(y, labels, path, completed=None, plot_scale=1.0):
+    display = y * plot_scale
     fig, ax = plt.subplots(figsize=(12, 12))
     label_array = np.asarray(labels)
     names = list(dict.fromkeys(labels))
     colors = plt.colormaps["hsv"](np.linspace(0, 1, len(names), endpoint=False))
     for name, color in zip(names, colors):
         mask = label_array == name
-        ax.scatter(y[mask, 0], y[mask, 1], label=name, color=color,
+        ax.scatter(display[mask, 0], display[mask, 1], label=name, color=color,
                    s=2, alpha=0.3, rasterized=True)
     ax.add_patch(plt.Circle((0, 0), 1, fill=False, color="black", linewidth=1))
+    iteration = "" if completed is None else f"; iteration {completed}"
+    scale_label = "" if plot_scale == 1 else f"\nDisplay scale {plot_scale:g}x; unit-circle border fixed"
     ax.set(xlim=(-1.02, 1.02), ylim=(-1.02, 1.02),
-           title=f"CO-SNE of hyperbolic image embeddings ({len(y)} images)")
+           title=f"CO-SNE of hyperbolic image embeddings ({len(y)} images{iteration}){scale_label}")
     ax.set_aspect("equal")
     ax.legend(markerscale=3, fontsize=8, ncol=2)
     fig.tight_layout()
     fig.savefig(path, dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+
+def _plot_classes(y, labels, path, completed, plot_scale=1.0):
+    display = y * plot_scale
+    label_array = np.asarray(labels)
+    names = list(dict.fromkeys(labels))
+    colors = plt.colormaps["hsv"](np.linspace(0, 1, len(names), endpoint=False))
+    columns = min(4, len(names))
+    rows = math.ceil(len(names) / columns)
+    fig, axes = plt.subplots(rows, columns, figsize=(3.5 * columns, 3.5 * rows),
+                             squeeze=False)
+    for ax, name, color in zip(axes.flat, names, colors):
+        mask = label_array == name
+        ax.add_patch(plt.Circle((0, 0), 1, fill=False, color="0.75",
+                               linewidth=0.6, linestyle="--", zorder=0))
+        ax.scatter(display[~mask, 0], display[~mask, 1], color="0.65", s=0.5,
+                   alpha=0.1, rasterized=True, zorder=1)
+        ax.scatter(display[mask, 0], display[mask, 1], color=color, s=2,
+                   alpha=0.65, rasterized=True, zorder=2)
+        ax.set(xlim=(-1.02, 1.02), ylim=(-1.02, 1.02),
+               xticks=[-1, 0, 1], yticks=[-1, 0, 1],
+               title=f"{name} ({int(mask.sum()):,})", aspect="equal")
+    for ax in list(axes.flat)[len(names):]:
+        ax.set_axis_off()
+    scale_label = "" if plot_scale == 1 else f"; display scale {plot_scale:g}x (border fixed)"
+    fig.suptitle(f"CO-SNE class highlights ({len(y):,} images; iteration {completed})\n"
+                 f"Grey points show the other classes{scale_label}")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def _save_diagnostics(prefix, y, manifest, settings, completed, input_radii,
+                      stop_reason=None, plot_scale=1.0):
+    coordinates = y.detach().cpu().numpy()
+    output_radii = np.linalg.norm(coordinates, axis=1)
+    summary = {
+        "settings": settings, "completed": completed, "stop_reason": stop_reason,
+        "plot_scale": plot_scale,
+        "radius_stage_iterations": max(0, completed - 500),
+        "input": _radius_summary(input_radii),
+        "output": _radius_summary(output_radii),
+        "radius_mae": float(np.mean(np.abs(input_radii - output_radii))),
+        "squared_radius_mse": float(np.mean((input_radii**2 - output_radii**2)**2)),
+    }
+    atomic_torch_save({"settings": settings, "coordinates": y.detach().cpu(),
+                       "manifest": manifest, "completed": completed,
+                       "stop_reason": stop_reason}, Path(f"{prefix}.points.pt"))
+    Path(f"{prefix}.radii.json").write_text(json.dumps(summary, indent=2) + "\n")
+    radii = summary["output"]
+    print(f"Iteration {completed} output radii: min={radii['min']:.8f} "
+          f"median={radii['median']:.8f} max={radii['max']:.8f} "
+          f"fraction>=0.999={radii['fraction_ge_0.999']:.1%} "
+          f"radius_MAE={summary['radius_mae']:.8f}", flush=True)
+    labels = [gen for _, gen, _ in manifest]
+    _plot(coordinates, labels, Path(f"{prefix}.png"), completed, plot_scale)
+    _plot_classes(coordinates, labels, Path(f"{prefix}.classes.png"), completed, plot_scale)
+    print(f"Saved diagnostics: {prefix}.{{points.pt,radii.json,png,classes.png}}", flush=True)
 
 
 def main():
@@ -268,8 +349,7 @@ def main():
     prefix = Path(f"{base_prefix}.cosne-v3")
     affinity_path = Path(f"{prefix}.affinities.pt")
     state_path = Path(f"{prefix}.state.pt")
-    result_path = Path(f"{prefix}.points.pt")
-    figure_path = Path(f"{prefix}.png")
+    stage1_prefix = Path(f"{prefix}.iter500")
     if (args.resume and not state_path.exists() and not affinity_path.exists()
             and any(Path(f"{base_prefix}{suffix}").exists() for suffix in
                     (".state.pt", ".cosne-v2.state.pt"))):
@@ -340,6 +420,12 @@ def main():
         raise ValueError("Cached embeddings are not finite points inside the unit ball")
     del ckpt, dataset
 
+    input_radii = x.norm(dim=1).detach().cpu().numpy()
+    radii = _radius_summary(input_radii)
+    print(f"Input radii: min={radii['min']:.8f} median={radii['median']:.8f} "
+          f"max={radii['max']:.8f} fraction>=0.999={radii['fraction_ge_0.999']:.1%}",
+          flush=True)
+
     learning_rate = args.learning_rate or n / (20 * args.lambda_kl)
     settings = {"algorithm": "cosne-v3", "signature": signature,
                 "perplexity": args.perplexity,
@@ -397,6 +483,13 @@ def main():
         completed = 0
         best_score, best_iteration, stop_reason = math.inf, 0, None
 
+    if completed == 500:
+        _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii,
+                          plot_scale=args.plot_scale)
+    elif completed > 500 and not Path(f"{stage1_prefix}.points.pt").exists():
+        print(f"Iteration-500 snapshot unavailable: resuming from iteration {completed}. "
+              "A new run is needed to capture the KL-only layout.", flush=True)
+
     print(f"CO-SNE: {n} images, device={device}, row_block={args.row_block}, "
           f"learning_rate={learning_rate:g}, starting iteration={completed}", flush=True)
     if n > 100000:
@@ -422,6 +515,9 @@ def main():
                                "points": y.cpu(), "best_score": best_score,
                                "best_iteration": best_iteration,
                                "stop_reason": stop_reason}, state_path)
+        if completed == 500:
+            _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii,
+                              plot_scale=args.plot_scale)
         if stop_requested:
             print("CO-SNE paused; resubmit with --resume", flush=True)
             raise SystemExit(75)
@@ -429,13 +525,8 @@ def main():
             print(f"CO-SNE stopped: {stop_reason} at iteration {completed}", flush=True)
             break
 
-    labels = [gen for _, gen, _ in manifest]
-    coordinates = y.cpu().numpy()
-    atomic_torch_save({"settings": settings, "coordinates": y.cpu(),
-                       "manifest": manifest, "completed": completed,
-                       "stop_reason": stop_reason}, result_path)
-    _plot(coordinates, labels, figure_path)
-    print(f"Saved {figure_path} and {result_path}", flush=True)
+    _save_diagnostics(prefix, y, manifest, settings, completed, input_radii,
+                      stop_reason, args.plot_scale)
 
 
 if __name__ == "__main__":

@@ -1,13 +1,15 @@
 """Small dense checks for the tiled CO-SNE affinities and stagewise update."""
 
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import numpy as np
 import torch
 
 from checkpoint_io import atomic_torch_save
 from explanation.cosne_plot import (
-    _bandwidths, _convergence, _exact_step, _pair_d2, _select_subset,
+    _bandwidths, _convergence, _exact_step, _pair_d2, _save_diagnostics, _select_subset,
 )
 
 
@@ -133,9 +135,44 @@ def test_subset_is_balanced_and_reproducible():
     assert [g for _, g, _ in first.samples].count("other") == 4
 
 
+def test_diagnostics_preserve_coordinates():
+    coordinates = torch.tensor([[0., 0.], [0.3, 0.4], [-0.99995, 0.]],
+                               dtype=torch.float64)
+    original = coordinates.clone()
+    input_radii = np.array([0.2, 0.5, 0.99995])
+    original_radii = input_radii.copy()
+    manifest = [(str(i), name, "COCO") for i, name in
+                enumerate(("real", "other", "third"))]
+    settings = {"algorithm": "cosne-v3", "lambda_radius": 0.01}
+    with TemporaryDirectory() as directory:
+        for completed, suffix, stop in ((500, ".iter500", None),
+                                        (900, "", "no_progress")):
+            prefix = Path(directory) / f"diagnostic{suffix}"
+            plot_scale = 1.0 if completed == 500 else 0.9
+            _save_diagnostics(prefix, coordinates, manifest, settings,
+                              completed, input_radii, stop, plot_scale)
+            saved = torch.load(f"{prefix}.points.pt", weights_only=True)
+            assert torch.equal(saved["coordinates"], original)
+            assert saved["manifest"] == manifest and saved["settings"] == settings
+            assert saved["completed"] == completed and saved["stop_reason"] == stop
+            summary = json.loads(Path(f"{prefix}.radii.json").read_text())
+            assert summary["plot_scale"] == plot_scale
+            assert summary["radius_stage_iterations"] == max(0, completed - 500)
+            assert summary["input"]["min"] == 0.2
+            assert summary["output"]["median"] == 0.5
+            assert summary["output"]["fraction_ge_0.999"] == 1 / 3
+            assert abs(summary["radius_mae"] - 0.2 / 3) < 1e-12
+            assert abs(summary["squared_radius_mse"] - 0.2**4 / 3) < 1e-12
+            for suffix in (".png", ".classes.png"):
+                assert Path(f"{prefix}{suffix}").read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert torch.equal(coordinates, original)
+    assert np.array_equal(input_radii, original_radii)
+
+
 if __name__ == "__main__":
     test_tiled_step_matches_dense_autograd()
     test_radius_correction_and_convergence()
     test_coincident_points_and_boundary_projection()
     test_subset_is_balanced_and_reproducible()
+    test_diagnostics_preserve_coordinates()
     print("CO-SNE checks passed")
