@@ -1,10 +1,12 @@
 """Exact, tiled CO-SNE plot of non-DALL-E checkpoint image embeddings.
 
-Uses the affinities of Guo, Guo & Yu (CVPR 2022) and their stagewise update:
-Riemannian KL descent, then a separate Euclidean radius correction after 500
-iterations. The paper's mean radius loss and its printed update differ by N;
-we follow the update. The KL rate scales with dataset size; the radius rate
-does not. No code is copied from the authors' repository
+Uses the affinities of Guo, Guo & Yu (CVPR 2022), with the optimizer behavior
+from before commit 900585d restored: Riemannian descent of the weighted KL
+and mean squared-radius losses, adding the radius term after 500 iterations.
+Both terms share the learning rate N / (20 * lambda-kl) by default. Runs
+complete 1000 iterations unless interrupted. This differentiates the mean
+radius objective rather than following the paper's separate printed update.
+No code is copied from the authors' repository
 (yunhuiguo/CO-SNE, commit 796a43b), which has no repository-wide license.
 Every pair contributes; tiling limits peak memory. The all-image run is
 O(N^2) per iteration and may require multiple Slurm allocations. Resume with
@@ -54,8 +56,7 @@ def parse_args():
     p.add_argument("--lambda-kl", type=float, default=10.0)
     p.add_argument("--lambda-radius", type=float, default=0.01)
     p.add_argument("--learning-rate", type=float, default=None,
-                   help="KL learning rate (default: N / (20 * lambda-kl)); "
-                        "lambda-radius sets the separate radius step size")
+                   help="Shared KL and radius learning rate (default: N / (20 * lambda-kl))")
     return p.parse_args()
 
 
@@ -186,15 +187,15 @@ def _exact_step(x, y, beta, log_norm, gamma, lambda_kl, lambda_radius,
 
     if not torch.isfinite(sum_w) or sum_w <= 0:
         raise FloatingPointError("CO-SNE output affinity normalization failed")
-    kl_grad = lambda_kl * (attract - repel / sum_w) * a.square()[:, None] / 4
+    kl_grad = lambda_kl * (attract - repel / sum_w)
     delta = x_sq - y_sq
     radius_loss = delta.square().mean()
     radius_grad = torch.zeros_like(y)
     if add_radius:
-        # Equation 14 is a separate Euclidean update, not the gradient of
-        # the mean radius loss reported above (which would contain 1 / N).
-        radius_grad = -4 * lambda_radius * delta[:, None] * y
-    update = learning_rate * kl_grad + radius_grad
+        radius_grad = lambda_radius * (-4 / n) * delta[:, None] * y
+    # Poincare Riemannian gradient of the complete mean-loss objective.
+    metric = a.square()[:, None] / 4
+    update = learning_rate * ((kl_grad + radius_grad) * metric)
     if not torch.isfinite(update).all():
         raise FloatingPointError("Non-finite CO-SNE gradient; previous state is preserved")
     updated = y - update
@@ -204,23 +205,8 @@ def _exact_step(x, y, beta, log_norm, gamma, lambda_kl, lambda_radius,
         raise FloatingPointError("Non-finite CO-SNE update; previous state is preserved")
     kl = kl_partial + sum_p * sum_w.log()
     return (updated, float(kl), float(radius_loss),
-            learning_rate * float(torch.linalg.vector_norm(kl_grad)),
-            float(torch.linalg.vector_norm(radius_grad)))
-
-
-def _convergence(completed, kl, radius, kl_norm, radius_norm, best_score,
-                 best_iteration):
-    """Check both update terms after the radius stage has begun."""
-    if completed <= 500 or completed % 50:
-        return best_score, best_iteration, None
-    score = kl + radius
-    if score < best_score:
-        best_score, best_iteration = score, completed
-    if kl_norm <= 1e-7 and radius_norm <= 1e-7:
-        return best_score, best_iteration, "small_update"
-    if completed - best_iteration > 300:
-        return best_score, best_iteration, "no_progress"
-    return best_score, best_iteration, None
+            learning_rate * float(torch.linalg.vector_norm(kl_grad * metric)),
+            learning_rate * float(torch.linalg.vector_norm(radius_grad * metric)))
 
 
 def _radius_summary(radii):
@@ -334,14 +320,14 @@ def main():
     selection = "all" if args.max_per_class is None else f"perclass{args.max_per_class}"
     base_prefix = output_dir / f"cosne_plot_{stem}_{selection}_seed{args.seed}"
     embedding_path = Path(f"{base_prefix}.embeddings.pt")
-    prefix = Path(f"{base_prefix}.cosne-v3")
+    prefix = Path(f"{base_prefix}.cosne-v4")
     affinity_path = Path(f"{prefix}.affinities.pt")
     state_path = Path(f"{prefix}.state.pt")
     stage1_prefix = Path(f"{prefix}.iter500")
     if (args.resume and not state_path.exists() and not affinity_path.exists()
             and any(Path(f"{base_prefix}{suffix}").exists() for suffix in
-                    (".state.pt", ".cosne-v2.state.pt"))):
-        raise ValueError("Older CO-SNE optimizer state cannot resume as cosne-v3; start a new run")
+                    (".state.pt", ".cosne-v2.state.pt", ".cosne-v3.state.pt"))):
+        raise ValueError("Older CO-SNE optimizer state cannot resume as cosne-v4; start a new run without --resume")
     if state_path.exists() and not args.resume:
         raise FileExistsError(f"Existing optimizer state: {state_path}; use --resume")
     ckpt_stat = ckpt_path.stat()
@@ -415,7 +401,7 @@ def main():
           flush=True)
 
     learning_rate = args.learning_rate or n / (20 * args.lambda_kl)
-    settings = {"algorithm": "cosne-v3", "signature": signature,
+    settings = {"algorithm": "cosne-v4", "signature": signature,
                 "perplexity": args.perplexity,
                 "gamma": args.gamma, "lambda_kl": args.lambda_kl,
                 "lambda_radius": args.lambda_radius, "learning_rate": learning_rate,
@@ -457,19 +443,12 @@ def main():
             raise ValueError("Optimizer checkpoint settings differ from this run")
         y = saved["points"].to(device)
         completed = saved["completed"]
-        best_score = saved["best_score"]
-        best_iteration = saved["best_iteration"]
-        stop_reason = saved["stop_reason"]
         if y.shape != (n, 2) or not 0 <= completed <= 1000:
             raise ValueError("Optimizer checkpoint has an invalid shape or iteration")
-        if not 0 <= best_iteration <= completed or stop_reason not in (
-                None, "small_update", "no_progress", "max_iterations"):
-            raise ValueError("Optimizer checkpoint has invalid convergence state")
     else:
         rng = torch.Generator(device="cpu").manual_seed(args.seed)
         y = (torch.randn((n, 2), generator=rng, dtype=x.dtype) * 0.01).to(device)
         completed = 0
-        best_score, best_iteration, stop_reason = math.inf, 0, None
 
     if completed == 500:
         _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii)
@@ -482,36 +461,27 @@ def main():
     if n > 100000:
         print(f"Exact mode evaluates {n * (n - 1):,} directed pairs per iteration; "
               "this may need many 24-hour jobs. Re-submit with --resume.", flush=True)
-    for iteration in range(completed, 1000 if stop_reason is None else completed):
+    for iteration in range(completed, 1000):
         started = time.monotonic()
         y, kl, radius, kl_norm, radius_norm = _exact_step(
             x, y, beta, log_norm, args.gamma, args.lambda_kl,
             args.lambda_radius, learning_rate, args.row_block,
             add_radius=iteration >= 500)
         completed = iteration + 1
-        best_score, best_iteration, stop_reason = _convergence(
-            completed, kl, radius, kl_norm, radius_norm,
-            best_score, best_iteration)
-        if completed == 1000 and stop_reason is None:
-            stop_reason = "max_iterations"
         print(f"iteration {completed}/1000  KL={kl:.6f}  radius={radius:.6f}  "
               f"KL_update_norm={kl_norm:.6g}  radius_update_norm={radius_norm:.6g}  "
               f"seconds={time.monotonic() - started:.1f}", flush=True)
-        if completed % 10 == 0 or stop_reason or stop_requested:
+        if completed % 10 == 0 or completed == 1000 or stop_requested:
             atomic_torch_save({"settings": settings, "completed": completed,
-                               "points": y.cpu(), "best_score": best_score,
-                               "best_iteration": best_iteration,
-                               "stop_reason": stop_reason}, state_path)
+                               "points": y.cpu()}, state_path)
         if completed == 500:
             _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii)
         if stop_requested:
             print("CO-SNE paused; resubmit with --resume", flush=True)
             raise SystemExit(75)
-        if stop_reason:
-            print(f"CO-SNE stopped: {stop_reason} at iteration {completed}", flush=True)
-            break
 
-    _save_diagnostics(prefix, y, manifest, settings, completed, input_radii, stop_reason)
+    _save_diagnostics(prefix, y, manifest, settings, completed, input_radii,
+                      "max_iterations")
 
 
 if __name__ == "__main__":

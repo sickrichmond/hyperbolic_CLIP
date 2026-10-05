@@ -4,7 +4,8 @@
 # Continue after timeout: repeat the command with --resume.
 # Diagnostics: .iter500.* captures the KL-only stage; .classes.png highlights
 # each class, and .radii.json reports input/output radii for both stages.
-# --resume on a completed v3 run regenerates its final diagnostics.
+# Restored optimizer: .cosne-v4 outputs, 1000 iterations; start without --resume.
+# --resume on a completed v4 run regenerates its final diagnostics.
 #
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
