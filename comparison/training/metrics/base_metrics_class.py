@@ -65,7 +65,7 @@ def calculate_metrics_for_train(label, output, need_softmax=True):
 from sklearn import metrics
 import numpy as np
 import torch
-def calculate_metrics_for_test(label, output, semantic_label, need_softmax=True):  
+def calculate_metrics_for_test(label, output, semantic_label=None, need_softmax=True):
     num_classes = output.size(1) 
     if need_softmax: 
         prob = torch.softmax(output, dim=1)  
@@ -77,7 +77,7 @@ def calculate_metrics_for_test(label, output, semantic_label, need_softmax=True)
     y_true = label.cpu().numpy()  
     y_pred = prob.cpu().numpy()  
     y_pred_label = prediction.cpu().numpy()  
-    semantic_labels_np = semantic_label.cpu().numpy()  
+    semantic_labels_np = semantic_label.cpu().numpy() if semantic_label is not None else None
 
     # One-hot encode true labels  
     y_true_onehot = np.eye(num_classes)[y_true]  
@@ -105,7 +105,7 @@ def calculate_metrics_for_test(label, output, semantic_label, need_softmax=True)
     mean_ap = np.mean(aps) if aps else float('nan')  
 
     # 计算混淆矩阵（以预测标签为准）
-    conf_matrix = metrics.confusion_matrix(y_true, y_pred_label)
+    conf_matrix = metrics.confusion_matrix(y_true, y_pred_label, labels=list(range(num_classes)))
 
     # precision / recall / F1. macro = unweighted mean over classes (each class
     # counts equally); weighted = weighted by per-class support; plus per-class
@@ -117,6 +117,7 @@ def calculate_metrics_for_test(label, output, semantic_label, need_softmax=True)
     precision_pc, recall_pc, f1_pc, support_pc = metrics.precision_recall_fscore_support(
         y_true, y_pred_label, labels=list(range(num_classes)), average=None, zero_division=0)
     extra_metrics = {
+        'balanced_accuracy': float(metrics.balanced_accuracy_score(y_true, y_pred_label)),
         'precision_macro': float(precision_macro),
         'recall_macro': float(recall_macro),
         'f1_macro': float(f1_macro),
@@ -130,7 +131,7 @@ def calculate_metrics_for_test(label, output, semantic_label, need_softmax=True)
     }
 
     # 根据semantic_label分组计算分类准确率
-    unique_semantics = np.unique(semantic_labels_np)
+    unique_semantics = np.unique(semantic_labels_np) if semantic_labels_np is not None else []
     semantic_acc = {}
     for sem in unique_semantics:
         idx = (semantic_labels_np == sem)

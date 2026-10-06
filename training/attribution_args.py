@@ -2,16 +2,19 @@
 import argparse
 
 
-def parse_args(argv=None):
+def parse_args(argv=None, dataset="iab"):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--dataset_path",   required=True)
-    p.add_argument("--captions_dir",   required=True)
-    p.add_argument("--generators",     nargs="+", default=["real", "FLUX"])
-    p.add_argument("--semantics",      nargs="+",
-                   default=["COCO", "cat", "dog", "wild", "FFHQ", "celebahq",
-                            "bedroom", "church", "classroom", "ImageNet-1k"])
-    p.add_argument("--output",         default="attribution_checkpoint_FLUX.pt")
+    if dataset == "iab":
+        p.add_argument("--captions_dir", required=True)
+        p.add_argument("--semantics", nargs="+",
+                       default=["COCO", "cat", "dog", "wild", "FFHQ", "celebahq",
+                                "bedroom", "church", "classroom", "ImageNet-1k"])
+    p.add_argument("--generators", nargs="+",
+                   default=None if dataset == "iabench" else ["real", "FLUX"])
+    p.add_argument("--output", default="attribution_checkpoint_IABench.pt"
+                   if dataset == "iabench" else "attribution_checkpoint_FLUX.pt")
     p.add_argument("--clip_name",      default="openai/clip-vit-base-patch32")
     p.add_argument("--lora_r",         type=int,   default=8)
     p.add_argument("--lora_alpha",     type=int,   default=16)
@@ -39,8 +42,9 @@ def parse_args(argv=None):
     p.add_argument("--lambda_neg",     type=float, default=1.0)
     p.add_argument("--no_captions", action="store_true", default=False,
                    help="Compatibility flag: training is image-only; this has no effect.")
-    p.add_argument("--require_caption", action="store_true", default=False,
-                   help="Restrict training rows to images with captions; captions are not encoded.")
+    if dataset == "iab":
+        p.add_argument("--require_caption", action="store_true", default=False,
+                       help="Restrict training rows to images with captions; captions are not encoded.")
     p.add_argument("--anchor_init",
                    choices=["text", "image_centroid", "text_free", "random"],
                    default="text",
@@ -96,15 +100,18 @@ def parse_args(argv=None):
                         "SGD.")
     p.add_argument("--momentum",       type=float, default=0.9,
                    help="SGD momentum; positive values enable Nesterov. Ignored by AdamW.")
-    p.add_argument("--val_frac",       type=float, default=0.2)
-    p.add_argument("--split_scheme",   choices=["caption", "stratified"], default="caption",
-                   help="Without a manifest: split by caption presence or use a stratified "
-                        "train/val/test partition.")
+    p.add_argument("--val_frac", type=float, default=0.1 if dataset == "iabench" else 0.2)
+    if dataset == "iab":
+        p.add_argument("--split_scheme", choices=["caption", "stratified"], default="caption",
+                       help="Without a manifest: split by caption presence or use a stratified "
+                            "train/val/test partition.")
     p.add_argument("--test_frac",      type=float, default=0.1,
-                   help="Held-out test fraction for --split_scheme stratified.")
+                   help="Held-out test fraction (IAB: for --split_scheme stratified).")
     p.add_argument("--split_manifest", type=str, default=None,
-                   help="JSON train/val path lists from the comparison harness; overrides "
-                        "internal dataset splitting.")
+                   help=("IABench row-index manifest; created beside --output when omitted."
+                         if dataset == "iabench" else
+                         "JSON train/val path lists from the comparison harness; overrides "
+                         "internal dataset splitting."))
     p.add_argument("--seed",           type=int,   default=42)
     p.add_argument("--max_per_class",  type=int,   default=None)
     p.add_argument("--num_workers",    type=int,   default=8)
@@ -118,6 +125,9 @@ def parse_args(argv=None):
     p.add_argument("--plot_all_train", action="store_true", default=False,
                    help="Plot all clean training rows from the selected checkpoint in "
                         "train_all_final.png; adds one full data pass.")
+    if dataset == "iabench":
+        p.set_defaults(captions_dir=None, semantics=[], require_caption=False,
+                       split_scheme="stratified")
     return p.parse_args(argv)
 
 

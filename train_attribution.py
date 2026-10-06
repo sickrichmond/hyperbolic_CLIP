@@ -26,25 +26,8 @@ from training.attribution_diagnostics import (
 )
 
 
-def main():
-    args = parse_args()
-    validate_args(args)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    torch.manual_seed(args.seed)
-    print(f"Seed: {args.seed}")
-
-    class_names, anchor_texts = build_anchors(args.generators, args.anchor_prompts)
-    name_to_idx = {n: i for i, n in enumerate(class_names)}
-    if args.anchor_init == "image_centroid":
-        print(f"Class anchors: image centroids (text-free), {len(class_names)} classes")
-        for i, c in enumerate(class_names):
-            print(f"  [{i}] {c}")
-    else:
-        src = args.anchor_prompts or "default templates"
-        print(f"Class anchors ({args.anchor_init}, from {src}):")
-        for i, (c, t) in enumerate(zip(class_names, anchor_texts)):
-            print(f"  [{i}] {c:14s} → \"{t}\"")
-
+def build_iab_datasets(args):
+    """Keep the original IAB caption and manifest selection behavior."""
     req_cap = args.require_caption
     train_include = val_include = None
     if args.split_manifest:
@@ -90,6 +73,32 @@ def main():
             require_caption=False,
         )
 
+    return train_ds, val_ds
+
+
+def run_training(args, datasets=None, checkpoint_metadata=None):
+    """Shared cone training; supplied datasets are training and validation only."""
+    validate_args(args)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.manual_seed(args.seed)
+    print(f"Seed: {args.seed}")
+
+    class_names, anchor_texts = build_anchors(args.generators, args.anchor_prompts)
+    name_to_idx = {n: i for i, n in enumerate(class_names)}
+    if args.anchor_init == "image_centroid":
+        print(f"Class anchors: image centroids (text-free), {len(class_names)} classes")
+        for i, c in enumerate(class_names):
+            print(f"  [{i}] {c}")
+    else:
+        src = args.anchor_prompts or "default templates"
+        print(f"Class anchors ({args.anchor_init}, from {src}):")
+        for i, (c, t) in enumerate(zip(class_names, anchor_texts)):
+            print(f"  [{i}] {c:14s} → \"{t}\"")
+
+    if datasets is None:
+        datasets = build_iab_datasets(args)
+    train_ds, val_ds = datasets
+
     train_ds.train_augment = args.train_augment
     train_ds.aug_policy = args.aug_policy
     if args.train_augment:
@@ -107,6 +116,9 @@ def main():
         val_ds, batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers, pin_memory=True,
     )
+    steps_per_epoch = len(train_loader)
+    if not steps_per_epoch:
+        raise ValueError("Training split is smaller than --batch_size; lower the batch size")
 
     model = AttributionCLIP(
         clip_name=args.clip_name,
@@ -170,7 +182,6 @@ def main():
           + f"  lr={args.lr}  weight_decay={args.weight_decay}"
           + (f"  |  {len(geometric)} geometric tensors at lr={anchor_lr} wd=0"
              if geometric else ""))
-    steps_per_epoch = len(train_loader)
     if args.lr_schedule == "constant":
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
         print(f"LR schedule: constant at {args.lr} for all "
@@ -392,6 +403,7 @@ def main():
                     "semantics":       args.semantics,
                     "val_balanced":    val["balanced_acc"],
                     "epoch":           epoch,
+                    **(checkpoint_metadata or {}),
                 },
                 out_path,
             )
@@ -406,6 +418,11 @@ def main():
         print(f"Step-level trace: {Path(args.diag_plot_dir) / 'stats.csv'}")
 
     print(f"\nBest balanced val accuracy: {100*best_balanced:.1f}%  ({out_path})")
+
+
+def main():
+    run_training(parse_args())
+
 
 if __name__ == "__main__":
     main()

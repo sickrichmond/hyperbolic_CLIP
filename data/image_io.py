@@ -9,8 +9,8 @@ import time
 from PIL import Image
 
 
-def open_image_retry(path, retries: int = 8, backoff: float = 0.5) -> Image.Image:
-    """Open `path` as RGB, retrying transient filesystem errors.
+def retry_image_read(read_image, retries: int = 8, backoff: float = 0.5) -> Image.Image:
+    """Retry the same image read, including images embedded in Arrow shards.
 
     Worst case waits backoff * (1 + 2 + ... + retries) ≈ 18s at the defaults
     before giving up.
@@ -18,11 +18,16 @@ def open_image_retry(path, retries: int = 8, backoff: float = 0.5) -> Image.Imag
     last_err = None
     for attempt in range(retries):
         try:
-            return Image.open(path).convert("RGB")
+            return read_image()
         except (PermissionError, OSError) as e:
             last_err = e
             time.sleep(backoff * (attempt + 1))
     raise last_err
+
+
+def open_image_retry(path, retries: int = 8, backoff: float = 0.5) -> Image.Image:
+    """Open `path` as RGB with bounded same-path retries."""
+    return retry_image_read(lambda: Image.open(path).convert("RGB"), retries, backoff)
 
 
 if __name__ == "__main__":
