@@ -2,8 +2,9 @@
 # CINECA Leonardo. Full: sbatch slurm/slurm_cosne_plot.sh /path/to/checkpoint.pt
 # Subset: sbatch slurm/slurm_cosne_plot.sh /path/to/checkpoint.pt --max-per-class 1000
 # Continue after timeout: repeat the command with --resume.
-# Diagnostics: .iter500.* captures the KL-only stage; .classes.png highlights
-# each class, and .radii.json reports input/output radii for both stages.
+# Install plotting extras in the active environment: python -m pip install colorcet plotly
+# Diagnostics: .iter500.* captures the KL-only stage; 300-DPI PNG/PDF,
+# class highlights, offline interactive HTML and .radii.json for both stages.
 # Restored optimizer: .cosne-v4 outputs, 1000 iterations; start without --resume.
 # --resume on a completed v4 run regenerates its final diagnostics.
 #

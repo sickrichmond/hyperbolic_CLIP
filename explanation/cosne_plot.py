@@ -12,10 +12,13 @@ Every pair contributes; tiling limits peak memory. The all-image run is
 O(N^2) per iteration and may require multiple Slurm allocations. Resume with
 --resume after a time-limit exit.
 Diagnostics save the KL-only layout at iteration 500 and the final layout,
-each with radius summaries and class-highlighted disk panels.
+each with radius summaries, 300-DPI PNG/PDFs and an offline interactive HTML.
+Replot saved results with --points FILE.points.pt --output_dir DIRECTORY;
+this does not load the model or run the optimizer.
 """
 
 import argparse
+from html import escape
 import json
 import math
 import random
@@ -29,16 +32,29 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import colorcet
 
 from checkpoint_io import atomic_torch_save
+
+# Fixed display order, independent of checkpoint labels and excluded generators.
+# Do not reorder: these positions define the IAB class colors across all views.
+_COLOR_CLASSES = (
+    "real", "4o", "CogView3_PLUS", "FLUX", "KANDINSKY", "PIXART", "PLAYGROUND_2_5",
+    "SD1_5", "SD2_1", "SD3", "SD3_5", "SDXL", "dalle3", "gemini", "grok3",
+    "hidream", "hunyuan", "ideogram", "infinity", "janus-pro", "kling", "mid-5.2", "mid-6.0",
+)
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--checkpoint", required=True)
-    p.add_argument("--dataset_path", required=True)
-    p.add_argument("--captions_dir", required=True)
+    mode = p.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--checkpoint")
+    mode.add_argument("--points", nargs="+", help="Replot saved .points.pt files without optimization")
+    p.add_argument("--dataset_path")
+    p.add_argument("--captions_dir")
     p.add_argument("--output_dir", required=True)
+    p.add_argument("--interactive", action=argparse.BooleanOptionalAction, default=True,
+                   help="Save self-contained interactive HTML (default: enabled; requires plotly)")
     p.add_argument("--semantics", nargs="+", default=[
         "COCO", "cat", "dog", "wild", "FFHQ", "celebahq", "bedroom",
         "church", "classroom", "ImageNet-1k",
@@ -57,7 +73,12 @@ def parse_args():
     p.add_argument("--lambda-radius", type=float, default=0.01)
     p.add_argument("--learning-rate", type=float, default=None,
                    help="Shared KL and radius learning rate (default: N / (20 * lambda-kl))")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.checkpoint and (not args.dataset_path or not args.captions_dir):
+        p.error("--checkpoint requires --dataset_path and --captions_dir")
+    if args.points and args.resume:
+        p.error("--resume applies to optimization; --points only renders saved coordinates")
+    return args
 
 
 def _validate_args(args):
@@ -219,12 +240,25 @@ def _radius_summary(radii):
     }
 
 
+def _class_colors(labels):
+    names = list(_COLOR_CLASSES) + sorted(set(labels) - set(_COLOR_CLASSES))
+    palette = colorcet.palette["glasbey_dark"]
+    if len(names) > len(palette):
+        raise ValueError("Too many classes for the Glasbey palette")
+    colors = dict(zip(names, palette))
+    return {name: colors[name] for name in dict.fromkeys(labels)}
+
+
+def _save_static(fig, path):
+    fig.savefig(path, dpi=300, bbox_inches="tight")
+    fig.savefig(Path(path).with_suffix(".pdf"), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+
+
 def _plot(y, labels, path, completed=None):
-    fig, ax = plt.subplots(figsize=(12, 12))
+    fig, ax = plt.subplots(figsize=(15, 12))
     label_array = np.asarray(labels)
-    names = list(dict.fromkeys(labels))
-    colors = plt.colormaps["hsv"](np.linspace(0, 1, len(names), endpoint=False))
-    for name, color in zip(names, colors):
+    for name, color in _class_colors(labels).items():
         mask = label_array == name
         ax.scatter(y[mask, 0], y[mask, 1], label=name, color=color,
                    s=2, alpha=0.3, rasterized=True)
@@ -233,21 +267,23 @@ def _plot(y, labels, path, completed=None):
     ax.set(xlim=(-1.02, 1.02), ylim=(-1.02, 1.02),
            title=f"CO-SNE of hyperbolic image embeddings ({len(y)} images{iteration})")
     ax.set_aspect("equal")
-    ax.legend(markerscale=3, fontsize=8, ncol=2)
+    legend = ax.legend(bbox_to_anchor=(1.02, 0.5), loc="center left",
+                       markerscale=5, fontsize=9, frameon=False)
+    for marker in legend.findobj(matplotlib.collections.PathCollection):
+        marker.set_alpha(1)
     fig.tight_layout()
-    fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    _save_static(fig, path)
 
 
 def _plot_classes(y, labels, path, completed):
     label_array = np.asarray(labels)
-    names = list(dict.fromkeys(labels))
-    colors = plt.colormaps["hsv"](np.linspace(0, 1, len(names), endpoint=False))
+    colors = _class_colors(labels)
+    names = list(colors)
     columns = min(4, len(names))
     rows = math.ceil(len(names) / columns)
     fig, axes = plt.subplots(rows, columns, figsize=(3.5 * columns, 3.5 * rows),
                              squeeze=False)
-    for ax, name, color in zip(axes.flat, names, colors):
+    for ax, (name, color) in zip(axes.flat, colors.items()):
         mask = label_array == name
         ax.add_patch(plt.Circle((0, 0), 1, fill=False, color="0.75",
                                linewidth=0.6, linestyle="--", zorder=0))
@@ -260,15 +296,75 @@ def _plot_classes(y, labels, path, completed):
                title=f"{name} ({int(mask.sum()):,})", aspect="equal")
     for ax in list(axes.flat)[len(names):]:
         ax.set_axis_off()
-    fig.suptitle(f"CO-SNE class highlights ({len(y):,} images; iteration {completed})\n"
+    iteration = "" if completed is None else f"; iteration {completed}"
+    fig.suptitle(f"CO-SNE class highlights ({len(y):,} images{iteration})\n"
                  "Grey points show the other classes")
     fig.tight_layout(rect=(0, 0, 1, 0.96))
-    fig.savefig(path, dpi=150, bbox_inches="tight")
-    plt.close(fig)
+    _save_static(fig, path)
+
+
+def _interactive_figure(y, manifest, completed=None):
+    import plotly.graph_objects as go
+
+    labels = np.asarray([row[1] for row in manifest])
+    radii = np.linalg.norm(y, axis=1)
+    fig = go.Figure()
+    for name, color in _class_colors(labels).items():
+        indices = np.flatnonzero(labels == name)
+        metadata = [[int(i), escape(str(manifest[i][0])), escape(str(manifest[i][2])),
+                     float(radii[i])] for i in indices]
+        fig.add_trace(go.Scattergl(
+            x=y[indices, 0], y=y[indices, 1], mode="markers", name=name,
+            marker=dict(color=color, size=3, opacity=0.3), customdata=metadata,
+            hovertemplate=(f"<b>{escape(name)}</b><br>Row: %{{customdata[0]}}"
+                           "<br>Image: %{customdata[1]}<br>Semantic: %{customdata[2]}"
+                           "<br>Radius: %{customdata[3]:.8f}"
+                           "<br>x: %{x:.8f}<br>y: %{y:.8f}<extra></extra>")))
+    iteration = "" if completed is None else f"; iteration {completed}"
+    fig.update_layout(
+        title=dict(text=f"CO-SNE ({len(y):,} images{iteration})<br>"
+                        "<sup>Click legend to toggle a class; double-click to isolate. "
+                        "Scroll to zoom; drag to pan.</sup>"),
+        template="plotly_white", height=1000, dragmode="pan", hovermode="closest",
+        margin=dict(l=60, r=240, t=100, b=60),
+        legend=dict(x=1.02, y=0.5, xanchor="left", yanchor="middle", itemsizing="constant"),
+        xaxis=dict(range=[-1.02, 1.02], constrain="domain", title="x", showgrid=False),
+        yaxis=dict(range=[-1.02, 1.02], scaleanchor="x", scaleratio=1,
+                   constrain="domain", title="y", showgrid=False))
+    fig.add_shape(type="circle", x0=-1, y0=-1, x1=1, y1=1,
+                  line=dict(color="black", width=1), layer="below")
+    return fig
+
+
+def _render_plots(prefix, y, manifest, completed=None, interactive=True):
+    labels = [row[1] for row in manifest]
+    _plot(y, labels, Path(f"{prefix}.png"), completed)
+    _plot_classes(y, labels, Path(f"{prefix}.classes.png"), completed)
+    if interactive:
+        _interactive_figure(y, manifest, completed).write_html(
+            str(Path(f"{prefix}.html")), include_plotlyjs=True, full_html=True,
+            config={"scrollZoom": True, "responsive": True, "displaylogo": False})
+    formats = "png,pdf,classes.png,classes.pdf" + (",html" if interactive else "")
+    print(f"Saved plots: {prefix}.{{{formats}}}", flush=True)
+
+
+def _replot(points_paths, output_dir, interactive=True):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for source in map(Path, points_paths):
+        saved = torch.load(source, map_location="cpu", weights_only=False)
+        y = torch.as_tensor(saved["coordinates"]).detach().cpu().numpy()
+        manifest = saved["manifest"]
+        if (y.ndim != 2 or y.shape != (len(manifest), 2) or len(y) == 0
+                or not np.isfinite(y).all() or (np.linalg.norm(y, axis=1) >= 1).any()
+                or any(len(row) != 3 for row in manifest)):
+            raise ValueError(f"Invalid saved CO-SNE coordinates or manifest: {source}")
+        stem = source.name.removesuffix(".points.pt") if source.name.endswith(".points.pt") else source.stem
+        _render_plots(output_dir / stem, y, manifest, saved.get("completed"), interactive)
 
 
 def _save_diagnostics(prefix, y, manifest, settings, completed, input_radii,
-                      stop_reason=None):
+                      stop_reason=None, interactive=True):
     coordinates = y.detach().cpu().numpy()
     output_radii = np.linalg.norm(coordinates, axis=1)
     summary = {
@@ -288,15 +384,18 @@ def _save_diagnostics(prefix, y, manifest, settings, completed, input_radii,
           f"median={radii['median']:.8f} max={radii['max']:.8f} "
           f"fraction>=0.999={radii['fraction_ge_0.999']:.1%} "
           f"radius_MAE={summary['radius_mae']:.8f}", flush=True)
-    labels = [gen for _, gen, _ in manifest]
-    _plot(coordinates, labels, Path(f"{prefix}.png"), completed)
-    _plot_classes(coordinates, labels, Path(f"{prefix}.classes.png"), completed)
-    print(f"Saved diagnostics: {prefix}.{{points.pt,radii.json,png,classes.png}}", flush=True)
+    _render_plots(prefix, coordinates, manifest, completed, interactive)
+    print(f"Saved diagnostics: {prefix}.{{points.pt,radii.json}}", flush=True)
 
 
 def main():
     args = parse_args()
     _validate_args(args)
+    if args.interactive:
+        import plotly.graph_objects  # Fail before a long run if HTML dependencies are missing.
+    if args.points:
+        _replot(args.points, args.output_dir, args.interactive)
+        return
 
     from torch.utils.data import DataLoader
 
@@ -451,7 +550,8 @@ def main():
         completed = 0
 
     if completed == 500:
-        _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii)
+        _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii,
+                          interactive=args.interactive)
     elif completed > 500 and not Path(f"{stage1_prefix}.points.pt").exists():
         print(f"Iteration-500 snapshot unavailable: resuming from iteration {completed}. "
               "A new run is needed to capture the KL-only layout.", flush=True)
@@ -475,13 +575,14 @@ def main():
             atomic_torch_save({"settings": settings, "completed": completed,
                                "points": y.cpu()}, state_path)
         if completed == 500:
-            _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii)
+            _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii,
+                              interactive=args.interactive)
         if stop_requested:
             print("CO-SNE paused; resubmit with --resume", flush=True)
             raise SystemExit(75)
 
     _save_diagnostics(prefix, y, manifest, settings, completed, input_radii,
-                      "max_iterations")
+                      "max_iterations", interactive=args.interactive)
 
 
 if __name__ == "__main__":

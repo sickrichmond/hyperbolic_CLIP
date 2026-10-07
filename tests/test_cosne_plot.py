@@ -11,11 +11,13 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import torch
+from PIL import Image
 
 from checkpoint_io import atomic_torch_save
 from explanation import cosne_plot
 from explanation.cosne_plot import (
-    _bandwidths, _exact_step, _pair_d2, _save_diagnostics, _select_subset,
+    _bandwidths, _class_colors, _exact_step, _interactive_figure, _pair_d2,
+    _save_diagnostics, _select_subset,
 )
 
 
@@ -217,8 +219,54 @@ def test_diagnostics_preserve_coordinates():
             assert abs(summary["squared_radius_mse"] - 0.2**4 / 3) < 1e-12
             for suffix in (".png", ".classes.png"):
                 assert Path(f"{prefix}{suffix}").read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+                with Image.open(f"{prefix}{suffix}") as image:
+                    assert all(abs(dpi - 300) < 1 for dpi in image.info["dpi"])
+            for suffix in (".pdf", ".classes.pdf"):
+                assert Path(f"{prefix}{suffix}").read_bytes().startswith(b"%PDF-")
+            html = Path(f"{prefix}.html").read_text()
+            assert "Plotly.newPlot" in html and "scattergl" in html
+            assert "<script src=" not in html
+        source = Path(f"{prefix}.points.pt")
+        original_bytes = source.read_bytes()
+        with patch.object(sys, "argv", ["cosne_plot", "--points", str(source),
+                                        "--output_dir", str(Path(directory) / "replot")]), \
+                patch.object(cosne_plot, "_exact_step", side_effect=AssertionError("Optimizer called")), \
+                patch.object(cosne_plot, "_render_plots") as render:
+            cosne_plot.main()
+            assert render.call_count == 1
+            assert np.array_equal(render.call_args.args[1], original.numpy())
+            assert render.call_args.args[2] == manifest and render.call_args.args[3] == 1000
+        assert source.read_bytes() == original_bytes
+        # Legacy saved results may not have iteration or stopping metadata.
+        legacy = Path(directory) / "legacy.points.pt"
+        atomic_torch_save({"coordinates": coordinates, "manifest": manifest}, legacy)
+        with patch.object(cosne_plot, "_render_plots") as render:
+            cosne_plot._replot([legacy], Path(directory) / "replot", interactive=False)
+            assert render.call_args.args[3:] == (None, False)
     assert torch.equal(coordinates, original)
     assert np.array_equal(input_radii, original_radii)
+
+
+def test_colors_and_interactive_coordinates():
+    names = list(cosne_plot._COLOR_CLASSES)
+    colors = _class_colors(names)
+    assert len(set(colors.values())) == len(names)
+    subset = _class_colors(["SDXL", "real", "FLUX"])
+    assert subset == {name: colors[name] for name in subset}
+    assert _class_colors(list(reversed(names))) == colors
+    coordinates = np.array([[0.3, 0.4], [-0.99995, 0], [0, 0]])
+    manifest = [("first.png", "SDXL", "COCO"), ("second.png", "real", "cat"),
+                ("third.png", "SDXL", "dog")]
+    fig = _interactive_figure(coordinates, manifest, 500)
+    for trace in fig.data:
+        indices = [i for i, row in enumerate(manifest) if row[1] == trace.name]
+        assert trace.type == "scattergl" and trace.marker.color == colors[trace.name]
+        assert np.array_equal(np.asarray(trace.x), coordinates[indices, 0])
+        assert np.array_equal(np.asarray(trace.y), coordinates[indices, 1])
+        assert [row[0] for row in trace.customdata] == indices
+        assert [row[1] for row in trace.customdata] == [manifest[i][0] for i in indices]
+    assert fig.layout.yaxis.scaleanchor == "x" and fig.layout.yaxis.scaleratio == 1
+    assert fig.layout.legend.x > 1
 
 
 if __name__ == "__main__":
@@ -228,4 +276,5 @@ if __name__ == "__main__":
     test_coincident_points_and_boundary_projection()
     test_subset_is_balanced_and_reproducible()
     test_diagnostics_preserve_coordinates()
+    test_colors_and_interactive_coordinates()
     print("CO-SNE checks passed")
