@@ -15,6 +15,8 @@
 #SBATCH --time=24:00:00
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=richitrebbia@gmail.com
 
 set -e
 module load python/3.11.7

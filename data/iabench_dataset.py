@@ -3,6 +3,7 @@
 Accept the ModelScope snapshot root or its ``data/`` directory. Images remain
 memory mapped. Split manifests identify rows by Arrow index and bind them to
 the ordered label/filename metadata; no images are decoded to create a split.
+Both saved datasets with JSON metadata and directories of Arrow shards are supported.
 """
 from collections import Counter
 from copy import copy
@@ -13,7 +14,7 @@ from pathlib import Path
 import random
 
 import torch
-from datasets import load_from_disk
+from datasets import Dataset as ArrowDataset, concatenate_datasets, load_from_disk
 from PIL import Image
 from torch.utils.data import Dataset
 from transformers import CLIPImageProcessor
@@ -36,11 +37,21 @@ class IABenchDataset(Dataset):
         if max_per_class is not None and max_per_class < 0:
             raise ValueError("max_per_class must be non-negative")
         root_path = Path(root)
-        data_dir = (root_path / "data" if (root_path / "data" / "state.json").is_file()
-                    else root_path)
-        if not (data_dir / "state.json").is_file():
-            raise FileNotFoundError(f"IABench Arrow dataset not found in {root_path}")
-        self.data = load_from_disk(str(data_dir), keep_in_memory=False)
+        data_dir = root_path / "data" if (root_path / "data").is_dir() else root_path
+        if (data_dir / "state.json").is_file():
+            self.data = load_from_disk(str(data_dir), keep_in_memory=False)
+        else:
+            shards = sorted(data_dir.glob("data-*-of-*.arrow"))
+            if not shards:
+                raise FileNotFoundError(f"No IABench Arrow shards found in {data_dir}")
+            total = int(shards[0].stem.rsplit("-", 1)[-1])
+            if len(shards) != total or any(
+                    p.name != f"data-{i:05d}-of-{total:05d}.arrow" for i, p in enumerate(shards)):
+                raise FileNotFoundError(
+                    f"Incomplete IABench Arrow shards in {data_dir}: "
+                    f"expected {total} numbered shards, found {len(shards)}")
+            self.data = concatenate_datasets([
+                ArrowDataset.from_file(str(path), in_memory=False) for path in shards])
         missing = {"image", "label", "file_name"} - set(self.data.column_names)
         if missing:
             raise ValueError(f"IABench dataset is missing columns: {sorted(missing)}")

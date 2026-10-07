@@ -23,7 +23,7 @@ from tests.test_attribution_training import TinyModel, TinyTokenizer
 from training.anchors import build_anchors
 
 
-def save_arrow(root, counts=None):
+def save_arrow(root, counts=None, raw_shards=False):
     counts = counts or {"SDXL": 31, "Real": 11, "Flux.1": 21}
     rows = {"image": [], "label": [], "file_name": []}
     for j, (name, count) in enumerate(counts.items()):
@@ -34,7 +34,11 @@ def save_arrow(root, counts=None):
             rows["file_name"].append(f"{name}/{i}.png")
     data = Dataset.from_dict(rows, features=Features(
         {"image": Image(), "label": Value("string"), "file_name": Value("string")}))
-    data.save_to_disk(str(Path(root) / "data"))
+    data_dir = Path(root) / "data"
+    data.save_to_disk(str(data_dir), num_shards=3 if raw_shards else 1)
+    if raw_shards:
+        (data_dir / "state.json").unlink()
+        (data_dir / "dataset_info.json").unlink()
 
 
 class PixelProcessor:
@@ -142,7 +146,7 @@ class IABenchIntegrationTests(unittest.TestCase):
     def test_training_and_test_evaluation_all_anchor_modes(self):
         for mode in ("text", "text_free", "random", "image_centroid"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as root:
-                save_arrow(root)
+                save_arrow(root, raw_shards=mode == "random")
                 output = Path(root) / "model.pt"
                 args = train_iabench.parse_args([
                     "--dataset_path", root, "--output", str(output), "--anchor_init", mode,
