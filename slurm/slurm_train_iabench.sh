@@ -33,7 +33,7 @@ export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 
 REPO="$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo"
-DATA=/leonardo_scratch/large/userexternal/imaljkov/datasets/IABench/data
+DATA="${DATA:-/leonardo_scratch/large/userexternal/imaljkov/datasets/IABench/data}"
 OUT="$WORK/hyp_fine_tuning/checkpoints"
 SPLIT_MANIFEST="${SPLIT_MANIFEST:-$OUT/attribution_iabench_random_vitl14.splits.json}"
 PROFILE_STEPS="${PROFILE_STEPS:-0}"

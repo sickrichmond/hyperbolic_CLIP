@@ -30,7 +30,7 @@ export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 
 REPO="$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo"
-DATA=/leonardo_scratch/large/userexternal/imaljkov/datasets/IABench/data
+DATA="${DATA:-/leonardo_scratch/large/userexternal/imaljkov/datasets/IABench/data}"
 CKPT="${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_iabench_random_aug_vitl14.pt}"
 SPLIT_MANIFEST="${SPLIT_MANIFEST:-$WORK/hyp_fine_tuning/checkpoints/attribution_iabench_random_vitl14.splits.json}"
 LOGDIR="${LOGDIR:-$WORK/outputs/hypclip_iabench_${SLURM_JOB_ID}}"

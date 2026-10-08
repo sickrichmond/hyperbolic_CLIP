@@ -3,7 +3,7 @@
 Accept the ModelScope snapshot root or its ``data/`` directory. Images remain
 memory mapped. Split manifests identify rows by Arrow index and bind them to
 the ordered label/filename metadata; no images are decoded to create a split.
-Both saved datasets with JSON metadata and directories of Arrow shards are supported.
+Saved datasets, raw Arrow shards and exported image directories are supported.
 """
 from collections import Counter
 from copy import copy
@@ -14,13 +14,15 @@ from pathlib import Path
 import random
 
 import torch
-from datasets import Dataset as ArrowDataset, concatenate_datasets, load_from_disk
+from datasets import Dataset as ArrowDataset, Features, Image as ArrowImage, concatenate_datasets, load_from_disk
 from PIL import Image
 from torch.utils.data import Dataset
 from transformers import CLIPImageProcessor
 
 from data.degradations import AUG_POLICIES, apply_degradation
 from data.image_io import retry_image_read
+
+IMAGE_INDEX = "iabench_images.json"
 
 
 def manifest_digest(manifest: dict) -> str:
@@ -38,31 +40,52 @@ class IABenchDataset(Dataset):
             raise ValueError("max_per_class must be non-negative")
         root_path = Path(root)
         data_dir = root_path / "data" if (root_path / "data").is_dir() else root_path
-        if (data_dir / "state.json").is_file():
-            self.data = load_from_disk(str(data_dir), keep_in_memory=False)
+        index_path = root_path / IMAGE_INDEX
+        self.image_paths = None
+        if index_path.is_file():
+            index = json.loads(index_path.read_text())
+            if index.get("format") != "iabench-images-v1" or index.get("complete") is not True:
+                raise ValueError("IABench image export is incomplete or unsupported; rerun the exporter")
+            self.data = None
+            self.image_root = root_path
+            self.source_labels = [row["label"] for row in index["rows"]]
+            self.file_names = [row["file_name"] for row in index["rows"]]
+            self.image_paths = [row["image_path"] for row in index["rows"]]
+            for relative in self.image_paths:
+                if (not isinstance(relative, str) or not relative or Path(relative).is_absolute()
+                        or ".." in Path(relative).parts):
+                    raise ValueError("Exported image paths must stay within the dataset directory")
+            self.image_feature = Features.from_dict({"image": index["image_feature"]})["image"]
+            if not isinstance(self.image_feature, ArrowImage) or not self.image_feature.decode:
+                raise ValueError("Exported IABench index requires a decoding Image feature")
         else:
-            shards = sorted(data_dir.glob("data-*-of-*.arrow"))
-            if not shards:
-                raise FileNotFoundError(f"No IABench Arrow shards found in {data_dir}")
-            total = int(shards[0].stem.rsplit("-", 1)[-1])
-            if len(shards) != total or any(
-                    p.name != f"data-{i:05d}-of-{total:05d}.arrow" for i, p in enumerate(shards)):
-                raise FileNotFoundError(
-                    f"Incomplete IABench Arrow shards in {data_dir}: "
-                    f"expected {total} numbered shards, found {len(shards)}")
-            self.data = concatenate_datasets([
-                ArrowDataset.from_file(str(path), in_memory=False) for path in shards])
-        missing = {"image", "label", "file_name"} - set(self.data.column_names)
-        if missing:
-            raise ValueError(f"IABench dataset is missing columns: {sorted(missing)}")
-        self.source_labels = list(self.data["label"])
-        self.file_names = list(self.data["file_name"])
+            if (data_dir / "state.json").is_file():
+                self.data = load_from_disk(str(data_dir), keep_in_memory=False)
+            else:
+                shards = sorted(data_dir.glob("data-*-of-*.arrow"))
+                if not shards:
+                    raise FileNotFoundError(f"No IABench Arrow shards found in {data_dir}")
+                total = int(shards[0].stem.rsplit("-", 1)[-1])
+                if len(shards) != total or any(
+                        p.name != f"data-{i:05d}-of-{total:05d}.arrow" for i, p in enumerate(shards)):
+                    raise FileNotFoundError(
+                        f"Incomplete IABench Arrow shards in {data_dir}: "
+                        f"expected {total} numbered shards, found {len(shards)}")
+                self.data = concatenate_datasets([
+                    ArrowDataset.from_file(str(path), in_memory=False) for path in shards])
+            missing = {"image", "label", "file_name"} - set(self.data.column_names)
+            if missing:
+                raise ValueError(f"IABench dataset is missing columns: {sorted(missing)}")
+            self.source_labels = list(self.data["label"])
+            self.file_names = list(self.data["file_name"])
         digest = hashlib.sha256()
         for label, name in zip(self.source_labels, self.file_names):
             if not isinstance(label, str) or not label or not isinstance(name, str):
                 raise ValueError("IABench labels and filenames must be strings with nonempty labels")
             digest.update((json.dumps([label, name], ensure_ascii=False) + "\n").encode())
         self.dataset_digest = digest.hexdigest()
+        if self.image_paths is not None and self.dataset_digest != index["dataset_digest"]:
+            raise ValueError("IABench image index does not match its metadata digest")
         self.class_names = sorted(set(self.source_labels))
         requested = set(generators) if generators is not None else set(self.class_names)
         if requested - set(self.class_names):
@@ -146,11 +169,18 @@ class IABenchDataset(Dataset):
     def __len__(self) -> int:
         return len(self.indices)
 
+    def _read_image(self, row_index):
+        if self.image_paths is None:
+            return self.data[row_index]["image"].convert("RGB")
+        # Keep the source feature's mode and EXIF handling identical to Arrow loading.
+        path = self.image_root / self.image_paths[row_index]
+        return self.image_feature.decode_example({"path": str(path), "bytes": None}).convert("RGB")
+
     def __getitem__(self, index: int) -> dict:
         if self.processor is None:
             raise RuntimeError("Metadata-only IABench dataset cannot process images")
         row_index, label, name = self.samples[index]
-        image = retry_image_read(lambda: self.data[row_index]["image"].convert("RGB"))
+        image = retry_image_read(lambda: self._read_image(row_index))
         if self.degraded and self.train_augment:
             raise ValueError("train_augment and degraded are mutually exclusive")
         if self.degraded:

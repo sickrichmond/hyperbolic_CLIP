@@ -17,6 +17,7 @@ import torch
 from comparison.training import test_hypclip as evaluator
 from comparison.training.metrics.base_metrics_class import calculate_metrics_for_test
 from data.iabench_dataset import IABenchDataset, manifest_digest
+from data.export_iabench import export_images
 from geometry.lorentz import exp_map0, oxy_angle
 import train_attribution as trainer
 import train_iabench
@@ -172,9 +173,13 @@ class IABenchIntegrationTests(unittest.TestCase):
         for mode in ("text", "text_free", "random", "image_centroid"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as root:
                 save_arrow(root, raw_shards=mode == "random")
+                dataset_root = root
+                if mode == "image_centroid":
+                    dataset_root = str(Path(root) / "exported")
+                    export_images(root, dataset_root)
                 output = Path(root) / "model.pt"
                 args = train_iabench.parse_args([
-                    "--dataset_path", root, "--output", str(output), "--anchor_init", mode,
+                    "--dataset_path", dataset_root, "--output", str(output), "--anchor_init", mode,
                     "--hyperbolic_dim", "4", "--batch_size", "12", "--num_workers", "0",
                     "--num_epochs", "2", "--diag_plot_dir", root, "--log_every", "1",
                     *(["--plot_all_train", "--profile_steps", "3"] if mode == "random" else []),
@@ -237,7 +242,7 @@ class IABenchIntegrationTests(unittest.TestCase):
                     else:
                         self.assertFalse((Path(root) / "timing.csv").exists())
                     eval_args = evaluator.parse_args([
-                        "--checkpoint", str(output), "--root_dir", root, "--dataset", "iabench",
+                        "--checkpoint", str(output), "--root_dir", dataset_root, "--dataset", "iabench",
                         "--num_workers", "0", "--batch_size", "12", "--level_end", "2",
                         "--log_dir", str(Path(root) / "metrics")])
                     score = evaluator.evaluate_loader
