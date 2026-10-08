@@ -2,11 +2,14 @@
 
 Default partitions: 80% train, 10% validation, 10% test, stratified by generator.
 Validation selects checkpoints; test rows are used only by the comparison CLI.
+Per-epoch full-training plots are disabled; --diag_plot_dir still holds stats.csv.
+Use --plot_all_train to request one final plot from the selected checkpoint.
 """
 import json
 import os
 from pathlib import Path
 import tempfile
+from time import perf_counter
 
 from data.iabench_dataset import IABenchDataset, manifest_digest
 from train_attribution import run_training
@@ -17,8 +20,9 @@ def parse_args(argv=None):
     return shared_parse_args(argv, dataset="iabench")
 
 
-def prepare_datasets(args):
-    dataset = IABenchDataset(args.dataset_path, processor_name=args.clip_name)
+def prepare_datasets(args, metadata_only=False):
+    dataset = IABenchDataset(args.dataset_path,
+                            processor_name=None if metadata_only else args.clip_name)
     manifest = dataset.make_split_manifest(
         generators=args.generators, max_per_class=args.max_per_class, seed=args.seed,
         val_frac=args.val_frac, test_frac=args.test_frac)
@@ -60,8 +64,14 @@ def prepare_datasets(args):
 def main():
     args = parse_args()
     validate_args(args)
-    datasets, metadata = prepare_datasets(args)
-    run_training(args, datasets=datasets, checkpoint_metadata=metadata)
+    start = perf_counter()
+    datasets, metadata = prepare_datasets(args, metadata_only=args.prepare_only)
+    print(f"IABench dataset/manifest preparation: {perf_counter() - start:.1f}s", flush=True)
+    if args.prepare_only:
+        print(f"Prepared split manifest: {args.split_manifest}")
+        return
+    run_training(args, datasets=datasets, checkpoint_metadata=metadata,
+                 plot_each_epoch=False)
 
 
 if __name__ == "__main__":

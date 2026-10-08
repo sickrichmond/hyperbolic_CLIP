@@ -115,17 +115,25 @@ def parse_args(argv=None, dataset="iab"):
     p.add_argument("--seed",           type=int,   default=42)
     p.add_argument("--max_per_class",  type=int,   default=None)
     p.add_argument("--num_workers",    type=int,   default=8)
+    p.add_argument("--profile_steps", type=int, default=0,
+                   help="Time batch waits and training work for the first N updates (0 disables); "
+                        "writes timing.csv in --diag_plot_dir. CUDA timing synchronizes all used GPUs.")
     p.add_argument("--log_every",      type=int,   default=0,
                    help="Write instantaneous statistics every N steps and at step 1 (0 "
                         "disables); requires --diag_plot_dir.")
     p.add_argument("--snapshot_every", type=int,   default=0,
                    help="Plot the current training batch every N steps (0 disables).")
     p.add_argument("--diag_plot_dir",  type=str,   default=None,
-                   help="Directory for fresh per-epoch PCA plots of all clean training images.")
+                   help="Directory for step statistics and requested plots."
+                        + (" Also enables per-epoch PCA plots of all clean training images."
+                           if dataset == "iab" else ""))
     p.add_argument("--plot_all_train", action="store_true", default=False,
                    help="Plot all clean training rows from the selected checkpoint in "
                         "train_all_final.png; adds one full data pass.")
     if dataset == "iabench":
+        p.add_argument("--prepare_only", action="store_true",
+                       help="Create or validate the split manifest, then exit without loading "
+                            "the CLIP processor or model or decoding images.")
         p.set_defaults(captions_dir=None, semantics=[], require_caption=False,
                        split_scheme="stratified")
     return p.parse_args(argv)
@@ -133,6 +141,10 @@ def parse_args(argv=None, dataset="iab"):
 
 def validate_args(args):
     """Validate mode combinations before loading data or model weights."""
+    if args.profile_steps < 0:
+        raise ValueError("--profile_steps must be non-negative")
+    if args.profile_steps and not args.diag_plot_dir:
+        raise ValueError("--profile_steps requires --diag_plot_dir")
     if min(args.fixed_image_radius, args.radial_margin) < 0:
         raise ValueError("radius and radial margin must be non-negative")
     if args.fixed_image_radius > 0 and args.init_depth > 0:

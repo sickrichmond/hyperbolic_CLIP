@@ -139,6 +139,10 @@ class AttributionTrainingTests(unittest.TestCase):
         base = ["--dataset_path", "x", "--captions_dir", "y"]
         args = parse_args(base + ["--no_captions"])
         validate_args(args)
+        for options, error in ((["--profile_steps", "-1"], "non-negative"),
+                               (["--profile_steps", "10"], "requires --diag_plot_dir")):
+            with self.assertRaisesRegex(ValueError, error):
+                validate_args(parse_args(base + options))
         for flag in ("--lambda_cap_in_class", "--lambda_img_in_cap",
                      "--lambda_axis", "--lambda_hinge", "--pos_mode",
                      "--lambda_family", "--hierarchy", "--theta_max",

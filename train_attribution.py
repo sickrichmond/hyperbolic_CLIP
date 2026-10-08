@@ -5,6 +5,7 @@ checkpoint selection, and Poincare diagnostics. The pairwise positive-cosine
 anchor penalty is enabled by default with weight 0.2; --lambda_cosine 0 disables it.
 """
 from pathlib import Path
+from time import perf_counter
 
 import torch
 from torch import nn
@@ -76,7 +77,7 @@ def build_iab_datasets(args):
     return train_ds, val_ds
 
 
-def run_training(args, datasets=None, checkpoint_metadata=None):
+def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=True):
     """Shared cone training; supplied datasets are training and validation only."""
     validate_args(args)
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -198,16 +199,22 @@ def run_training(args, datasets=None, checkpoint_metadata=None):
     plot_loader = None
     snap_every = 0
     if args.diag_plot_dir:
-        from training.poincare import plot_epoch_snapshot
         Path(args.diag_plot_dir).mkdir(parents=True, exist_ok=True)
         snap_every = args.snapshot_every
-        plot_loader = DataLoader(
-            train_ds, batch_size=args.batch_size, shuffle=False,
-            num_workers=args.num_workers, pin_memory=True,
-        )
-        print(f"Per-epoch Poincare snapshots of all {len(train_ds)} clean training images "
-              f"with a fresh PCA fit → {args.diag_plot_dir}"
-              + (f" (+ every {snap_every} steps)" if snap_every else ""))
+        if plot_each_epoch or snap_every or args.plot_all_train:
+            from training.poincare import plot_epoch_snapshot
+        if plot_each_epoch:
+            plot_loader = DataLoader(
+                train_ds, batch_size=args.batch_size, shuffle=False,
+                num_workers=args.num_workers, pin_memory=True,
+            )
+            print(f"Per-epoch Poincare snapshots of all {len(train_ds)} clean training images "
+                  f"with a fresh PCA fit → {args.diag_plot_dir}")
+        else:
+            print("Per-epoch full-training plots disabled.")
+        if snap_every:
+            print(f"Training-batch Poincare snapshots every {snap_every} steps "
+                  f"→ {args.diag_plot_dir}")
         if args.plot_all_train:
             print("Final Poincare snapshot will include every clean training image "
                   "(one extra pass after training).")
@@ -254,6 +261,14 @@ def run_training(args, datasets=None, checkpoint_metadata=None):
             model.train()
 
     global_step = 0
+    timing_csv = None
+    timing_wait = timing_work = 0.0
+    if args.profile_steps:
+        timing_path = Path(args.diag_plot_dir) / "timing.csv"
+        timing_csv = open(timing_path, "w", encoding="utf-8")
+        timing_csv.write("step,epoch,batch_size,data_wait_s,train_step_s\n")
+        print(f"Timing first {args.profile_steps} updates → {timing_path} "
+              "(includes worker startup; GPU synchronization adds profiling overhead)", flush=True)
     for epoch in range(1, args.num_epochs + 1):
         if args.anchors_only:
             model.eval()
@@ -261,7 +276,14 @@ def run_training(args, datasets=None, checkpoint_metadata=None):
             model.train()
         sums = {"loss": 0.0, **{k: 0.0 for k in stat_csv_keys}}
         bar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.num_epochs}")
+        if timing_csv is not None:
+            if device == "cuda":
+                for gpu in range(torch.cuda.device_count()):
+                    torch.cuda.synchronize(gpu)
+            batch_wait_start = perf_counter()
         for step, batch in enumerate(bar, 1):
+            if timing_csv is not None:
+                batch_ready = perf_counter()
             global_step += 1
             pixel    = batch["pixel_values"].to(device)
             labels   = torch.tensor([name_to_idx[g] for g in batch["generator"]],
@@ -322,6 +344,30 @@ def run_training(args, datasets=None, checkpoint_metadata=None):
                     "ψa":   f"{sums['mean_psi_anc']/step:.3f}",
                 }
                 bar.set_postfix(**post)
+
+            if timing_csv is not None:
+                if device == "cuda":
+                    for gpu in range(torch.cuda.device_count()):
+                        torch.cuda.synchronize(gpu)
+                step_end = perf_counter()
+                wait = batch_ready - batch_wait_start
+                work = step_end - batch_ready
+                timing_wait += wait
+                timing_work += work
+                timing_csv.write(f"{global_step},{epoch},{len(pixel)},{wait:.6f},{work:.6f}\n")
+                timing_csv.flush()
+                if global_step == args.profile_steps or (
+                        epoch == args.num_epochs and step == steps_per_epoch):
+                    timing_csv.close()
+                    timing_csv = None
+                    total = timing_wait + timing_work
+                    print(f"Timing {global_step} updates: batch wait "
+                          f"{timing_wait/global_step:.3f}s/update "
+                          f"({100*timing_wait/max(total, 1e-9):.1f}%); "
+                          f"training work {timing_work/global_step:.3f}s/update → {timing_path}",
+                          flush=True)
+                else:
+                    batch_wait_start = perf_counter()
 
         avg = {k: v / steps_per_epoch for k, v in sums.items()}
         report_epoch(avg, epoch, scheduler.get_last_lr()[0], anchors)

@@ -1,6 +1,7 @@
 """Saved-Arrow integration: python -m tests.test_iabench_training (no downloads)."""
 from collections import Counter
 import contextlib
+import csv
 import io
 import json
 from pathlib import Path
@@ -48,6 +49,30 @@ class PixelProcessor:
 
 
 class IABenchIntegrationTests(unittest.TestCase):
+    def test_prepare_only_without_images_or_clip(self):
+        with tempfile.TemporaryDirectory() as root:
+            save_arrow(root, raw_shards=True)
+            path = Path(root) / "prepared.json"
+            args = train_iabench.parse_args([
+                "--dataset_path", root, "--split_manifest", str(path), "--prepare_only"])
+            with patch.object(train_iabench, "parse_args", return_value=args), \
+                    patch("data.iabench_dataset.CLIPImageProcessor.from_pretrained",
+                          side_effect=AssertionError("processor loaded")), \
+                    patch.object(Image, "decode_example", side_effect=AssertionError("image decoded")), \
+                    patch.object(train_iabench, "run_training") as train, \
+                    contextlib.redirect_stdout(io.StringIO()):
+                train_iabench.main()
+                original = path.read_bytes()
+                train_iabench.main()
+                self.assertEqual(path.read_bytes(), original)
+                train.assert_not_called()
+                manifest = json.loads(original)
+                self.assertEqual([len(manifest[s]) for s in ("train", "val", "test")], [48, 6, 9])
+                dataset = IABenchDataset(root, processor_name=None)
+                self.assertEqual(dataset.make_split_manifest(), manifest)
+                with self.assertRaisesRegex(RuntimeError, "Metadata-only"):
+                    dataset[0]
+
     def test_split_manifest_and_views(self):
         with tempfile.TemporaryDirectory() as root, patch(
                 "data.iabench_dataset.CLIPImageProcessor.from_pretrained",
@@ -151,8 +176,9 @@ class IABenchIntegrationTests(unittest.TestCase):
                 args = train_iabench.parse_args([
                     "--dataset_path", root, "--output", str(output), "--anchor_init", mode,
                     "--hyperbolic_dim", "4", "--batch_size", "12", "--num_workers", "0",
-                    "--num_epochs", "2",
-                    *(["--diag_plot_dir", root, "--plot_all_train"] if mode == "random" else [])])
+                    "--num_epochs", "2", "--diag_plot_dir", root, "--log_every", "1",
+                    *(["--plot_all_train", "--profile_steps", "3"] if mode == "random" else []),
+                    *(["--profile_steps", "100"] if mode == "text" else [])])
                 validation = trainer.run_validation
                 frames = []
 
@@ -171,7 +197,12 @@ class IABenchIntegrationTests(unittest.TestCase):
                     if mode == "random":
                         stack.enter_context(patch.dict("sys.modules", {
                             "training.poincare": SimpleNamespace(plot_epoch_snapshot=snapshot)}))
+                        stack.enter_context(patch.object(
+                            trainer, "perf_counter", side_effect=[0, 5, 7, 8, 11, 12, 13, 19, 20]))
                     val_spy = stack.enter_context(patch.object(trainer, "run_validation", wraps=validation))
+                    epoch_collect = stack.enter_context(patch.object(
+                        trainer, "collect_plot_embeddings",
+                        side_effect=AssertionError("IABench must skip the per-epoch data pass")))
                     stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
                     stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
                     train_iabench.main()
@@ -182,12 +213,29 @@ class IABenchIntegrationTests(unittest.TestCase):
                     self.assertEqual(ckpt["anchor_texts"][0], "A real image")
                     self.assertEqual(ckpt["split_manifest_digest"], manifest_digest(manifest))
                     self.assertEqual(ckpt["loss"], "cone")
+                    epoch_collect.assert_not_called()
+                    self.assertEqual(val_spy.call_count, 2)
+                    rows = (Path(root) / "stats.csv").read_text().splitlines()
+                    self.assertEqual(len(rows), 9)  # Header + four steps in each epoch.
+                    self.assertTrue(rows[0].startswith("step,epoch,lr,loss,"))
                     for call in val_spy.call_args_list:
                         self.assertEqual(call.args[1].dataset.split, "val")
                         self.assertEqual(call.args[1].dataset.indices, manifest["val"])
                     if mode == "random":
-                        self.assertEqual(frames, [("epoch_01.png", 48), ("epoch_02.png", 48),
-                                                  ("train_all_final.png", 48)])
+                        self.assertEqual(frames, [("train_all_final.png", 48)])
+                        with (Path(root) / "timing.csv").open() as stream:
+                            timing = list(csv.DictReader(stream))
+                        self.assertEqual([int(r["step"]) for r in timing], [1, 2, 3])
+                        self.assertEqual([float(r["data_wait_s"]) for r in timing], [5., 3., 6.])
+                        self.assertEqual([float(r["train_step_s"]) for r in timing], [2., 1., 1.])
+                    elif mode == "text":
+                        with (Path(root) / "timing.csv").open() as stream:
+                            timing = list(csv.DictReader(stream))
+                        self.assertEqual([int(r["step"]) for r in timing], list(range(1, 9)))
+                        self.assertEqual([int(r["epoch"]) for r in timing], [1]*4 + [2]*4)
+                        self.assertTrue(all(float(r["data_wait_s"]) >= 0 for r in timing))
+                    else:
+                        self.assertFalse((Path(root) / "timing.csv").exists())
                     eval_args = evaluator.parse_args([
                         "--checkpoint", str(output), "--root_dir", root, "--dataset", "iabench",
                         "--num_workers", "0", "--batch_size", "12", "--level_end", "2",

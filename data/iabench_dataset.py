@@ -31,7 +31,7 @@ def manifest_digest(manifest: dict) -> str:
 
 class IABenchDataset(Dataset):
     def __init__(self, root: str,
-                 processor_name: str = "openai/clip-vit-base-patch32",
+                 processor_name: str | None = "openai/clip-vit-base-patch32",
                  generators: list[str] | None = None,
                  max_per_class: int | None = None):
         if max_per_class is not None and max_per_class < 0:
@@ -81,7 +81,8 @@ class IABenchDataset(Dataset):
         self.aug_policy = "corruption"
         self.degraded = 0
         self.pre_resize = 0
-        self.processor = CLIPImageProcessor.from_pretrained(processor_name)
+        self.processor = (CLIPImageProcessor.from_pretrained(processor_name)
+                          if processor_name is not None else None)
 
     def _set_indices(self, indices):
         self.indices = indices
@@ -146,6 +147,8 @@ class IABenchDataset(Dataset):
         return len(self.indices)
 
     def __getitem__(self, index: int) -> dict:
+        if self.processor is None:
+            raise RuntimeError("Metadata-only IABench dataset cannot process images")
         row_index, label, name = self.samples[index]
         image = retry_image_read(lambda: self.data[row_index]["image"].convert("RGB"))
         if self.degraded and self.train_augment:
