@@ -6,7 +6,7 @@ from comparison.dataset.ImageAttributionDataset import DATASET
 @DATASET.register_module(module_name='resnet50')
 class Resnet50Dataset(ImageAttributionDataset):  
     def __init__(self, root_dir, num_images_per_semantic_per_class=2000, transform=None,degraded=0, **kwargs):  
-        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded)  
+        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded, iabench_source=kwargs.get("iabench_source"))
         if self.transform is None:  
             self.transform = T.Compose([  
                 T.Resize(256),  

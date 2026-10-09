@@ -7,7 +7,7 @@ import numpy as np
 @DATASET.register_module(module_name='dct')
 class DCTDataset(ImageAttributionDataset):  
     def __init__(self, root_dir, num_images_per_semantic_per_class=2000, degraded=0, transform=None, **kwargs):  
-        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded)  
+        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded, iabench_source=kwargs.get("iabench_source"))
         print(f"loading DCT dataset....") 
 
         self.transform_pre = T.Compose([  

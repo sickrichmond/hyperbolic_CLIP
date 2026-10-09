@@ -10,6 +10,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from comparison.training.attributors import * 
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
+from checkpoint_io import atomic_torch_save
 
 class Trainer(object):  
     def __init__(self,  
@@ -253,22 +254,31 @@ class Trainer(object):
         else:  
             model_state = self.model.state_dict()  
 
-        checkpoint = {  
+        checkpoint = {
             'model_state_dict': model_state,  
             'optimizer_state_dict': self.optimizer.state_dict(),  
             'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler else None,  
             'best_metrics': best_metrics,  
             'epoch': epoch  
-        }  
-
-        torch.save(checkpoint, path)  
+        }
+        checkpoint.update(self.config.get('checkpoint_metadata', {}))
+        atomic_torch_save(checkpoint, path)
         self.logger.info(f"Checkpoint saved to {path}")  
 
     def load_checkpoint(self, path):  
         if not os.path.isfile(path):  
             raise FileNotFoundError(f"No checkpoint found at '{path}'")  
 
-        checkpoint = torch.load(path, map_location='cpu')  
+        checkpoint = torch.load(path, map_location='cpu', weights_only=False)
+        if self.config.get('checkpoint_metadata'):
+            from comparison.training.iabench import validate_checkpoint_metadata
+            validate_checkpoint_metadata(checkpoint, self.config['checkpoint_metadata'])
+            if checkpoint.get('epoch') is None or not checkpoint.get('optimizer_state_dict'):
+                raise ValueError("Resume checkpoint requires epoch and optimizer state")
+            if not isinstance(checkpoint.get('best_metrics'), dict) or 'val_metric' not in checkpoint['best_metrics']:
+                raise ValueError("Resume checkpoint requires best validation metric")
+            if self.scheduler is not None and checkpoint.get('scheduler_state_dict') is None:
+                raise ValueError("Resume checkpoint requires scheduler state")
 
         if self.config.get('ddp', False) and hasattr(self.model, 'module'):  
             self.model.module.load_state_dict(checkpoint['model_state_dict'])  

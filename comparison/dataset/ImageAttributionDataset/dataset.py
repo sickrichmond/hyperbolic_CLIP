@@ -2,7 +2,7 @@ import os
 from PIL import Image
 from torch.utils.data import Dataset
 
-from data.image_io import open_image_retry
+from data.image_io import open_image_retry, retry_image_read
 import re
 from io import BytesIO
 from PIL import ImageFilter
@@ -82,13 +82,49 @@ _HIFI_HIERARCHY = {
 }
 
 
-def hifi_label_mapping():
+_IABENCH_HIERARCHY = {
+    'Imagen3': (0, 0, 0), 'gpt4o': (0, 0, 0),
+    'midjourneyv6': (0, 0, 0), 'nano-banana': (0, 0, 0),
+    'E4S': (0, 1, 6), 'R3GAN': (0, 1, 6),
+    'StyleGAN-XL': (0, 1, 6), 'stylegan3': (0, 1, 6),
+    'CompVis@stable-diffusion-v1-4': (0, 1, 1),
+    'runwayml@stable-diffusion-v1-5': (0, 1, 1),
+    'stabilityai@stable-diffusion-2': (0, 1, 1),
+    'stabilityai@stable-diffusion-2-1': (0, 1, 1),
+    'stabilityai@stable-diffusion-3-medium-diffusers': (0, 1, 1),
+    'stabilityai@stable-diffusion-xl-base-1.0': (0, 1, 1),
+    'latent-consistency@lcm-lora-sdv1-5': (0, 1, 1),
+    'latent-consistency@lcm-lora-sdxl': (0, 1, 1),
+    'segmind@SSD-1B': (0, 1, 1), 'segmind@SegMoE-SD-4x2-v0': (0, 1, 1),
+    'segmind@small-sd': (0, 1, 1), 'segmind@tiny-sd': (0, 1, 1),
+    'stabilityai@sdxl-turbo': (0, 1, 1),
+    'CompVis@ldm-text2im-large-256': (0, 1, 2),
+    'PixArt-alpha@PixArt-XL-2-1024-MS': (0, 1, 2),
+    'black-forest-labs@FLUX.1-dev': (0, 1, 2),
+    'black-forest-labs@FLUX.1-schnell': (0, 1, 2),
+    'playgroundai@playground-v2-1024px-aesthetic': (0, 1, 2),
+    'playgroundai@playground-v2.5-1024px-aesthetic': (0, 1, 2),
+    'cogview4': (0, 1, 3),
+}
+
+
+def hifi_label_mapping(class_names=None, dataset='iab'):
     """HiFi-Net hierarchical labels [(level1, level2, level3, fine), ...] in the
     ACTIVE label order (respects IAB_EXCLUDE_GENERATORS). `fine` is the contiguous
     0..N-1 index. Drives both the level-4 head size and parent_idx_4 so removing a
     generator (e.g. dalle3) needs no manual edits."""
-    idx_to_name = {v: k for k, v in model_class_to_label.items()}
-    return [(*_HIFI_HIERARCHY[idx_to_name[i]], i) for i in range(len(model_class_to_label))]
+    names = list(model_class_to_label) if class_names is None else class_names
+    taxonomy = _IABENCH_HIERARCHY if dataset == 'iabench' else _HIFI_HIERARCHY
+    mapping = []
+    for i, name in enumerate(names):
+        if name.casefold() == 'real':
+            hierarchy = (1, 2, 5)
+        elif name in taxonomy:
+            hierarchy = taxonomy[name]
+        else:
+            raise ValueError(f"Unmapped {dataset} hierarchy label: {name!r}")
+        mapping.append((*hierarchy, i))
+    return mapping
 semantic_to_relpath = {  
             "cat": "AnimalFace/cat",  
             "dog": "AnimalFace/dog",  
@@ -114,12 +150,15 @@ subclass_to_superclass = {
             "classroom": "Scene",  
         }  
 class ImageAttributionDataset(Dataset):  
-    def __init__(self, root_dir, num_images_per_semantic_per_class=2000, transform=None,degraded = 0):  
+    def __init__(self, root_dir, num_images_per_semantic_per_class=2000, transform=None,degraded = 0,
+                 iabench_source=None):
         self.root_dir = root_dir  
         self.transform = transform  
         self.num_images_per_semantic_per_class = num_images_per_semantic_per_class
 
-        self.model_class_to_label = model_class_to_label
+        self.iabench_source = iabench_source
+        self.model_class_to_label = (model_class_to_label if iabench_source is None else
+                                    {name: i for i, name in enumerate(iabench_source.class_names)})
         
         self.semantic_label_map = semantic_label_map  
         
@@ -131,6 +170,10 @@ class ImageAttributionDataset(Dataset):
         self.degraded = degraded
         assert degraded in range(7), "illegal degrade number"
         self.samples = []
+        if iabench_source is not None:
+            self.samples = [(row, self.model_class_to_label[label], None, None)
+                            for row, label, _ in iabench_source.samples]
+            return
         self._make_dataset()
         print(f"[ImageAttributionDataset] {len(self.model_class_to_label)} classes, "
               f"{len(self.samples)} images (excluded: {sorted(excluded_generators()) or 'none'})")
@@ -229,11 +272,16 @@ class ImageAttributionDataset(Dataset):
     def _open_image(self, img_path, retries=8, backoff=0.5):
         # Same retry policy as every other loader in the project — see
         # data/image_io.py for why it exists and why it never skips a file.
+        if self.iabench_source is not None:
+            return retry_image_read(lambda: self.iabench_source._read_image(img_path),
+                                    retries=retries, backoff=backoff)
         return open_image_retry(img_path, retries=retries, backoff=backoff)
 
     def __getitem__(self, idx):
         img_path, label, semantic_label, semantic_subclass = self.samples[idx]
         image = self._open_image(img_path)
+        if self.iabench_source is not None:
+            return {"image": image, "label": label}
 
         # Derive grok3's index from the ACTIVE map: hardcoding 13 cropped the wrong
         # class once dalle3 was excluded (grok3 -> 12, hidream -> 13).

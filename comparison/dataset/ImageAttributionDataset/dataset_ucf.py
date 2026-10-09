@@ -1,5 +1,5 @@
 import torchvision.transforms as T  
-from .dataset import ImageAttributionDataset, model_class_to_label
+from .dataset import ImageAttributionDataset
 from comparison.dataset.ImageAttributionDataset import DATASET
 import torch
 
@@ -7,7 +7,7 @@ import torch
 @DATASET.register_module(module_name='ucf')
 class UCFDataset(ImageAttributionDataset):  
     def __init__(self, root_dir, num_images_per_semantic_per_class=2000, transform=None,degraded=0, **kwargs):  
-        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded)  
+        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded, iabench_source=kwargs.get("iabench_source"))
         if self.transform is None:  
             self.transform = T.Compose([  
                 T.Resize(256),  
@@ -25,7 +25,7 @@ class UCFDataset(ImageAttributionDataset):
         label = item['label']
         # `real` BY NAME, never by index: the map re-indexes under
         # IAB_EXCLUDE_GENERATORS (real 22 -> 21), which a hardcoded 22 gets wrong.
-        real_label = 0 if label == model_class_to_label['real'] else 1
+        real_label = 0 if label == next(v for k, v in self.model_class_to_label.items() if k.casefold() == "real") else 1
         item['label_spe'] = torch.tensor(label, dtype=torch.long)
         item['label_det'] = torch.tensor(real_label, dtype=torch.long)
         return item  

@@ -30,7 +30,8 @@ parser.add_argument('--task_id', type=int, default=1, help='Task ID, used to sel
 parser.add_argument('--save_freq', type=int, default=5, help='Checkpoint saving frequency (epochs)')  
 parser.add_argument('--do_test', action='store_false', default=True, help='Whether to run test evaluation after training')
 parser.add_argument('--pretrained_path', type=str, default=None, help="Override config['pretrained_path'] (DNA stage 2 loads the stage-1 checkpoint)")
-args = parser.parse_args()  
+parser.add_argument("--dataset", choices=("iab", "iabench"), default="iab")
+parser.add_argument("--split_manifest", help="Existing shared IABench split manifest")
 
 
 def init_seed(seed, use_cuda=True):  
@@ -43,13 +44,16 @@ def init_seed(seed, use_cuda=True):
         torch.cuda.manual_seed_all(seed)  
 
 
-def create_training_logger(config, use_semantic_split=False):  
+def create_training_logger(config, args, use_semantic_split=False):
     now = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')  
     task_str = f"_{config['task_target']}" if config.get('task_target') else ""  
     base_folder = config['log_dir']  
 
     sub_folder = f"semantic_split_{args.task_id}" if use_semantic_split else "default_split"  
     log_dir = os.path.join(base_folder, sub_folder, config['model_name'], task_str + '_' + now)  
+    if args.dataset == "iabench":
+        log_dir = (os.path.dirname(os.path.abspath(args.resume_checkpoint)) if args.resume_checkpoint else
+                   os.path.join(base_folder, "iabench", config["model_name"], task_str + "_" + now))
     os.makedirs(log_dir, exist_ok=True)  
     logger = create_logger(os.path.join(log_dir, 'training.log'))  
     logger.info(f"Training logs saved to {log_dir}")  
@@ -83,7 +87,8 @@ def choose_metric(config):
     return metric  
 
 
-def main():  
+def main(argv=None):
+    args = parser.parse_args(argv)
     # loading config  
     with open(args.config, 'r') as f:  
         config = yaml.safe_load(f)  
@@ -95,6 +100,24 @@ def main():
     if args.pretrained_path:
         config['pretrained_path'] = args.pretrained_path
 
+    if args.dataset == "iabench":
+        from comparison.training.iabench import (
+            prepare_iabench, get_iabench_dataloaders, validate_checkpoint_metadata,
+            validate_dna_stage_one)
+        if args.use_semantic_split:
+            raise ValueError("IABench has no semantic split; use its shared manifest")
+        train_source, val_source = prepare_iabench(
+            args.root_dir, args.split_manifest, config, args.batch_size)
+        if args.resume_checkpoint:
+            checkpoint = torch.load(args.resume_checkpoint, map_location='cpu', weights_only=False)
+            validate_checkpoint_metadata(checkpoint, config['checkpoint_metadata'])
+            del checkpoint
+        elif config['model_name'] == 'dna' and config['train_stage'] == 2:
+            validate_dna_stage_one(config.get('pretrained_path'), config['checkpoint_metadata'])
+        print(f"IABench classes ({len(config['class_names'])}): {config['class_names']}")
+        print(f"Shared split counts: {config['checkpoint_metadata']['split_counts']}")
+        print(f"Output label space: {config['checkpoint_metadata']['output_label_space']} ({config['num_classes']} classes)")
+
     use_cuda = torch.cuda.is_available()  
     init_seed(config.get('manualSeed', 42), use_cuda)  
 
@@ -102,12 +125,24 @@ def main():
         cudnn.benchmark = True  
 
     # loading logger  
-    logger, log_dir, now = create_training_logger(config, use_semantic_split=args.use_semantic_split)  
+    logger, log_dir, now = create_training_logger(config, args, use_semantic_split=args.use_semantic_split)
     logger.info("Config:\n" + "\n".join(f"{k}: {v}" for k, v in config.items()))  
 
     # loading dataloader  
     model_name = config['model_name']  
-    if args.use_semantic_split:  
+    model = None
+    if args.dataset == 'iabench':
+        # DEFL owns the CLIP model; reuse its preprocessing when creating split views.
+        model_config = dict(config)
+        if args.resume_checkpoint and model_name == 'dna':
+            model_config['load_param'] = False
+        model = ATTRIBUTOR[model_name](model_config)
+        preprocess = model.semantic_extractor.clip_preprocess if model_name == 'defl' else None
+        train_loader, val_loader = get_iabench_dataloaders(
+            train_source, val_source, config, args.batch_size, args.num_workers, preprocess)
+        test_loader = None
+        logger.info(f"Checkpoints: {log_dir}/ckpt_best.pth and {log_dir}/ckpt_last.pth")
+    elif args.use_semantic_split:
         print("using semantic split...")  
         train_semantics, test_semantics = get_semantic(args.task_id)  
         print("training semantic:", train_semantics)  
@@ -135,10 +170,11 @@ def main():
         )  
     logger.info(f"train_loader samples: {len(train_loader)}")  
     logger.info(f"val_loader samples: {len(val_loader)}")  
-    logger.info(f"test_loader samples: {len(test_loader)}")  
+    if test_loader is not None:
+        logger.info(f"test_loader samples: {len(test_loader)}")
 
-    model_class = ATTRIBUTOR[config['model_name']]  
-    model = model_class(config)  
+    if model is None:
+        model = ATTRIBUTOR[config['model_name']](config)
     logger.info(model.parameters())
     optimizer = choose_optimizer(model, config)  
     scheduler = choose_scheduler(config, optimizer)  
@@ -153,18 +189,13 @@ def main():
 
     resume_ckpt = args.resume_checkpoint
     if resume_ckpt:  
-        try:  
-            best_metrics, ckpt_epoch = trainer.load_checkpoint(resume_ckpt)  
-            logger.info(f"Resumed checkpoint from {resume_ckpt}")  
-            if ckpt_epoch is not None:  
-                start_epoch = ckpt_epoch + 1  
-                logger.info(f"Resuming from epoch {start_epoch}")  
-            if best_metrics is not None:  
-                if 'val_metric' in best_metrics:  
-                    best_val_metric = best_metrics['val_metric']  
-                    logger.info(f"Restored best_val_metric: {best_val_metric}")  
-        except Exception as e:  
-            logger.error(f"Failed to load checkpoint {resume_ckpt}: {e}")  
+        best_metrics, ckpt_epoch = trainer.load_checkpoint(resume_ckpt)
+        logger.info(f"Resumed checkpoint from {resume_ckpt}")
+        if ckpt_epoch is not None:
+            start_epoch = ckpt_epoch + 1
+        if best_metrics is not None:
+            best_val_metric = best_metrics.get('val_metric')
+            best_epoch = best_metrics.get('best_epoch', 0)
 
     n_epochs = config.get('nEpochs', 10)  
     if hasattr(args, 'n_epoch') and args.n_epoch is not None:  
@@ -181,19 +212,22 @@ def main():
                 best_val_metric = val_metric  
                 best_epoch = epoch  
                 logger.info(f"Validation metric improved, saving best checkpoint at epoch {epoch}")  
-                trainer.save_checkpoint(filename="ckpt_best.pth", best_metrics={'val_metric': best_val_metric}, epoch=epoch)  
+                trainer.save_checkpoint(filename="ckpt_best.pth", best_metrics={'val_metric': best_val_metric, 'best_epoch': best_epoch}, epoch=epoch)
 
-        if epoch % save_freq == 0 or epoch == n_epochs:  
+        if args.dataset == 'iabench':
+            trainer.save_checkpoint(filename='ckpt_last.pth',
+                                    best_metrics={'val_metric': best_val_metric, 'best_epoch': best_epoch}, epoch=epoch)
+        elif epoch % save_freq == 0 or epoch == n_epochs:
             ckpt_name = f"ckpt_epoch_{epoch}.pth"  
             logger.info(f"Saving checkpoint at epoch {epoch}: {ckpt_name}")  
-            trainer.save_checkpoint(filename=ckpt_name, best_metrics={'val_metric': best_val_metric}, epoch=epoch)  
+            trainer.save_checkpoint(filename=ckpt_name, best_metrics={'val_metric': best_val_metric, 'best_epoch': best_epoch}, epoch=epoch)
 
     logger.info(f"Training complete. Best val at epoch {best_epoch}: {best_val_metric}")  
 
     for writer in trainer.writers.values():  
         writer.close()  
 
-    if args.do_test:  
+    if args.do_test and args.dataset == 'iab':
         degraded_levels = list(range(7))  
 
         for degraded in degraded_levels:  

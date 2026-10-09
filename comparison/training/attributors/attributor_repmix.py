@@ -84,7 +84,7 @@ class RepmixAttributor(AbstractAttributor):
         # real sits at index 0 (RepMix's own convention); here `real` is the LAST
         # class, so the original mismatches P(real) with the `4o` logit. Resolved
         # by name so it also survives IAB_EXCLUDE_GENERATORS re-indexing.
-        real_idx = model_class_to_label['real']
+        real_idx = self.config.get('real_class_index', model_class_to_label['real'])
         gate = detection_prob[:, 1].unsqueeze(1).expand_as(attribution).clone()
         gate[:, real_idx] = detection_prob[:, 0]
         out_attribution = attribution * gate

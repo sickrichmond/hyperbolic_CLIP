@@ -12,7 +12,7 @@ from comparison.training.utils.dataset_util import ConfigToAttr
 @DATASET.register_module(module_name='dna')
 class DNADataset(ImageAttributionDataset):  
     def __init__(self, root_dir, num_images_per_semantic_per_class=2000, transform=None,degraded=0, **kwargs):  
-        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded)  
+        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded, iabench_source=kwargs.get("iabench_source"))
         config = self.config = kwargs.get("config", None)
         self.config = config = ConfigToAttr(config)
         self.pretrain_transforms = get_transforms(config.crop_size)

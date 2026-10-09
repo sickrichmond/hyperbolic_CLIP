@@ -39,7 +39,8 @@ class HiFiNetAttributor(AbstractAttributor):
         # Load configuration and models  
         FENet_cfg = get_cfg_defaults()  
         self.FENet = get_seg_model(FENet_cfg).to(self.device)  
-        self.SegNet = NLCDetection().to(self.device)  
+        self.SegNet = NLCDetection(config.get('hierarchy_mapping'),
+                                   config.get('hierarchy_sizes')).to(self.device)
 
 
     def build_loss(self, config=None):  
