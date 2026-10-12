@@ -11,7 +11,8 @@ import unittest
 class BaselineLauncherTests(unittest.TestCase):
     def test_launchers_and_overrides(self):
         repo = Path(__file__).resolve().parents[1]
-        scripts = sorted((repo / 'comparison/training/scripts').glob('cineca_*_iabench.sh'))
+        scripts = sorted(path for path in (repo / 'comparison/training/scripts').glob('cineca_*_iabench.sh')
+                         if '_test_' not in path.name)
         self.assertEqual(len(scripts), 9)
         with tempfile.TemporaryDirectory(prefix='baseline slurm ') as directory:
             work = Path(directory)

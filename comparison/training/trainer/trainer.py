@@ -11,6 +11,7 @@ from comparison.training.attributors import *
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 from checkpoint_io import atomic_torch_save
+from comparison.training.metrics.base_metrics_class import calculate_metrics_for_test
 
 class Trainer(object):  
     def __init__(self,  
@@ -213,6 +214,8 @@ class Trainer(object):
         all_logits = []  
         all_labels = []  
         all_semantic_labels = []
+        is_patch = self.config.get('model_name') == 'patch'
+        patch_correct = patch_total = voted_correct = 0
 
         for batch in tqdm(test_loader, total=len(test_loader)):  
             for k, v in batch.items():  
@@ -223,20 +226,34 @@ class Trainer(object):
             
             logits_cpu = pred_dict['logits'].detach().cpu()
             label_cpu = batch['label'].detach().cpu()
-            semantic_cpu = batch['semantic_label'].detach().cpu()
-
+            if 'semantic_label' in batch:
+                all_semantic_labels.append(batch['semantic_label'].detach().cpu())
+            if is_patch:
+                # Retain image probabilities and counts, rather than every spatial score map.
+                predicted = logits_cpu.argmax(dim=1)
+                patch_correct += (predicted == label_cpu[:, None, None]).sum().item()
+                patch_total += predicted.numel()
+                votes = torch.mode(predicted.flatten(1), dim=1).values
+                voted_correct += (votes == label_cpu).sum().item()
+                logits_cpu = logits_cpu.softmax(dim=1).mean(dim=(2, 3))
             all_logits.append(logits_cpu)
             all_labels.append(label_cpu)
-            all_semantic_labels.append(semantic_cpu)
 
         all_logits = torch.cat(all_logits, dim=0)  
         all_labels = torch.cat(all_labels, dim=0)  
-        all_semantic_labels = torch.cat(all_semantic_labels, dim=0)  
+        all_semantic_labels = torch.cat(all_semantic_labels, dim=0) if all_semantic_labels else None
 
         input_data = {'label': all_labels, "semantic_label": all_semantic_labels}  
         pred_dict = {'logits': all_logits}  
 
-        if isinstance(self.model, DDP):  
+        if is_patch:
+            auc, acc, ap, conf_matrix, semantic_acc, extra = calculate_metrics_for_test(
+                all_labels, all_logits, all_semantic_labels, need_softmax=False)
+            metrics = {'auc': float(auc), 'acc': float(acc), 'ap': float(ap),
+                       'conf_matrix': conf_matrix, 'semantic_acc': semantic_acc, **extra,
+                       'acc_D_raw': patch_correct / patch_total,
+                       'acc_D_voted': voted_correct / len(all_labels), 'acc_D_avg': float(acc)}
+        elif isinstance(self.model, DDP):
             metrics = self.model.module.compute_metrics(input_data, pred_dict,test=True)  
         else:  
             metrics = self.model.compute_metrics(input_data, pred_dict,test=True)  

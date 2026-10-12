@@ -281,6 +281,8 @@ class ImageAttributionDataset(Dataset):
         img_path, label, semantic_label, semantic_subclass = self.samples[idx]
         image = self._open_image(img_path)
         if self.iabench_source is not None:
+            if self.mode == 'test':
+                image = self.get_degraded_img(image)
             return {"image": image, "label": label}
 
         # Derive grok3's index from the ACTIVE map: hardcoding 13 cropped the wrong
