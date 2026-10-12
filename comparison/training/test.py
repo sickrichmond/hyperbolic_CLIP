@@ -101,7 +101,9 @@ def main(argv=None):
             'model_name', 'dataset', 'dataset_digest', 'manifest_digest', 'class_names')}
         provenance.update(checkpoint=os.path.abspath(args.resume_checkpoint),
                           split_manifest=os.path.abspath(args.split_manifest), split='test',
-                          test_rows=len(test_source), output_label_space=checkpoint['output_label_space'])
+                          test_rows=len(test_source), output_label_space=checkpoint['output_label_space'],
+                          train_augment=config.get('train_augment', False),
+                          aug_policy=config.get('aug_policy', 'none'))
         del checkpoint
         clip_preprocess = model.semantic_extractor.clip_preprocess if config['model_name'] == 'defl' else None
     else:

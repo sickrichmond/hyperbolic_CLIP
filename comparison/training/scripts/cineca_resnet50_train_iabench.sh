@@ -1,5 +1,6 @@
 #!/bin/bash
 # IABench shared-manifest training; clean validation selects checkpoints.
+# AUGMENT=1 enables our JPEG/blur/downsampling policy; clean training is the default.
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
@@ -30,12 +31,24 @@ NUM_WORKERS="${NUM_WORKERS:-8}"
 cd "$REPO"
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 extra_args=()
+AUGMENT="${AUGMENT:-0}"
+case "$AUGMENT" in
+  0) ;;
+  1)
+    [[ "${AUG_POLICY:-corruption}" == corruption ]] || {
+      echo "ResNet50 AUG_POLICY must be corruption (our policy)." >&2; exit 2;
+    }
+    extra_args+=(--train_augment)
+    ;;
+  *) echo "AUGMENT must be 0 or 1." >&2; exit 2 ;;
+esac
 if [[ -n "${RESUME_CHECKPOINT:-}" ]]; then
   [[ -f "$RESUME_CHECKPOINT" ]] || { echo "Missing resume checkpoint: $RESUME_CHECKPOINT" >&2; exit 1; }
   extra_args+=(--resume_checkpoint "$RESUME_CHECKPOINT")
 fi
 echo "Node: $(hostname) | GPU: ${CUDA_VISIBLE_DEVICES:-?}"
 echo "Dataset: $DATA | Manifest: $SPLIT_MANIFEST | Logs: $LOGDIR"
+echo "Training with AUGMENT=$AUGMENT (corruption policy); validation stays clean."
 python -m comparison.training.train \
   --config comparison/training/config/model/resnet50.yaml \
   --dataset iabench --split_manifest "$SPLIT_MANIFEST" \

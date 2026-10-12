@@ -32,6 +32,8 @@ parser.add_argument('--do_test', action='store_false', default=True, help='Wheth
 parser.add_argument('--pretrained_path', type=str, default=None, help="Override config['pretrained_path'] (DNA stage 2 loads the stage-1 checkpoint)")
 parser.add_argument("--dataset", choices=("iab", "iabench"), default="iab")
 parser.add_argument("--split_manifest", help="Existing shared IABench split manifest")
+parser.add_argument('--train_augment', action='store_true', default=False,
+                    help='Apply our JPEG/blur/downsampling policy to IABench ResNet50 training images only')
 
 
 def init_seed(seed, use_cuda=True):  
@@ -47,6 +49,8 @@ def init_seed(seed, use_cuda=True):
 def create_training_logger(config, args, use_semantic_split=False):
     now = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')  
     task_str = f"_{config['task_target']}" if config.get('task_target') else ""  
+    if args.train_augment:
+        task_str += '_aug'
     base_folder = config['log_dir']  
 
     sub_folder = f"semantic_split_{args.task_id}" if use_semantic_split else "default_split"  
@@ -99,6 +103,10 @@ def main(argv=None):
     config['log_dir'] = args.log_dir
     if args.pretrained_path:
         config['pretrained_path'] = args.pretrained_path
+    if args.train_augment:
+        if args.dataset != 'iabench' or config['model_name'] != 'resnet50':
+            raise ValueError('--train_augment is supported for IABench ResNet50 training')
+        config.update(train_augment=True, aug_policy='corruption')
 
     if args.dataset == "iabench":
         from comparison.training.iabench import (

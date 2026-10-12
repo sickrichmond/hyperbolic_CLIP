@@ -21,6 +21,10 @@ def prepare_iabench(root, split_manifest, config, batch_size):
     if real != [0]:
         raise ValueError("IABench manifest must contain exactly one real class, first")
     method = config['model_name']
+    if config.get('train_augment'):
+        if method != 'resnet50' or config.get('aug_policy', 'corruption') != 'corruption':
+            raise ValueError('Baseline augmentation supports ResNet50 with the corruption policy')
+        config['aug_policy'] = 'corruption'
     if method == 'ucf' and (batch_size < 2 or batch_size % 2):
         raise ValueError("UCF requires an even batch size of at least two")
     if batch_size < 1:
@@ -51,6 +55,8 @@ def prepare_iabench(root, split_manifest, config, batch_size):
             metadata['output_label_space'] = 'transformations'
             metadata['output_class_names'] = [f'transform_{i}' for i in range(170)]
     metadata['num_classes'] = config['num_classes']
+    if config.get('train_augment'):
+        metadata.update(train_augment=True, aug_policy='corruption')
     # Paths and epoch limits may change on resume; the actual training policy may not.
     metadata['training_config'] = {
         key: value for key, value in config.items()

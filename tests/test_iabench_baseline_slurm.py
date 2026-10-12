@@ -23,7 +23,8 @@ class BaselineLauncherTests(unittest.TestCase):
             capture = work / 'command.json'
             env = dict(os.environ, WORK=str(work), SCRATCH=str(work / 'scratch'), REPO=str(repo),
                        TEST_PYTHON=sys.executable, CAPTURE=str(capture))
-            for key in ('DATA', 'SPLIT_MANIFEST', 'NUM_WORKERS', 'LOGDIR', 'RESUME_CHECKPOINT', 'STAGE_ONE_CHECKPOINT'):
+            for key in ('DATA', 'SPLIT_MANIFEST', 'NUM_WORKERS', 'LOGDIR', 'RESUME_CHECKPOINT', 'STAGE_ONE_CHECKPOINT',
+                        'AUGMENT', 'AUG_POLICY'):
                 env.pop(key, None)
             stub = r'''
 module() { :; }
@@ -76,6 +77,22 @@ exec bash "$@"
             failed = subprocess.run(['bash', '-c', stub, '_', str(script)], env=env, capture_output=True)
             self.assertNotEqual(failed.returncode, 0)
             self.assertFalse(capture.exists())
+            script = repo / 'comparison/training/scripts/cineca_resnet50_train_iabench.sh'
+            for settings in ({'AUGMENT': '1'}, {'AUGMENT': '1', 'RESUME_CHECKPOINT': str(checkpoint)}):
+                subprocess.run(['bash', '-c', stub, '_', str(script)], env=dict(env, **settings),
+                               check=True, capture_output=True, text=True)
+                argv = json.loads(capture.read_text())['argv']
+                self.assertIn('--train_augment', argv)
+                self.assertEqual(argv[argv.index('--split_manifest') + 1], str(
+                    work / 'hyp_fine_tuning/checkpoints/attribution_iabench_random_vitl14.splits.json'))
+                if 'RESUME_CHECKPOINT' in settings:
+                    self.assertEqual(argv[argv.index('--resume_checkpoint') + 1], str(checkpoint))
+            for settings in ({'AUGMENT': '2'}, {'AUGMENT': '1', 'AUG_POLICY': 'omnidfa'}):
+                capture.unlink(missing_ok=True)
+                failed = subprocess.run(['bash', '-c', stub, '_', str(script)], env=dict(env, **settings),
+                                        capture_output=True, text=True)
+                self.assertEqual(failed.returncode, 2)
+                self.assertFalse(capture.exists())
 
 
 if __name__ == '__main__':

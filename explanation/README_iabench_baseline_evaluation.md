@@ -91,3 +91,35 @@ CPU checks: `python -m tests.test_iabench_baseline_evaluation` and
 all eight baseline formats, exact test membership at all seven levels, singleton
 final batches, metadata/weight rejection and native PatchForensics metric parity.
 Full GPU execution and throughput require verification on Leonardo.
+
+## Train with our corruption policy
+
+HypCLIP already has an augmentation flag; ResNet50 now uses the same JPEG, blur
+and downsampling implementation before its native preprocessing. After copying
+the updated source to Leonardo, submit from the repository:
+
+```bash
+export DATA="$SCRATCH/datasets/IABench_images"
+sbatch --time=4-00:00:00 --export=ALL,AUGMENT=1,AUG_POLICY=corruption slurm/slurm_train_iabench.sh
+sbatch --export=ALL,AUGMENT=1,AUG_POLICY=corruption comparison/training/scripts/cineca_resnet50_train_iabench.sh
+```
+
+Both modes share the existing manifest; validation stays clean. HypCLIP saves
+`attribution_iabench_random_aug_vitl14.pt`. ResNet50 saves best/last checkpoints
+under `comparison/training/logs/iabench/resnet50/_aug_TIMESTAMP/`. Clean defaults
+and the original clean checkpoints are preserved. The new ResNet50 flag supports
+our corruption policy; an explicit incompatible `AUG_POLICY` is rejected.
+
+Use the existing hyperbolic evaluator for the HypCLIP checkpoint and the shared
+baseline evaluator for ResNet50. Augmentation policy is included in ResNet50's
+checkpoint metadata and evaluation provenance. Test images receive only the
+requested fixed degradation, without training augmentation.
+
+To resume augmented ResNet50 training, retain the mode flag:
+
+```bash
+sbatch --export=ALL,AUGMENT=1,RESUME_CHECKPOINT=/path/to/_aug_RUN/ckpt_last.pth \
+  comparison/training/scripts/cineca_resnet50_train_iabench.sh
+```
+
+CPU verification: `python -m tests.test_iabench_resnet_augmentation`.
