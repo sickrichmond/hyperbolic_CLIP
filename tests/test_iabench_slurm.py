@@ -29,7 +29,8 @@ class IABenchSlurmTests(unittest.TestCase):
             checkpoint.touch()
             manifest.touch()
             capture = work / "command.json"
-            env = dict(os.environ, WORK=str(work), SLURM_JOB_ID="123",
+            scratch = work / "scratch storage"
+            env = dict(os.environ, WORK=str(work), SCRATCH=str(scratch), SLURM_JOB_ID="123",
                        CUDA_VISIBLE_DEVICES="4", SLURM_TEST_PYTHON=sys.executable,
                        SLURM_TEST_CAPTURE=str(capture))
             for name in ("CKPT", "LOGDIR", "SPLIT_MANIFEST", "NUM_WORKERS", "PROFILE_STEPS",
@@ -49,7 +50,7 @@ exec bash "$1"
                     ({"AUGMENT": "1", "AUG_POLICY": "omnidfa", "DATA": str(work / "image cache")},
                      "_omniaug", "omnidfa")):
                 with self.subTest(settings=settings):
-                    subprocess.run(["bash", "-c", stub, "_", str(train_script)],
+                    completed = subprocess.run(["bash", "-c", stub, "_", str(train_script)],
                                    env=dict(env, **settings), check=True, capture_output=True, text=True)
                     command = json.loads(capture.read_text())
                     self.assertEqual(command["argv"][0], "train_iabench.py")
@@ -61,7 +62,8 @@ exec bash "$1"
                         checkpoints / f"attribution_iabench_random{suffix}_vitl14.pt"))
                     self.assertEqual(args.split_manifest, str(manifest))
                     self.assertEqual(args.dataset_path, settings.get(
-                        "DATA", "/leonardo_scratch/large/userexternal/imaljkov/datasets/IABench/data"))
+                        "DATA", str(scratch / "datasets/IABench_images")))
+                    self.assertIn(f"Dataset: {args.dataset_path}", completed.stdout)
                     self.assertEqual((args.val_frac, args.test_frac, args.seed), (0.1, 0.1, 42))
                     self.assertEqual(command["gpu"], "4")
             for settings in ({"AUGMENT": "2"}, {"AUG_POLICY": "unknown"}):
@@ -80,7 +82,7 @@ exec bash "$1"
                                    SPLIT_MANIFEST=str(manifest), NUM_WORKERS="4",
                                    DATA=str(work / "image cache"))
                         Path(env["CKPT"]).touch()
-                    subprocess.run(["bash", "-c", stub, "_", str(eval_script)], env=env,
+                    completed = subprocess.run(["bash", "-c", stub, "_", str(eval_script)], env=env,
                                    check=True, capture_output=True, text=True)
                     command = json.loads(capture.read_text())
                     self.assertEqual(command["argv"][:2], ["-m", "comparison.training.test_hypclip"])
@@ -91,7 +93,8 @@ exec bash "$1"
                     self.assertEqual((flags["--level_start"], flags["--level_end"]), ("0", "7"))
                     self.assertEqual(flags["--num_workers"], "4" if override else "8")
                     self.assertEqual(flags["--root_dir"], env.get(
-                        "DATA", "/leonardo_scratch/large/userexternal/imaljkov/datasets/IABench/data"))
+                        "DATA", str(scratch / "datasets/IABench_images")))
+                    self.assertIn(f"Dataset: {flags['--root_dir']}", completed.stdout)
                     self.assertEqual(flags["--log_dir"], env.get(
                         "LOGDIR", str(work / "outputs/hypclip_iabench_123")))
                     self.assertEqual(command["gpu"], "4")

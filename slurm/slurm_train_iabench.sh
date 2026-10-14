@@ -33,7 +33,7 @@ export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 
 REPO="$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo"
-DATA="${DATA:-/leonardo_scratch/large/userexternal/imaljkov/datasets/IABench/data}"
+DATA="${DATA:-$SCRATCH/datasets/IABench_images}"
 OUT="$WORK/hyp_fine_tuning/checkpoints"
 SPLIT_MANIFEST="${SPLIT_MANIFEST:-$OUT/attribution_iabench_random_vitl14.splits.json}"
 PROFILE_STEPS="${PROFILE_STEPS:-0}"
@@ -66,6 +66,7 @@ mkdir -p "$OUT"
 cd "$REPO"
 
 echo "Slurm GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
+echo "Dataset: $DATA | Manifest: $SPLIT_MANIFEST"
 echo "Training with AUGMENT=$AUGMENT, AUG_POLICY=$AUG_POLICY → $CKPT"
 
 python train_iabench.py \
