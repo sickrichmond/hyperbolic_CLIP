@@ -27,7 +27,7 @@ class DNAAttributor(AbstractAttributor):
         super().__init__(config, load_param)  
         self.config = config or {}  
         self.config = ConfigToAttr(self.config)
-        self.device = "cuda"
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.build_model(self.config)  
         self.build_loss(self.config)  
         load_param = config.get("load_param", False)

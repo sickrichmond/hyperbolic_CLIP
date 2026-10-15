@@ -145,8 +145,7 @@ def finalize_training(args, model, core, train_ds, class_names,
     plot_epoch_snapshot(
         all_emb, all_labels, x_anc_plot, class_names,
         Path(args.diag_plot_dir) / "train_all_final.png",
-        curv=args.curv, min_radius=args.min_radius,
-        state=None, seed=args.seed,
+        curv=args.curv,
         title=(f"best epoch {best_ckpt['epoch']} · all {len(all_labels)} "
                "training images"),
     )

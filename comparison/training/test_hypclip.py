@@ -1,8 +1,8 @@
-"""Evaluate hyperbolic checkpoints through the ImageAttributionBench harness.
+"""Evaluate IAB or IABench hyperbolic checkpoints through the comparison harness.
 
-Reuse the harness image enumeration, configured split, degradations and metrics
-through the hypclip dataset adapter. The active class map is controlled by
-IAB_EXCLUDE_GENERATORS; saved anchors are reordered into that map.
+IAB uses the harness enumeration and class map controlled by IAB_EXCLUDE_GENERATORS.
+IABench uses the training manifest's held-out test rows and the checkpoint class
+order. Both use the same scoring, degradations and metric helper.
 
 Logits are negative exterior angles. Argmax selects the class; the metric
 helper applies softmax for AUC/AP. Result files contain per-level metrics and
@@ -16,13 +16,12 @@ Usage: python -m comparison.training.test_hypclip --help
 import os
 import argparse
 import datetime
+import json
+from pathlib import Path
 
 import torch
 from tqdm import tqdm
 
-from comparison.dataset.ImageAttributionDataset.dataloader import get_dataloader
-from comparison.dataset.ImageAttributionDataset.semantic_split import get_semantic
-from comparison.dataset.ImageAttributionDataset.dataset import model_class_to_label
 from comparison.training.metrics.base_metrics_class import calculate_metrics_for_test
 
 from models.attribution_clip import AttributionCLIP
@@ -31,14 +30,17 @@ from data.degradations import LEVEL_LABELS
 from transformers import CLIPTokenizer
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--checkpoint', required=True, help='our native .pt checkpoint')
-    p.add_argument('--root_dir', required=True, help='root of the IAB dataset')
+    p.add_argument('--dataset', choices=['iab', 'iabench'], default='iab')
+    p.add_argument('--split_manifest', help='IABench manifest override; must match the checkpoint digest')
+    p.add_argument('--root_dir', required=True, help='root of the selected dataset')
     p.add_argument('--batch_size', type=int, default=64)
     p.add_argument('--num_workers', type=int, default=4)
-    p.add_argument('--num_images_per_semantic_per_class', '-n', type=int, default=2000)
+    p.add_argument('--num_images_per_semantic_per_class', '-n', type=int, default=2000,
+                   help='IAB only; IABench uses the cap recorded in its manifest')
     p.add_argument('--level_start', type=int, default=0)
     p.add_argument('--level_end', type=int, default=1, help='exclusive (0..7 covers all)')
     p.add_argument('--use_semantic_split', action='store_true', default=False)
@@ -49,11 +51,13 @@ def parse_args():
                         'aspect ratio, before CLIP processing (0 disables). Report this '
                         'setting separately; an accuracy change alone does not establish '
                         'whether the model uses native-resolution cues.')
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def harness_class_names():
     """Class names in the harness label order (index 0..K-1)."""
+    from comparison.dataset.ImageAttributionDataset.dataset import model_class_to_label
+
     idx_to_name = {v: k for k, v in model_class_to_label.items()}
     return [idx_to_name[i] for i in range(len(idx_to_name))]
 
@@ -65,8 +69,8 @@ def build_anchor_texts():
             for name in harness_class_names()]
 
 
-def load_anchors(ckpt, model, curv, device):
-    """Class anchors in the HARNESS label order → logits column c == label c.
+def load_anchors(ckpt, model, curv, device, class_names=None):
+    """Restore anchors in class_names order, defaulting to the IAB harness order.
 
     Both anchor kinds live in the checkpoint's OWN class order ('real' first) and
     are permuted here into the harness order ('real' last):
@@ -78,7 +82,7 @@ def load_anchors(ckpt, model, curv, device):
     be evaluated against the default templates, silently and without any error.
     """
     ckpt_names = list(ckpt['class_names'])
-    harness_names = harness_class_names()
+    harness_names = list(class_names) if class_names is not None else harness_class_names()
     missing = [n for n in harness_names if n not in ckpt_names]
     if missing:
         raise ValueError(f"checkpoint has no anchor for class(es) {missing}; "
@@ -88,7 +92,7 @@ def load_anchors(ckpt, model, curv, device):
     tangent = ckpt.get('anchor_tangent')
     if tangent is not None:
         print(f"Anchors: {len(perm)} learned {ckpt.get('anchor_init', 'free')} anchors "
-              f"(reordered {ckpt_names[:2]}… → harness order)")
+              f"(in evaluation class order)")
         return exp_map0(tangent[perm].float().to(device), curv=curv)
 
     ckpt_texts = ckpt.get('anchor_texts')
@@ -96,7 +100,8 @@ def load_anchors(ckpt, model, curv, device):
         anchor_texts = [ckpt_texts[i] for i in perm]
         src = 'checkpoint prompts'
     else:
-        anchor_texts = build_anchor_texts()      # pre-anchor_texts checkpoints
+        anchor_texts = ["A real image" if name.casefold() == "real"
+                        else f"A synthetic image generated by {name}" for name in harness_names]
         src = 'default templates'
     tokenizer = CLIPTokenizer.from_pretrained(ckpt['clip_name'])
     tok = tokenizer(anchor_texts, return_tensors='pt', padding='max_length',
@@ -108,6 +113,53 @@ def load_anchors(ckpt, model, curv, device):
     return x_anc
 
 
+def load_iabench_test_dataset(args, ckpt):
+    """Bind test rows to the checkpoint's manifest before loading the backbone."""
+    from data.iabench_dataset import IABenchDataset, manifest_digest
+
+    if args.use_semantic_split or args.num_images_per_semantic_per_class != 2000:
+        raise ValueError("IABench has no semantic split/cap; use the saved manifest")
+    path = args.split_manifest or ckpt.get('split_manifest')
+    if not path:
+        raise ValueError("IABench evaluation requires the training split manifest")
+    manifest = json.loads(Path(path).read_text())
+    if manifest_digest(manifest) != ckpt.get('split_manifest_digest'):
+        raise ValueError("IABench manifest digest differs from the checkpoint")
+    if manifest['class_names'] != list(ckpt['class_names']):
+        raise ValueError("IABench manifest and checkpoint class orders differ")
+    if manifest['dataset_digest'] != ckpt.get('dataset_digest'):
+        raise ValueError("IABench dataset digest differs from the checkpoint")
+    dataset = IABenchDataset(args.root_dir, processor_name=ckpt['clip_name'])
+    test = dataset.split_view(manifest, 'test')
+    test.pre_resize = args.pre_resize
+    return test
+
+
+@torch.no_grad()
+def evaluate_loader(model, loader, x_anc, class_names, device, curv):
+    """Score either dataset in evaluation class order using negative exterior angles."""
+    names_to_index = {name: i for i, name in enumerate(class_names)}
+    all_logits, all_labels, all_sem = [], [], []
+    K = len(class_names)
+    for batch in tqdm(loader, total=len(loader), desc='test'):
+        pixel = batch['pixel_values'] if 'pixel_values' in batch else batch['image']
+        x_img, _ = model.encode_image(pixel.to(device))
+        B = x_img.shape[0]
+        anchors = x_anc.unsqueeze(0).expand(B, K, -1).reshape(B * K, -1)
+        images = x_img.unsqueeze(1).expand(B, K, -1).reshape(B * K, -1)
+        scores = oxy_angle(anchors, images, curv=curv).reshape(B, K)
+        all_logits.append((-scores).cpu())
+        labels = (batch['label'].cpu() if 'label' in batch else
+                  torch.tensor([names_to_index[g] for g in batch['generator']], dtype=torch.long))
+        all_labels.append(labels)
+        if 'semantic_label' in batch:
+            all_sem.append(batch['semantic_label'].cpu())
+    if not all_logits:
+        raise ValueError("The test split is empty")
+    return (torch.cat(all_logits), torch.cat(all_labels),
+            torch.cat(all_sem) if all_sem else None)
+
+
 @torch.no_grad()
 def main():
     args = parse_args()
@@ -117,12 +169,29 @@ def main():
     clip_name = ckpt['clip_name']
     curv = ckpt.get('curv', 1.0)
 
+    if ckpt.get('dataset', 'iab') != args.dataset:
+        raise ValueError("--dataset must match the checkpoint dataset")
+    if not 0 <= args.level_start < args.level_end <= 7:
+        raise ValueError("Evaluation levels must satisfy 0 <= level_start < level_end <= 7")
+    if args.pre_resize < 0:
+        raise ValueError("--pre_resize must be non-negative")
+    if args.dataset == 'iabench':
+        iabench_test = load_iabench_test_dataset(args, ckpt)
+        class_names = list(ckpt['class_names'])
+    else:
+        if args.split_manifest:
+            raise ValueError("--split_manifest is supported here only for IABench")
+        from comparison.dataset.ImageAttributionDataset.dataloader import get_dataloader
+        from comparison.dataset.ImageAttributionDataset.semantic_split import get_semantic
+        iabench_test = None
+        class_names = harness_class_names()
+
     model = AttributionCLIP.from_checkpoint(ckpt).to(device)
     model.clip.load_state_dict(ckpt['lora_state'])
     model.projection.load_state_dict(ckpt['projection'])
     model.eval()
 
-    x_anc = load_anchors(ckpt, model, curv, device)                    # (K, D)
+    x_anc = load_anchors(ckpt, model, curv, device, class_names=class_names)
     K = x_anc.shape[0]
 
     print("Decision rule: argmin xi")
@@ -131,46 +200,37 @@ def main():
     config = {'model_name': 'hypclip', 'clip_name': clip_name, 'num_classes': K,
               'pre_resize': args.pre_resize}
     if args.pre_resize:
-        print(f"CONTROL RUN: every test image squared to {args.pre_resize}x"
-              f"{args.pre_resize} first — the native->224 resampling ratio is now "
-              f"constant across classes. Not a head-to-head number.")
+        print(f"Pre-resize control: shortest edge {args.pre_resize} before CLIP preprocessing.")
 
     train_semantics = test_semantics = None
-    if args.use_semantic_split:
+    if args.use_semantic_split and args.dataset == 'iab':
         train_semantics, test_semantics = get_semantic(args.task_id)
 
     for degraded in range(args.level_start, args.level_end):
         deg_label = LEVEL_LABELS.get(degraded, str(degraded))
         print(f"\n=== degraded={degraded} ({deg_label}) ===")
 
-        _, _, test_loader = get_dataloader(
-            root_dir=args.root_dir,
-            model_name='hypclip',
-            num_images_per_semantic_per_class=args.num_images_per_semantic_per_class,
-            batch_size=args.batch_size,
-            degraded=degraded,
-            config=config,
-            num_workers=args.num_workers,
-            use_semantic_split=args.use_semantic_split,
-            train_semantics=train_semantics,
-            test_semantics=test_semantics,
-        )
+        if iabench_test is not None:
+            iabench_test.degraded = degraded
+            test_loader = torch.utils.data.DataLoader(
+                iabench_test, batch_size=args.batch_size, num_workers=args.num_workers,
+                shuffle=False)
+        else:
+            _, _, test_loader = get_dataloader(
+                root_dir=args.root_dir,
+                model_name='hypclip',
+                num_images_per_semantic_per_class=args.num_images_per_semantic_per_class,
+                batch_size=args.batch_size,
+                degraded=degraded,
+                config=config,
+                num_workers=args.num_workers,
+                use_semantic_split=args.use_semantic_split,
+                train_semantics=train_semantics,
+                test_semantics=test_semantics,
+            )
 
-        all_logits, all_labels, all_sem = [], [], []
-        for batch in tqdm(test_loader, total=len(test_loader), desc=f"deg{degraded}"):
-            pixel = batch['image'].to(device)
-            x_img, _ = model.encode_image(pixel)                        # (B, D)
-            B = x_img.shape[0]
-            x_anc_t = x_anc.unsqueeze(0).expand(B, K, -1).reshape(B * K, -1)
-            x_img_t = x_img.unsqueeze(1).expand(B, K, -1).reshape(B * K, -1)
-            score = oxy_angle(x_anc_t, x_img_t, curv=curv).reshape(B, K)
-            all_logits.append((-score).cpu())
-            all_labels.append(batch['label'].cpu())
-            all_sem.append(batch['semantic_label'].cpu())
-
-        logits = torch.cat(all_logits, dim=0)
-        labels = torch.cat(all_labels, dim=0)
-        sem = torch.cat(all_sem, dim=0)
+        logits, labels, sem = evaluate_loader(
+            model, test_loader, x_anc, class_names, device, curv)
 
         auc, acc, ap, conf_matrix, semantic_acc, extra = \
             calculate_metrics_for_test(labels, logits, sem, need_softmax=True)
@@ -184,7 +244,11 @@ def main():
             f.write(f"ap: {ap}\n")
             for k, v in extra.items():
                 f.write(f"{k}: {v}\n")
-            f.write(f"semantic_acc: {semantic_acc}\n")
+            if sem is not None:
+                f.write(f"semantic_acc: {semantic_acc}\n")
+            f.write(f"class_names: {json.dumps(class_names)}\n")
+            if iabench_test is not None:
+                f.write(f"split_manifest_digest: {ckpt['split_manifest_digest']}\n")
             f.write(f"conf_matrix:\n{conf_matrix}\n")
         print(f"  acc={acc:.4f}  auc={auc:.4f}  ap={ap:.4f}  "
               f"P_macro={extra['precision_macro']:.4f}  R_macro={extra['recall_macro']:.4f}")

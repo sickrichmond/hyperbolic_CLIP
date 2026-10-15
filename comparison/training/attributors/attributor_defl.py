@@ -39,7 +39,7 @@ class DEFLAttributor(AbstractAttributor):
     def build_model(self, config=None):  
         self.defl_model = DEFLNetwork().to(self.device)
         self.semantic_extractor = SemanticFeatureExtractor(self.defl_model).to(self.device)
-        self.nn_classifier = SimpleNNClassifier(num_classes=len(model_class_to_label)).to(self.device)
+        self.nn_classifier = SimpleNNClassifier(num_classes=config.get('num_classes', len(model_class_to_label))).to(self.device)
 
 
     def build_loss(self, config=None):  

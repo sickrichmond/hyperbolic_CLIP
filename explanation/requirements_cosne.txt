@@ -1,0 +1,5 @@
+torch
+numpy
+matplotlib
+colorcet>=3.1
+plotly>=5.18

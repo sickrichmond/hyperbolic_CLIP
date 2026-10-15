@@ -5,6 +5,7 @@ checkpoint selection, and Poincare diagnostics. The pairwise positive-cosine
 anchor penalty is enabled by default with weight 0.2; --lambda_cosine 0 disables it.
 """
 from pathlib import Path
+from time import perf_counter
 
 import torch
 from torch import nn
@@ -21,29 +22,13 @@ from losses.attribution_loss import EntailmentConeLoss
 from training.attribution_args import parse_args, validate_args
 from training.anchors import AnchorState, build_anchors, make_balanced_sampler, calibrate_image_depth
 from training.attribution_diagnostics import (
-    run_validation, report_epoch, report_validation, finalize_training,
+    run_validation, report_epoch, report_validation, collect_plot_embeddings,
+    finalize_training,
 )
 
 
-def main():
-    args = parse_args()
-    validate_args(args)
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    torch.manual_seed(args.seed)
-    print(f"Seed: {args.seed}")
-
-    class_names, anchor_texts = build_anchors(args.generators, args.anchor_prompts)
-    name_to_idx = {n: i for i, n in enumerate(class_names)}
-    if args.anchor_init == "image_centroid":
-        print(f"Class anchors: image centroids (text-free), {len(class_names)} classes")
-        for i, c in enumerate(class_names):
-            print(f"  [{i}] {c}")
-    else:
-        src = args.anchor_prompts or "default templates"
-        print(f"Class anchors ({args.anchor_init}, from {src}):")
-        for i, (c, t) in enumerate(zip(class_names, anchor_texts)):
-            print(f"  [{i}] {c:14s} → \"{t}\"")
-
+def build_iab_datasets(args):
+    """Keep the original IAB caption and manifest selection behavior."""
     req_cap = args.require_caption
     train_include = val_include = None
     if args.split_manifest:
@@ -89,6 +74,32 @@ def main():
             require_caption=False,
         )
 
+    return train_ds, val_ds
+
+
+def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=True):
+    """Shared cone training; supplied datasets are training and validation only."""
+    validate_args(args)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.manual_seed(args.seed)
+    print(f"Seed: {args.seed}")
+
+    class_names, anchor_texts = build_anchors(args.generators, args.anchor_prompts)
+    name_to_idx = {n: i for i, n in enumerate(class_names)}
+    if args.anchor_init == "image_centroid":
+        print(f"Class anchors: image centroids (text-free), {len(class_names)} classes")
+        for i, c in enumerate(class_names):
+            print(f"  [{i}] {c}")
+    else:
+        src = args.anchor_prompts or "default templates"
+        print(f"Class anchors ({args.anchor_init}, from {src}):")
+        for i, (c, t) in enumerate(zip(class_names, anchor_texts)):
+            print(f"  [{i}] {c:14s} → \"{t}\"")
+
+    if datasets is None:
+        datasets = build_iab_datasets(args)
+    train_ds, val_ds = datasets
+
     train_ds.train_augment = args.train_augment
     train_ds.aug_policy = args.aug_policy
     if args.train_augment:
@@ -106,6 +117,9 @@ def main():
         val_ds, batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers, pin_memory=True,
     )
+    steps_per_epoch = len(train_loader)
+    if not steps_per_epoch:
+        raise ValueError("Training split is smaller than --batch_size; lower the batch size")
 
     model = AttributionCLIP(
         clip_name=args.clip_name,
@@ -169,7 +183,6 @@ def main():
           + f"  lr={args.lr}  weight_decay={args.weight_decay}"
           + (f"  |  {len(geometric)} geometric tensors at lr={anchor_lr} wd=0"
              if geometric else ""))
-    steps_per_epoch = len(train_loader)
     if args.lr_schedule == "constant":
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda _: 1.0)
         print(f"LR schedule: constant at {args.lr} for all "
@@ -183,15 +196,25 @@ def main():
     print("Image-only attribution training.")
 
     plot_epoch_snapshot = None
-    diag_state = None
+    plot_loader = None
     snap_every = 0
     if args.diag_plot_dir:
-        from training.poincare import plot_epoch_snapshot, _load_horopca
-        _load_horopca()
         Path(args.diag_plot_dir).mkdir(parents=True, exist_ok=True)
         snap_every = args.snapshot_every
-        print(f"Per-epoch Poincare snapshots → {args.diag_plot_dir}"
-              + (f" (+ every {snap_every} steps)" if snap_every else ""))
+        if plot_each_epoch or snap_every or args.plot_all_train:
+            from training.poincare import plot_epoch_snapshot
+        if plot_each_epoch:
+            plot_loader = DataLoader(
+                train_ds, batch_size=args.batch_size, shuffle=False,
+                num_workers=args.num_workers, pin_memory=True,
+            )
+            print(f"Per-epoch Poincare snapshots of all {len(train_ds)} clean training images "
+                  f"with a fresh PCA fit → {args.diag_plot_dir}")
+        else:
+            print("Per-epoch full-training plots disabled.")
+        if snap_every:
+            print(f"Training-batch Poincare snapshots every {snap_every} steps "
+                  f"→ {args.diag_plot_dir}")
         if args.plot_all_train:
             print("Final Poincare snapshot will include every clean training image "
                   "(one extra pass after training).")
@@ -230,15 +253,22 @@ def main():
             t_now0 = anchors.tangent()
             xa0 = (exp_map0(t_now0.float(), curv=args.curv) if t_now0 is not None
                    else core.encode_text(anchors.anchor_ids, anchors.anchor_mask)[0])
-            diag_state = plot_epoch_snapshot(
+            plot_epoch_snapshot(
                 torch.cat(e0).numpy(), l0, xa0, class_names,
                 Path(args.diag_plot_dir) / "step_0000000.png",
-                curv=args.curv, min_radius=args.min_radius,
-                state=None, seed=args.seed, title="init (step 0)")
+                curv=args.curv, title="init (step 0)")
         if not args.anchors_only:
             model.train()
 
     global_step = 0
+    timing_csv = None
+    timing_wait = timing_work = 0.0
+    if args.profile_steps:
+        timing_path = Path(args.diag_plot_dir) / "timing.csv"
+        timing_csv = open(timing_path, "w", encoding="utf-8")
+        timing_csv.write("step,epoch,batch_size,data_wait_s,train_step_s\n")
+        print(f"Timing first {args.profile_steps} updates → {timing_path} "
+              "(includes worker startup; GPU synchronization adds profiling overhead)", flush=True)
     for epoch in range(1, args.num_epochs + 1):
         if args.anchors_only:
             model.eval()
@@ -246,7 +276,14 @@ def main():
             model.train()
         sums = {"loss": 0.0, **{k: 0.0 for k in stat_csv_keys}}
         bar = tqdm(train_loader, desc=f"Epoch {epoch}/{args.num_epochs}")
+        if timing_csv is not None:
+            if device == "cuda":
+                for gpu in range(torch.cuda.device_count()):
+                    torch.cuda.synchronize(gpu)
+            batch_wait_start = perf_counter()
         for step, batch in enumerate(bar, 1):
+            if timing_csv is not None:
+                batch_ready = perf_counter()
             global_step += 1
             pixel    = batch["pixel_values"].to(device)
             labels   = torch.tensor([name_to_idx[g] for g in batch["generator"]],
@@ -292,12 +329,11 @@ def main():
             if (snap_every and plot_epoch_snapshot is not None
                     and global_step % snap_every == 0):
                 with torch.no_grad():
-                    diag_state = plot_epoch_snapshot(
+                    plot_epoch_snapshot(
                         x_img.detach().float().cpu().numpy(), labels.tolist(),
                         x_anc.detach(), class_names,
                         Path(args.diag_plot_dir) / f"step_{global_step:07d}.png",
-                        curv=args.curv, min_radius=args.min_radius,
-                        state=diag_state, seed=args.seed,
+                        curv=args.curv,
                         title=f"epoch {epoch} · step {global_step}")
 
             if step % 25 == 0 or step == steps_per_epoch:
@@ -308,6 +344,30 @@ def main():
                     "ψa":   f"{sums['mean_psi_anc']/step:.3f}",
                 }
                 bar.set_postfix(**post)
+
+            if timing_csv is not None:
+                if device == "cuda":
+                    for gpu in range(torch.cuda.device_count()):
+                        torch.cuda.synchronize(gpu)
+                step_end = perf_counter()
+                wait = batch_ready - batch_wait_start
+                work = step_end - batch_ready
+                timing_wait += wait
+                timing_work += work
+                timing_csv.write(f"{global_step},{epoch},{len(pixel)},{wait:.6f},{work:.6f}\n")
+                timing_csv.flush()
+                if global_step == args.profile_steps or (
+                        epoch == args.num_epochs and step == steps_per_epoch):
+                    timing_csv.close()
+                    timing_csv = None
+                    total = timing_wait + timing_work
+                    print(f"Timing {global_step} updates: batch wait "
+                          f"{timing_wait/global_step:.3f}s/update "
+                          f"({100*timing_wait/max(total, 1e-9):.1f}%); "
+                          f"training work {timing_work/global_step:.3f}s/update → {timing_path}",
+                          flush=True)
+                else:
+                    batch_wait_start = perf_counter()
 
         avg = {k: v / steps_per_epoch for k, v in sums.items()}
         report_epoch(avg, epoch, scheduler.get_last_lr()[0], anchors)
@@ -320,16 +380,21 @@ def main():
                 x_anc_val, _ = core.encode_text(anchors.anchor_ids, anchors.anchor_mask)
             else:
                 x_anc_val = exp_map0(t_anc_val.float(), curv=args.curv)
-        val = run_validation(core, val_loader, x_anc_val, class_names, device, args.curv,
-                             collect=4000 if plot_epoch_snapshot else 0)
+        val = run_validation(core, val_loader, x_anc_val, class_names, device, args.curv)
         report_validation(val)
 
-        if plot_epoch_snapshot is not None:
-            diag_state = plot_epoch_snapshot(
-                val["emb"], val["emb_labels"], x_anc_val, class_names,
+        if plot_epoch_snapshot is not None and plot_loader is not None:
+            was_augment, train_ds.train_augment = train_ds.train_augment, False
+            try:
+                plot_emb, plot_labels = collect_plot_embeddings(
+                    model, plot_loader, name_to_idx, device,
+                )
+            finally:
+                train_ds.train_augment = was_augment
+            plot_epoch_snapshot(
+                plot_emb, plot_labels, x_anc_val, class_names,
                 Path(args.diag_plot_dir) / f"epoch_{epoch:02d}.png",
-                curv=args.curv, min_radius=args.min_radius,
-                state=diag_state, seed=args.seed,
+                curv=args.curv,
                 title=f"epoch {epoch}")
 
         if val["balanced_acc"] > best_balanced:
@@ -384,6 +449,7 @@ def main():
                     "semantics":       args.semantics,
                     "val_balanced":    val["balanced_acc"],
                     "epoch":           epoch,
+                    **(checkpoint_metadata or {}),
                 },
                 out_path,
             )
@@ -398,6 +464,11 @@ def main():
         print(f"Step-level trace: {Path(args.diag_plot_dir) / 'stats.csv'}")
 
     print(f"\nBest balanced val accuracy: {100*best_balanced:.1f}%  ({out_path})")
+
+
+def main():
+    run_training(parse_args())
+
 
 if __name__ == "__main__":
     main()

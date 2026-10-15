@@ -6,7 +6,7 @@ from torchvision import transforms
 @DATASET.register_module(module_name="hifi_net")
 class HiFiNetDataset(ImageAttributionDataset):
     def __init__(self, root_dir, num_images_per_semantic_per_class=2000, transform=None, degraded=0, **kwargs):
-        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded)
+        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded, iabench_source=kwargs.get("iabench_source"))
         if self.transform is None:
             self.transform = transforms.Compose([
                 transforms.Resize(256),
@@ -18,7 +18,8 @@ class HiFiNetDataset(ImageAttributionDataset):
         # Hierarchical labels [(level1, level2, level3, fine), ...] in the ACTIVE
         # class order — respects IAB_EXCLUDE_GENERATORS (e.g. 22 cls without dalle3).
         # self.model_class_to_label stays the base's (env-aware) map; no override.
-        self.label_mapping = hifi_label_mapping()
+        self.label_mapping = hifi_label_mapping(
+            list(self.model_class_to_label), "iabench" if self.iabench_source is not None else "iab")
 
     def __getitem__(self, idx):
         item = super().__getitem__(idx)  

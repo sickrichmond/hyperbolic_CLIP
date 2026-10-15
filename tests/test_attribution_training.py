@@ -88,8 +88,7 @@ def run_tiny_training(module, directory, options, manifest=False):
         "--generators", "real", "FLUX", "SDXL", "--hyperbolic_dim", "4",
         "--num_epochs", "2", "--batch_size", "6", "--num_workers", "0",
         "--output", str(directory / "model.pt"),
-        "--diag_plot_dir", str(directory), "--snapshot_every", "1",
-        "--plot_all_train", "--log_every", "1",
+        "--diag_plot_dir", str(directory), "--log_every", "1",
         *options,
         *(["--split_manifest", str(directory / "split.json")] if manifest else []),
     ])
@@ -140,6 +139,10 @@ class AttributionTrainingTests(unittest.TestCase):
         base = ["--dataset_path", "x", "--captions_dir", "y"]
         args = parse_args(base + ["--no_captions"])
         validate_args(args)
+        for options, error in ((["--profile_steps", "-1"], "non-negative"),
+                               (["--profile_steps", "10"], "requires --diag_plot_dir")):
+            with self.assertRaisesRegex(ValueError, error):
+                validate_args(parse_args(base + options))
         for flag in ("--lambda_cap_in_class", "--lambda_img_in_cap",
                      "--lambda_axis", "--lambda_hinge", "--pos_mode",
                      "--lambda_family", "--hierarchy", "--theta_max",
@@ -155,6 +158,17 @@ class AttributionTrainingTests(unittest.TestCase):
         args.fixed_image_radius, args.init_depth = 4, 3
         with self.assertRaises(ValueError):
             validate_args(args)
+
+    def test_epoch_pca_uses_all_fit_points(self):
+        from training.poincare import run_pca_2d
+
+        fit = np.array([[10, 0, 0], [-10, 0, 0], [0, 1, 0], [0, -1, 0],
+                        [0, 0, 100]], dtype=np.float32)
+        projected = run_pca_2d(fit, np.eye(3, dtype=np.float32))
+        lengths = np.linalg.norm(projected, axis=1)
+        self.assertGreater(lengths[0], 0.99)
+        self.assertLess(lengths[1], 0.01)
+        self.assertGreater(lengths[2], 0.99)
 
     def test_training_modes_and_dataset_paths(self):
         cases = [
@@ -180,10 +194,12 @@ class AttributionTrainingTests(unittest.TestCase):
                 for key in ("anchor_sin_psi", "fixed_psi", "lambda_ce", "ce_tau",
                             "lambda_cover", "aperture_calibration"):
                     self.assertNotIn(key, checkpoint)
-                self.assertEqual(frames[-1][0], "train_all_final.png")
-                self.assertEqual(len(frames[-1][1]), 12)
-                self.assertEqual(set(frames[-1][2]), {0, 1, 2})
-                self.assertTrue(np.isfinite(frames[-1][1]).all())
+                self.assertEqual([f[0] for f in frames],
+                                 ["epoch_01.png", "epoch_02.png"])
+                for _, images, labels in frames:
+                    self.assertEqual(len(images), 12)
+                    self.assertEqual(set(labels), {0, 1, 2})
+                    self.assertTrue(np.isfinite(images).all())
                 self.assertEqual(calls[0]["require_caption"], "--require_caption" in options)
                 self.assertEqual(calls[0]["seed"], calls[1]["seed"])
                 self.assertEqual(calls[0]["split"], "all" if manifest else "train")

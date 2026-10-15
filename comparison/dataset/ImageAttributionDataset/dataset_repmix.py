@@ -1,5 +1,5 @@
 import torchvision.transforms as T  
-from .dataset import ImageAttributionDataset, model_class_to_label
+from .dataset import ImageAttributionDataset
 from comparison.dataset.ImageAttributionDataset import DATASET
 from comparison.training.utils.repmix.augment_imagenetc import get_transforms
 import numpy as np
@@ -9,7 +9,7 @@ import torch
 @DATASET.register_module(module_name='repmix')
 class RepmixDataset(ImageAttributionDataset):  
     def __init__(self, root_dir, num_images_per_semantic_per_class=2000, transform=None,degraded=0,**kwargs):  
-        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded)  
+        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded, iabench_source=kwargs.get("iabench_source"))
         self.config = config = kwargs.get('config', {})  
         self.transform = get_transforms(  
             self.config['img_mean'], self.config['img_std'], self.config['img_rsize'],   
@@ -43,7 +43,7 @@ class RepmixDataset(ImageAttributionDataset):
             item = super().__getitem__(i)  
             image = item['image'] 
             y_gan = item['label']
-            y_semantic = item['semantic_label']
+            y_semantic = item.get('semantic_label')
 
             if self.transform:  
                 transform = self.transform[self.mode]
@@ -64,8 +64,11 @@ class RepmixDataset(ImageAttributionDataset):
         # hardcoded 22 of the original is wrong under IAB_EXCLUDE_GENERATORS.
         y_out = {'x':x,'label': y_gan, 'semantic_label': y_semantic,
         'y_gan': y_gan, 'y_semantic':y_semantic,
-        'y_det': np.int64(y_gan != model_class_to_label['real']), 'beta': beta.clone()}
+        'y_det': np.int64(y_gan != next(v for k, v in self.model_class_to_label.items() if k.casefold() == "real")), 'beta': beta.clone()}
 
+        if self.iabench_source is not None:
+            for key in ("semantic_label", "y_semantic"):
+                y_out.pop(key)
         return y_out  
     
     @staticmethod  

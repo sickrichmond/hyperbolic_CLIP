@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .seg_hrnet_config import get_cfg_defaults
-from comparison.dataset.ImageAttributionDataset.dataset import model_class_to_label, hifi_label_mapping
+from comparison.dataset.ImageAttributionDataset.dataset import hifi_label_mapping
 import time
 
 def weights_init(init_type='gaussian'):
@@ -202,9 +202,11 @@ class BranchCLS(nn.Module):
         return cls_res, cls_pro, feat
 
 class NLCDetection(nn.Module):
-    def __init__(self):
+    def __init__(self, label_mapping=None, hierarchy_sizes=None):
         super(NLCDetection, self).__init__()
         self.softmax_m = nn.Softmax(dim=1)
+        label_mapping = hifi_label_mapping() if label_mapping is None else label_mapping
+        sizes = hierarchy_sizes or [2, 4, 6, len(label_mapping)]
 
         # Feature extraction configuration
         FENet_cfg = get_cfg_defaults()
@@ -215,16 +217,16 @@ class NLCDetection(nn.Module):
 
         ## 分类分支，四层级分类器
         # 第一层级: 0 generated, 1 real;
-        self.branch_cls_level_1 = BranchCLS(144, 2)   
+        self.branch_cls_level_1 = BranchCLS(144, sizes[0])
         
         # 第二层级: 0 commercial, 1 open-source, 2 real;
-        self.branch_cls_level_2 = BranchCLS(216, 4)   
+        self.branch_cls_level_2 = BranchCLS(216, sizes[1])
 
         # 第三层级: 0 commercial, 1 SD, 2 diffusers, 3 DiT, 4 AR, 5 real;
-        self.branch_cls_level_3 = BranchCLS(252, 6)
+        self.branch_cls_level_3 = BranchCLS(252, sizes[2])
 
         # 第四层级: N fine classes (23, or 22 with IAB_EXCLUDE_GENERATORS=dalle3)
-        self.branch_cls_level_4 = BranchCLS(271, len(model_class_to_label))
+        self.branch_cls_level_4 = BranchCLS(271, sizes[3])
 
         # Hierarchy parent maps for probability propagation (HiFi-Net). For each
         # child class at a finer level, the index of its parent class at the next
@@ -232,13 +234,18 @@ class NLCDetection(nn.Module):
         # dataset_hifi_net.label_mapping. Registered as buffers so they follow the
         # model to its device.
         #   level 2 (4 cls, col1) -> parent level 1 (col0); col1==3 is unused -> 0
-        self.register_buffer('parent_idx_2', torch.tensor([0, 0, 1, 0]))
+        # Keep the legacy parents for unused categories (including AR in IABench).
+        parents = [[0, 0, 1, 0], [0, 1, 1, 1, 1, 2] + [0] * (sizes[2] - 6),
+                   [0] * sizes[3]]
+        for row in label_mapping:
+            for level in (1, 2, 3):
+                parents[level - 1][row[level]] = row[level - 1]
+        self.register_buffer('parent_idx_2', torch.tensor(parents[0]))
         #   level 3 (6 cls, col2) -> parent level 2 (col1)
-        self.register_buffer('parent_idx_3', torch.tensor([0, 1, 1, 1, 1, 2]))
+        self.register_buffer('parent_idx_3', torch.tensor(parents[1]))
         #   level 4 (N cls) -> parent level 3 (the level-3 index of each fine class),
         #   derived from hifi_label_mapping() so it auto-adapts to excluded generators.
-        self.register_buffer('parent_idx_4', torch.tensor(
-            [m[2] for m in hifi_label_mapping()]))
+        self.register_buffer('parent_idx_4', torch.tensor(parents[2]))
 
     def forward(self, feat, img,use_prob=False, use_feat=False):
         # 从特征提取网络获得多尺度特征
