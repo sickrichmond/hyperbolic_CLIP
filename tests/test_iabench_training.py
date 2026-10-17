@@ -170,20 +170,26 @@ class IABenchIntegrationTests(unittest.TestCase):
             self.assertEqual(attempts, [row_index, row_index])
 
     def test_training_and_test_evaluation_all_anchor_modes(self):
-        for mode in ("text", "text_free", "random", "image_centroid"):
+        for mode in ("text", "text_free", "random", "image_centroid", "hierarchy"):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as root:
-                save_arrow(root, raw_shards=mode == "random")
+                save_arrow(root, counts=({"real": 11, "gpt4o": 21, "Imagen3": 31}
+                                        if mode == "hierarchy" else None),
+                           raw_shards=mode == "random")
                 dataset_root = root
                 if mode == "image_centroid":
                     dataset_root = str(Path(root) / "exported")
                     export_images(root, dataset_root)
                 output = Path(root) / "model.pt"
                 args = train_iabench.parse_args([
-                    "--dataset_path", dataset_root, "--output", str(output), "--anchor_init", mode,
+                    "--dataset_path", dataset_root, "--output", str(output),
+                    "--anchor_init", "random" if mode == "hierarchy" else mode,
                     "--hyperbolic_dim", "4", "--batch_size", "12", "--num_workers", "0",
                     "--num_epochs", "2", "--diag_plot_dir", root, "--log_every", "1",
                     *(["--plot_all_train", "--profile_steps", "3"] if mode == "random" else []),
                     *(["--profile_steps", "100"] if mode == "text" else [])])
+                if mode == "hierarchy":
+                    args.hierarchy = "increfa"
+                    args.min_radius = .5
                 validation = trainer.run_validation
                 frames = []
 
@@ -218,11 +224,23 @@ class IABenchIntegrationTests(unittest.TestCase):
                     self.assertEqual(ckpt["anchor_texts"][0], "A real image")
                     self.assertEqual(ckpt["split_manifest_digest"], manifest_digest(manifest))
                     self.assertEqual(ckpt["loss"], "cone")
+                    if mode == "hierarchy":
+                        self.assertEqual(ckpt["hierarchy"], "increfa")
+                        self.assertEqual(ckpt["cosine_scope"], "families")
+                        self.assertEqual(ckpt["family_names"], ["real", "autoregressive", "diffusion"])
+                        self.assertEqual(ckpt["family_of"], [0, 2, 1])
+                        self.assertEqual(ckpt["family_tangent"].shape, (3, 4))
+                        g = torch.Generator().manual_seed(args.seed + 1)
+                        initial = torch.nn.functional.normalize(torch.randn(3, 4, generator=g), dim=-1) * 1.2
+                        self.assertFalse(torch.equal(ckpt["family_tangent"], initial))
                     epoch_collect.assert_not_called()
                     self.assertEqual(val_spy.call_count, 2)
                     rows = (Path(root) / "stats.csv").read_text().splitlines()
                     self.assertEqual(len(rows), 9)  # Header + four steps in each epoch.
                     self.assertTrue(rows[0].startswith("step,epoch,lr,loss,"))
+                    if mode == "hierarchy":
+                        self.assertIn("loss_family_depth", rows[0])
+                        self.assertIn("inside_img_family", rows[0])
                     for call in val_spy.call_args_list:
                         self.assertEqual(call.args[1].dataset.split, "val")
                         self.assertEqual(call.args[1].dataset.indices, manifest["val"])

@@ -145,7 +145,7 @@ class AttributionTrainingTests(unittest.TestCase):
                 validate_args(parse_args(base + options))
         for flag in ("--lambda_cap_in_class", "--lambda_img_in_cap",
                      "--lambda_axis", "--lambda_hinge", "--pos_mode",
-                     "--lambda_family", "--hierarchy", "--theta_max",
+                     "--theta_max",
                      "--loss", "--lambda_ce", "--ce_tau_init", "--lambda_sep",
                      "--lambda_cover", "--lambda_center", "--lambda_aperture",
                      "--inside_margin", "--separation_margin", "--nu",

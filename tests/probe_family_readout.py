@@ -2,8 +2,8 @@
 
 On paired_datasets' sampled manifest validation images, optionally degraded,
 compute exterior-angle predictions for leaves and families. The induced family
-is the family of the predicted leaf. Re-encode family prompts from saved names
-and reorder family_of to the harness class order.
+is the family of the predicted leaf. Restore learned family anchors (or legacy
+text prompts) and reorder family_of to the harness class order.
 
 Abstain when min(xi_leaf-psi_leaf) > 0. Report macro recall, rejection rate,
 leaf recall among retained samples and family recall among rejected samples.
@@ -22,7 +22,7 @@ from tqdm import tqdm
 
 from comparison.training.test_hypclip import harness_class_names
 from data.degradations import LEVEL_LABELS
-from geometry.lorentz import half_aperture
+from geometry.lorentz import exp_map0, half_aperture
 from losses.attribution_loss import _pairwise_xi
 from tests.probe_anchor_spread import load_any
 from tests.probe_degradation_shift import paired_datasets
@@ -60,13 +60,21 @@ def load_family(path, model, clip_name, names, device):
                           dtype=torch.long, device=device)
 
     fam_names = ckpt["family_names"]
-    tok = CLIPTokenizer.from_pretrained(clip_name)
-    t = tok(family_texts(fam_names), return_tensors="pt", padding="max_length",
-            truncation=True, max_length=77)
-    with torch.no_grad():
-        x_fam, _ = model.encode_text(t["input_ids"].to(device),
-                                     t["attention_mask"].to(device))
     curv = float(ckpt.get("curv", 1.0))
+    with torch.no_grad():
+        if ckpt.get("family_tangent") is not None:
+            tangent = ckpt["family_tangent"]
+            if tangent.ndim != 2 or len(tangent) != len(fam_names) or not torch.isfinite(tangent).all():
+                raise ValueError("Invalid saved family anchors")
+            x_fam = exp_map0(tangent.float().to(device), curv=curv)
+        elif ckpt.get("hierarchy") == "increfa":
+            raise ValueError("IncreFA checkpoint is missing learned family anchors")
+        else:
+            tok = CLIPTokenizer.from_pretrained(clip_name)
+            t = tok(family_texts(fam_names), return_tensors="pt", padding="max_length",
+                    truncation=True, max_length=77)
+            x_fam, _ = model.encode_text(t["input_ids"].to(device),
+                                         t["attention_mask"].to(device))
     psi_fam = half_aperture(x_fam, curv=curv, min_radius=ckpt.get("min_radius", 0.1))
     return x_fam.detach(), psi_fam.detach(), fam_of, fam_names, curv
 

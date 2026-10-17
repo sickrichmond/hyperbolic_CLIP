@@ -3,6 +3,7 @@
 Supports text and free class anchors, image-only training, validation-based
 checkpoint selection, and Poincare diagnostics. The pairwise positive-cosine
 anchor penalty is enabled by default with weight 0.2; --lambda_cosine 0 disables it.
+In IABench hierarchy mode it separates families instead of classes.
 """
 from pathlib import Path
 from time import perf_counter
@@ -149,6 +150,9 @@ def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=
         lambda_norm=args.lambda_norm, target_norm=args.target_norm,
         lambda_cosine=args.lambda_cosine,
         norm_mode=args.norm_mode, neg_samples=args.neg_samples,
+        lambda_family=args.lambda_family if args.hierarchy != "none" else 0.0,
+        lambda_family_depth=args.lambda_family_depth if args.hierarchy != "none" else 0.0,
+        family_depth_margin=args.family_depth_margin,
     ).to(device)
 
     # Geometric tensors use their own LR and no weight decay.
@@ -239,6 +243,15 @@ def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=
                  "cone_acc", "inside_img", "mean_psi_anc", "mean_xi_img_anc",
                  "mean_anc_norm"]
     stat_csv_keys = base_keys
+    if args.hierarchy != "none":
+        stat_csv_keys += [
+            "loss_family", "loss_family_pos", "loss_family_neg", "loss_family_depth",
+            "inside_class_family", "wrong_family_violations", "inside_img_family",
+            "family_depth_min", "family_depth_mean", "class_depth_mean", "image_depth_mean",
+            "family_depth_gap_min", "family_depth_gap_mean", "family_depth_violations",
+            "image_class_depth_violations", "family_psi_min_deg", "family_psi_max_deg",
+            "mean_fam_cos_sim", "max_fam_cos_sim", "family_xi_sat",
+        ]
 
     if snap_every and plot_epoch_snapshot is not None:
         model.eval()
@@ -298,7 +311,12 @@ def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=
                 # Hyperbolic lifting requires float32 even during mixed-precision training.
                 with autocast("cuda", enabled=False):
                     x_anc = exp_map0(t_anc.float(), curv=args.curv)
-            loss, stats = cone_loss(x_img, x_anc, labels)
+            x_fam = None
+            if anchors.family_tangent is not None:
+                with autocast("cuda", enabled=False):
+                    x_fam = exp_map0(anchors.family_tangent.float(), curv=args.curv)
+            loss, stats = cone_loss(x_img, x_anc, labels,
+                                    x_fam=x_fam, family_of=anchors.family_of)
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -437,11 +455,19 @@ def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=
                     "lambda_norm":     args.lambda_norm,
                     "lambda_cosine":   args.lambda_cosine,
                     "theta_max":       150.0,
-                    "hierarchy":         "none",
-                    "family_names":      [],
-                    "family_of":         None,
+                    "hierarchy":         args.hierarchy,
+                    "family_names":      anchors.family_names,
+                    "family_of":         (anchors.family_of.tolist()
+                                          if anchors.family_of is not None else None),
+                    "family_tangent":    (anchors.family_tangent.detach().cpu()
+                                          if anchors.family_tangent is not None else None),
+                    "family_init_norm":  args.family_init_norm,
+                    "family_depth_margin": args.family_depth_margin,
+                    "lambda_family_depth": (args.lambda_family_depth
+                                             if args.hierarchy != "none" else 0.0),
+                    "cosine_scope":      "families" if args.hierarchy != "none" else "classes",
                     "target_norm_family": 0.0,
-                    "lambda_family":     0.0,
+                    "lambda_family":     args.lambda_family if args.hierarchy != "none" else 0.0,
                     "fam_tau":           None,
                     "train_augment":   args.train_augment,
                     "aug_policy":      args.aug_policy,

@@ -40,6 +40,7 @@ PROFILE_STEPS="${PROFILE_STEPS:-0}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 AUGMENT="${AUGMENT:-0}"
 AUG_POLICY="${AUG_POLICY:-corruption}"
+HIERARCHY="${HIERARCHY:-none}"
 
 case "$AUGMENT" in
     0|1) ;;
@@ -48,6 +49,16 @@ esac
 case "$AUG_POLICY" in
     corruption|omnidfa) ;;
     *) echo "ERROR: AUG_POLICY must be corruption or omnidfa (got: $AUG_POLICY)" >&2; exit 2 ;;
+esac
+HIERARCHY_FLAGS=()
+HIERARCHY_SUFFIX=
+case "$HIERARCHY" in
+    none) ;;
+    increfa)
+        HIERARCHY_FLAGS=(--hierarchy increfa)
+        HIERARCHY_SUFFIX=_hierarchy_increfa
+        ;;
+    *) echo "ERROR: HIERARCHY must be none or increfa (got: $HIERARCHY)" >&2; exit 2 ;;
 esac
 
 AUG_FLAGS=()
@@ -60,20 +71,21 @@ if [ "$AUGMENT" = 1 ]; then
         AUG_SUFFIX=_aug
     fi
 fi
-CKPT="$OUT/attribution_iabench_random${AUG_SUFFIX}_vitl14.pt"
+CKPT="$OUT/attribution_iabench_random${AUG_SUFFIX}${HIERARCHY_SUFFIX}_vitl14.pt"
 
 mkdir -p "$OUT"
 cd "$REPO"
 
 echo "Slurm GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "Dataset: $DATA | Manifest: $SPLIT_MANIFEST"
-echo "Training with AUGMENT=$AUGMENT, AUG_POLICY=$AUG_POLICY → $CKPT"
+echo "Training with AUGMENT=$AUGMENT, AUG_POLICY=$AUG_POLICY, HIERARCHY=$HIERARCHY → $CKPT"
 
 python train_iabench.py \
     --dataset_path "$DATA" \
     --clip_name openai/clip-vit-large-patch14 \
     --anchor_init random \
     "${AUG_FLAGS[@]}" \
+    "${HIERARCHY_FLAGS[@]}" \
     --lora_target 'vision_model\.encoder\.layers\.[0-9]+\.self_attn\.(q_proj|v_proj)' \
     --lora_r 16 \
     --lora_alpha 32 \
@@ -98,7 +110,7 @@ python train_iabench.py \
     --val_frac 0.1 \
     --test_frac 0.1 \
     --seed 42 \
-    --diag_plot_dir "$WORK/hyp_fine_tuning/viz/iabench${AUG_SUFFIX}_${SLURM_JOB_ID}" \
+    --diag_plot_dir "$WORK/hyp_fine_tuning/viz/iabench${AUG_SUFFIX}${HIERARCHY_SUFFIX}_${SLURM_JOB_ID}" \
     --log_every 10 \
     --output "$CKPT"
 

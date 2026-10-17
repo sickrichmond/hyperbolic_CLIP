@@ -91,7 +91,8 @@ def report_epoch(avg, epoch, lr, anchors):
              f"L_img_cls={avg['loss_img_in_cls']:.4f}"
              f"  (pos={avg['loss_pos']:.4f} neg={avg['loss_neg']:.4f})")
     line1 += f"  L_norm={avg['loss_norm']:.4f}"
-    line1 += (f"  L_cosine={avg['loss_cosine']:.4f}"
+    cosine_label = "L_cosine[family]" if anchors.family_tangent is not None else "L_cosine"
+    line1 += (f"  {cosine_label}={avg['loss_cosine']:.4f}"
               f"  cos_mean={avg['mean_anc_cos_sim']:.4f}"
               f"  cos_max_avg={avg['max_anc_cos_sim']:.4f}")
     line1 += (f"  min∠={avg['sep_min_deg']:.1f}°"
@@ -111,6 +112,16 @@ def report_epoch(avg, epoch, lr, anchors):
           f"‖x_anc‖={avg['mean_anc_norm']:.2f}"
           + (f"  ‖t_anc‖={anchors.anchor_tangent.norm(dim=-1).mean().item():.2f}"
              if anchors.anchor_tangent is not None else ""))
+    if anchors.family_tangent is not None:
+        print(f"           L_family={avg['loss_family']:.4f}"
+              f"  L_family_depth={avg['loss_family_depth']:.4f}"
+              f"  class_in_family={100*avg['inside_class_family']:.1f}%"
+              f"  image_in_family={100*avg['inside_img_family']:.1f}%"
+              f"  wrong_family_violations={100*avg['wrong_family_violations']:.1f}%"
+              f"  depth_gap_min_avg={avg['family_depth_gap_min']:.3f}"
+              f"  depth_violations={100*avg['family_depth_violations']:.1f}%"
+              f"  family_cos_mean={avg['mean_fam_cos_sim']:.4f}"
+              f"  family_cos_max_avg={avg['max_fam_cos_sim']:.4f}")
 
 
 def report_validation(val):

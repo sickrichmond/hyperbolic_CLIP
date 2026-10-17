@@ -1,10 +1,24 @@
 """CLI options and startup constraints for attribution training."""
 import argparse
+import math
+
+from training.families import increfa_mapping, minimum_cone_depth
 
 
 def parse_args(argv=None, dataset="iab"):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.set_defaults(dataset=dataset)
+    p.add_argument("--hierarchy", choices=["none", "increfa"], default="none",
+                   help="Optional IABench class-to-family cone hierarchy.")
+    p.add_argument("--family_init_norm", type=float, default=1.2,
+                   help="Initial tangent norm of random learnable family anchors.")
+    p.add_argument("--family_depth_margin", type=float, default=0.5,
+                   help="Minimum parent-to-class tangent-depth gap in the soft penalty.")
+    p.add_argument("--lambda_family", type=float, default=1.0,
+                   help="Class-to-family positive/negative hinge weight in hierarchy mode.")
+    p.add_argument("--lambda_family_depth", type=float, default=0.5,
+                   help="Relative family/class tangent-depth penalty weight.")
     p.add_argument("--dataset_path",   required=True)
     if dataset == "iab":
         p.add_argument("--captions_dir", required=True)
@@ -82,7 +96,7 @@ def parse_args(argv=None, dataset="iab"):
                         "scores are still computed.")
     p.add_argument("--lambda_cosine", type=float, default=0.2,
                    help="Weight of mean positive cosine similarity over unique anchor pairs "
-                        "(default: 0.2; 0 disables).")
+                        "(families in hierarchy mode; default: 0.2; 0 disables).")
     p.add_argument("--batch_size",     type=int,   default=256)
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
@@ -141,6 +155,31 @@ def parse_args(argv=None, dataset="iab"):
 
 def validate_args(args):
     """Validate mode combinations before loading data or model weights."""
+    if args.hierarchy != "none":
+        if args.dataset != "iabench":
+            raise ValueError("--hierarchy increfa is supported only for IABench")
+        if args.anchor_init != "random" or args.freeze_anchors:
+            raise ValueError("--hierarchy increfa requires learnable random class anchors")
+        settings = (args.curv, args.min_radius, args.family_init_norm,
+                    args.family_depth_margin, args.lambda_family, args.lambda_family_depth,
+                    args.anchor_init_norm, args.init_depth, args.fixed_image_radius,
+                    args.margin, args.lambda_neg, args.lambda_cosine,
+                    args.lambda_norm, args.target_norm)
+        if not all(math.isfinite(value) and value >= 0 for value in settings) or args.curv == 0:
+            raise ValueError("Hierarchy settings must be finite and non-negative, with positive curvature")
+        minimum = minimum_cone_depth(args.curv, args.min_radius)
+        if args.family_init_norm < minimum:
+            raise ValueError(f"--family_init_norm must be at least {minimum:g} for valid cones")
+        if (args.family_init_norm >= args.anchor_init_norm or
+                args.family_init_norm + args.family_depth_margin > args.anchor_init_norm):
+            raise ValueError("Initial class depth must exceed family depth and satisfy --family_depth_margin")
+        if args.anchor_norm_range:
+            lo, hi = args.anchor_norm_range
+            if not (math.isfinite(lo) and math.isfinite(hi) and
+                    minimum <= lo <= args.anchor_init_norm <= hi):
+                raise ValueError("--anchor_norm_range must respect the cone domain and contain initial class depth")
+        if args.generators is not None:
+            increfa_mapping(args.generators)
     if args.profile_steps < 0:
         raise ValueError("--profile_steps must be non-negative")
     if args.profile_steps and not args.diag_plot_dir:

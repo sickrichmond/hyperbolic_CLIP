@@ -2,8 +2,8 @@
 
 Positive pairs pay max(0, xi-psi); wrong-class pairs pay max(0, psi+margin-xi).
 The cosine penalty averages max(0, cosine(a_i, a_j)) over unique anchor pairs.
-Total loss is positive + lambda_neg * negative + lambda_norm * norm_penalty
-              + lambda_cosine * cosine_penalty.
+With family inputs, class-to-family hinges and a relative tangent-depth penalty
+are added, and the cosine penalty acts exclusively on family anchors.
 Cosine penalizes directions less than 90 degrees apart, independent of anchor
 norms; it does not constrain apertures or guarantee non-overlapping cones.
 Apertures depend on anchor depth. Prediction minimizes the exterior angle xi.
@@ -50,17 +50,26 @@ class EntailmentConeLoss(nn.Module):
         target_norm: float = 0.0,
         norm_mode: str = "floor",
         neg_samples: int = 0,
+        lambda_family: float = 0.0,
+        lambda_family_depth: float = 0.0,
+        family_depth_margin: float = 0.5,
     ):
         """Configure hinges, spatial anchor-norm and pairwise cosine penalties.
 
         neg_samples=0 uses all wrong classes; otherwise subsample per image.
         The norm penalty is enabled when both lambda_norm and target_norm are positive.
-        Positive lambda_cosine enables the cosine penalty when at least two anchors
-        exist. This constructor defaults to zero; the training CLI defaults to 0.2.
+        Positive lambda_cosine separates families when family inputs are provided,
+        otherwise classes. This constructor defaults to zero; the CLI defaults to 0.2.
+        Family losses use all classes each call; the relative depth loss is tangent-based.
         """
         super().__init__()
         if norm_mode not in ("floor", "bilateral"):
             raise ValueError("norm_mode must be 'floor' or 'bilateral'")
+        if not math.isfinite(curv) or curv <= 0:
+            raise ValueError("curv must be positive and finite")
+        if not all(math.isfinite(v) and v >= 0 for v in
+                   (lambda_family, lambda_family_depth, family_depth_margin)):
+            raise ValueError("Family weights and depth margin must be finite and non-negative")
         self.curv = curv
         self.min_radius = min_radius
         self.margin = margin
@@ -70,21 +79,41 @@ class EntailmentConeLoss(nn.Module):
         self.target_norm = target_norm
         self.norm_mode = norm_mode
         self.neg_samples = neg_samples
+        self.lambda_family = lambda_family
+        self.lambda_family_depth = lambda_family_depth
+        self.family_depth_margin = family_depth_margin
 
     def forward(
         self,
         x_img: torch.Tensor,  # (B, D)
         x_anc: torch.Tensor,  # (K, D)
         labels: torch.Tensor,  # (B,) class indices
+        *,
+        x_fam: torch.Tensor | None = None,  # (F, D) Lorentz spatial coordinates
+        family_of: torch.Tensor | None = None,  # (K,) indices in family order
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Return the weighted loss and detached image/cone geometry diagnostics.
 
         loss_cosine is unweighted. Mean/max cosine statistics use all unique
-        anchor pairs, including negative similarities; both report zero for K=1.
+        class anchor pairs, including negative similarities; both report zero for K=1.
+        Family cosine diagnostics have separate keys; loss_cosine uses family pairs
+        whenever family inputs are provided, even when family loss weights are zero.
         """
         B = x_img.shape[0]
         K = x_anc.shape[0]
         device = x_img.device
+        if (x_fam is None) != (family_of is None):
+            raise ValueError("Provide both x_fam and family_of")
+        if x_fam is None and (self.lambda_family > 0 or self.lambda_family_depth > 0):
+            raise ValueError("Family loss weights require family inputs")
+        if x_fam is not None:
+            if (x_fam.ndim != 2 or x_fam.shape[0] == 0 or
+                    x_fam.shape[1] != x_anc.shape[1] or x_fam.device != device):
+                raise ValueError("x_fam must be nonempty (F, D) on the image device")
+            if (family_of.shape != (K,) or family_of.dtype != torch.long or
+                    family_of.device != device or
+                    bool(((family_of < 0) | (family_of >= len(x_fam))).any())):
+                raise ValueError("family_of must contain one valid family index per class on the image device")
         psi_anc = half_aperture(x_anc, curv=self.curv, min_radius=self.min_radius)
         xi = _pairwise_xi(x_anc, x_img, curv=self.curv).T
         xi_pos = xi.gather(1, labels.unsqueeze(1)).squeeze(1)
@@ -106,15 +135,35 @@ class EntailmentConeLoss(nn.Module):
                 deviation = deviation.clamp_min(0)
             L_norm = deviation.square().mean()
             
+        L_family = L_family_depth = x_anc.new_zeros(())
+        if x_fam is not None:
+            psi_fam = half_aperture(x_fam, curv=self.curv, min_radius=self.min_radius)
+            xi_family = _pairwise_xi(x_fam, x_anc, curv=self.curv).T
+            xi_parent = xi_family.gather(1, family_of[:, None]).squeeze(1)
+            L_family_pos = (xi_parent - psi_fam[family_of]).clamp_min(0).mean()
+            wrong_family = torch.arange(len(x_fam), device=device)[None, :] != family_of[:, None]
+            L_family_neg = ((psi_fam[None, :] + self.margin - xi_family)
+                            .clamp_min(0)[wrong_family].mean()
+                            if wrong_family.any() else xi.new_zeros(()))
+            L_family = L_family_pos + self.lambda_neg * L_family_neg
+            # Invert the radial exp_map0 formula; the old norm term stays spatial.
+            class_depth = torch.asinh(math.sqrt(self.curv) * anc_norms) / math.sqrt(self.curv)
+            family_depth = torch.asinh(math.sqrt(self.curv) * x_fam.norm(dim=-1)) / math.sqrt(self.curv)
+            depth_gap = class_depth - family_depth[family_of]
+            L_family_depth = (self.family_depth_margin - depth_gap).clamp_min(0).square().mean()
+
+        cosine_anchors = x_anc if x_fam is None else x_fam
+        cosine_count = len(cosine_anchors)
         L_cosine = x_anc.new_zeros(())
-        if self.lambda_cosine > 0 and K > 1:
-            anc_dir = F.normalize(x_anc, dim=-1)
+        if self.lambda_cosine > 0 and cosine_count > 1:
+            anc_dir = F.normalize(cosine_anchors, dim=-1)
             cos_sim = anc_dir @ anc_dir.T
-            iu = torch.triu_indices(K, K, offset=1, device=device)
+            iu = torch.triu_indices(cosine_count, cosine_count, offset=1, device=device)
             pairwise_cos = cos_sim[iu[0], iu[1]]
             L_cosine = pairwise_cos.clamp_min(0.0).mean()
 
-        loss = L_img_in_class + self.lambda_norm * L_norm + self.lambda_cosine * L_cosine
+        loss = (L_img_in_class + self.lambda_norm * L_norm + self.lambda_cosine * L_cosine
+                + self.lambda_family * L_family + self.lambda_family_depth * L_family_depth)
 
         # These geometry diagnostics do not contribute gradients to the loss.
         with torch.no_grad():
@@ -144,6 +193,39 @@ class EntailmentConeLoss(nn.Module):
                 "mean_xi_img_anc": xi_pos.mean(),
                 "mean_anc_norm": anc_norms.mean(),
             }
+            if x_fam is not None:
+                directions_fam = F.normalize(x_fam, dim=-1)
+                fi = torch.triu_indices(len(x_fam), len(x_fam), offset=1, device=device)
+                cos_fam = ((directions_fam @ directions_fam.T)[fi[0], fi[1]]
+                           if len(x_fam) > 1 else x_fam.new_zeros(1))
+                xi_img_family = _pairwise_xi(x_fam, x_img, curv=self.curv).T
+                image_parent = family_of[labels]
+                image_parent_xi = xi_img_family.gather(1, image_parent[:, None]).squeeze(1)
+                image_depth = torch.asinh(math.sqrt(self.curv) * x_img.norm(dim=-1)) / math.sqrt(self.curv)
+                stats.update({
+                    "loss_family": L_family.detach(),
+                    "loss_family_pos": L_family_pos.detach(),
+                    "loss_family_neg": L_family_neg.detach(),
+                    "loss_family_depth": L_family_depth.detach(),
+                    "inside_class_family": (xi_parent <= psi_fam[family_of]).float().mean(),
+                    "wrong_family_violations": ((xi_family < psi_fam[None, :] + self.margin)
+                                                 [wrong_family].float().mean()
+                                                 if wrong_family.any() else xi.new_zeros(())),
+                    "inside_img_family": (image_parent_xi <= psi_fam[image_parent]).float().mean(),
+                    "family_depth_min": family_depth.min(),
+                    "family_depth_mean": family_depth.mean(),
+                    "class_depth_mean": class_depth.mean(),
+                    "image_depth_mean": image_depth.mean(),
+                    "family_depth_gap_min": depth_gap.min(),
+                    "family_depth_gap_mean": depth_gap.mean(),
+                    "family_depth_violations": (depth_gap < self.family_depth_margin).float().mean(),
+                    "image_class_depth_violations": (image_depth <= class_depth[labels]).float().mean(),
+                    "family_psi_min_deg": torch.rad2deg(psi_fam.min()),
+                    "family_psi_max_deg": torch.rad2deg(psi_fam.max()),
+                    "mean_fam_cos_sim": cos_fam.mean(),
+                    "max_fam_cos_sim": cos_fam.max(),
+                    "family_xi_sat": (xi_family > math.pi - 5e-3).float().mean(),
+                })
         return loss, stats
 
 

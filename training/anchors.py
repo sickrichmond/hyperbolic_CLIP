@@ -13,6 +13,7 @@ from transformers import CLIPTokenizer
 from checkpoint_io import atomic_torch_save
 from geometry.lorentz import exp_map0, half_aperture
 from losses.attribution_loss import _pairwise_xi
+from training.families import increfa_mapping, minimum_cone_depth
 
 
 def build_anchors(generators: list[str],
@@ -115,6 +116,8 @@ class AnchorState:
     def __init__(self, model, train_ds, class_names, anchor_texts, args, device):
         self.anchor_tangent = None
         self.anchor_t0 = self.anchor_delta = self.anchor_drift = None
+        self.family_tangent = None
+        self.family_names, self.family_of = [], None
 
         tokenizer = CLIPTokenizer.from_pretrained(args.clip_name)
         anchor_tok = tokenizer(anchor_texts, return_tensors="pt", padding="max_length",
@@ -164,6 +167,17 @@ class AnchorState:
             if self.anchor_drift is not None:
                 print(f"  drift scale s={F.softplus(self.anchor_drift).item():.3f} (learned)")
 
+        if args.hierarchy != "none":
+            self.family_names, mapping = increfa_mapping(class_names)
+            self.family_of = torch.tensor(mapping, dtype=torch.long, device=device)
+            # Keep class initialization and global RNG consumption unchanged.
+            g = torch.Generator().manual_seed(args.seed + 1)
+            t_family = torch.randn(len(self.family_names), args.hyperbolic_dim, generator=g)
+            self.family_tangent = nn.Parameter(
+                (F.normalize(t_family, dim=-1) * args.family_init_norm).to(device))
+            print(f"Family anchors ({args.hierarchy}): {self.family_names}, "
+                  f"tangent depth={args.family_init_norm:g}, mapping={mapping}")
+
     def tangent(self):
         """Current tangent anchors (K, D_hyp), or None in plain 'text' mode."""
         if self.anchor_delta is not None:
@@ -173,6 +187,13 @@ class AnchorState:
     @torch.no_grad()
     def project_(self, args):
         """Clamp free anchor tangent norms to the configured range."""
+        if self.family_tangent is not None:
+            minimum = minimum_cone_depth(args.curv, args.min_radius)
+            for parameter in (self.family_tangent, self.anchor_tangent):
+                norm = parameter.norm(dim=-1, keepdim=True)
+                if not torch.isfinite(norm).all() or (norm == 0).any():
+                    raise ValueError("Hierarchy anchor directions must remain finite and nonzero")
+                parameter.mul_(norm.clamp_min(minimum) / norm)
         if args.anchor_norm_range and self.anchor_tangent is not None:
             lo, hi = args.anchor_norm_range
             with torch.no_grad():
@@ -182,7 +203,7 @@ class AnchorState:
     def parameters(self):
         """Trainable geometric tensors, in optimizer/checkpoint-compatible order."""
         return [p for p in (self.anchor_tangent, self.anchor_delta,
-                            self.anchor_drift)
+                            self.anchor_drift, self.family_tangent)
                 if p is not None and p.requires_grad]
 
 
