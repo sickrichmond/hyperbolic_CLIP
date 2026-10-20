@@ -25,6 +25,9 @@ _ATTRIBUTOR_MODULES = [
     "attributor_repmix",
     "attributor_patch",
     "attributor_ucf",
+    "attributor_lida",
+    "attributor_defake",
+    "attributor_pose",
 ]
 for _m in _ATTRIBUTOR_MODULES:
     try:

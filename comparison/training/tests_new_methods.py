@@ -34,7 +34,7 @@ assert len(model_class_to_label) == n, (len(model_class_to_label), n)
 
 # every method must be registered: a defensive import that swallowed one would
 # only surface much later, as a KeyError inside a slurm job.
-for m in ["resnet50", "dct", "hifi_net", "defl", "dna", "repmix", "patch", "ucf"]:
+for m in ["resnet50", "dct", "hifi_net", "defl", "dna", "repmix", "patch", "ucf", "lida", "defake", "pose"]:
     assert m in ATTRIBUTOR.data, "attributor missing: " + m
     assert m in DATASET.data, "dataset missing: " + m
 

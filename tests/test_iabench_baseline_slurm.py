@@ -1,4 +1,4 @@
-"""Capture all nine baseline launch commands without Slurm or GPUs."""
+"""Capture all baseline launch commands without Slurm or GPUs."""
 import json
 import os
 from pathlib import Path
@@ -13,7 +13,7 @@ class BaselineLauncherTests(unittest.TestCase):
         repo = Path(__file__).resolve().parents[1]
         scripts = sorted(path for path in (repo / 'comparison/training/scripts').glob('cineca_*_iabench.sh')
                          if '_test_' not in path.name)
-        self.assertEqual(len(scripts), 9)
+        self.assertEqual(len(scripts), 12)
         with tempfile.TemporaryDirectory(prefix='baseline slurm ') as directory:
             work = Path(directory)
             (work / 'hyp_fine_tuning/bin').mkdir(parents=True)
@@ -61,7 +61,9 @@ exec bash "$@"
                         self.assertEqual(flags['--num_workers'], overrides.get('NUM_WORKERS', '2' if 'defl' in script.name else '8'))
                         self.assertEqual(flags['--log_dir'], overrides.get('LOGDIR', str(repo / 'comparison/training/logs')))
                         self.assertEqual(flags['--batch_size'], '8' if any(m in script.name for m in ('defl', 'hifi_net')) else '32')
-                        self.assertEqual(flags['--n_epoch'], '20' if 'patch' in script.name else '10')
+                        method = script.name.removeprefix('cineca_').removesuffix('_train_iabench.sh')
+                        epochs = '30' if method in ('lida', 'defake', 'pose') else '20' if method == 'patch' else '10'
+                        self.assertEqual(flags['--n_epoch'], epochs)
                         if overrides:
                             self.assertEqual(flags['--resume_checkpoint'], str(checkpoint))
                             self.assertNotIn('--pretrained_path', flags)

@@ -19,6 +19,30 @@ class POSETrainer(Trainer):
         self.augmenter_schedulers = {}
         self.current_epoch = None
 
+    def checkpoint_state(self):
+        return {
+            "augmenter_optimizer_state_dicts": {
+                index: optimizer.state_dict()
+                for index, optimizer in self.augmenter_optimizers.items()
+            },
+            "augmenter_scheduler_state_dicts": {
+                index: scheduler.state_dict()
+                for index, scheduler in self.augmenter_schedulers.items()
+            },
+        }
+
+    def restore_checkpoint_state(self, checkpoint):
+        optimizers = checkpoint.get("augmenter_optimizer_state_dicts", {})
+        schedulers = checkpoint.get("augmenter_scheduler_state_dicts", {})
+        if self.config.get("dataset") == "iabench":
+            expected = set(range(checkpoint["epoch"] - self.config.get("start_epoch", 1) + 1))
+            if set(optimizers) != expected or set(schedulers) != expected:
+                raise ValueError("POSE resume requires optimizer and scheduler state for each trained augmenter")
+        for index, state in optimizers.items():
+            optimizer, scheduler = self._augmenter_optimizer(index, self.model.augmenters[index])
+            optimizer.load_state_dict(state)
+            scheduler.load_state_dict(schedulers[index])
+
     def train_epoch(self, epoch, train_loader, val_loader=None):
         self.current_epoch = epoch
         augmenter_index = epoch - self.config.get("start_epoch", 1)

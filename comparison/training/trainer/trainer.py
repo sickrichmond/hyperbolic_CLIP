@@ -156,7 +156,7 @@ class Trainer(object):
 
                 global_step += 1  
 
-            if self.scheduler is not None:  
+            if self.scheduler is not None and not self.config.get('scheduler_step_per_batch', False):
                 self.scheduler.step()  
                 for param_group in self.optimizer.param_groups:
                     self.logger.info(f"Current learning rate: {param_group['lr']}")
@@ -261,7 +261,13 @@ class Trainer(object):
         self.logger.info(f"Test metrics: {metrics}")  
         return metrics  
     
-    def save_checkpoint(self, filename="ckpt_best.pth", best_metrics=None, epoch=None):  
+    def checkpoint_state(self):
+        return {}
+
+    def restore_checkpoint_state(self, checkpoint):
+        pass
+
+    def save_checkpoint(self, filename="ckpt_best.pth", best_metrics=None, epoch=None):
         save_dir = os.path.join(self.log_dir)  
         os.makedirs(save_dir, exist_ok=True)  
         path = os.path.join(save_dir, filename)  
@@ -279,6 +285,7 @@ class Trainer(object):
             'epoch': epoch  
         }
         checkpoint.update(self.config.get('checkpoint_metadata', {}))
+        checkpoint.update(self.checkpoint_state())
         atomic_torch_save(checkpoint, path)
         self.logger.info(f"Checkpoint saved to {path}")  
 
@@ -307,6 +314,8 @@ class Trainer(object):
 
         if self.scheduler is not None and checkpoint.get('scheduler_state_dict', None) is not None:  
             self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])  
+
+        self.restore_checkpoint_state(checkpoint)
 
         self.logger.info(f"Loaded checkpoint from {path}")  
 

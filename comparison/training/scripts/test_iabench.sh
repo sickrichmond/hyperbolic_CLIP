@@ -1,6 +1,6 @@
 #!/bin/bash
 # Evaluate one IABench baseline checkpoint on the exact manifest test rows, levels 0..6.
-# Submit: sbatch comparison/training/scripts/cineca_baselines_test_iabench.sh /path/to/ckpt_best.pth
+# Submit: sbatch comparison/training/scripts/test_iabench.sh /path/to/ckpt_best.pth
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod

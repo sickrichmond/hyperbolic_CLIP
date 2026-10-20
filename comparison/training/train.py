@@ -188,7 +188,11 @@ def main(argv=None):
     scheduler = choose_scheduler(config, optimizer)  
     metric_scoring = choose_metric(config)  
 
-    trainer = Trainer(config, model, optimizer, scheduler, logger, metric_scoring, time_now=now, log_dir=log_dir)  
+    trainer_class = Trainer
+    if model_name == 'pose':
+        from comparison.training.trainer.pose_trainer import POSETrainer
+        trainer_class = POSETrainer
+    trainer = trainer_class(config, model, optimizer, scheduler, logger, metric_scoring, time_now=now, log_dir=log_dir)
 
     # resume training 
     start_epoch = config.get('start_epoch', 1)  
@@ -279,4 +283,4 @@ def main(argv=None):
 
             print(f"Saved test results for degraded={degraded} to {result_txt_path}")  
 if __name__ == '__main__':  
-    main()  
+    main()

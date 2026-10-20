@@ -29,6 +29,9 @@ _DATASET_MODULES = [
     "dataset_repmix",
     "dataset_patch",
     "dataset_ucf",
+    "dataset_lida",
+    "dataset_defake",
+    "dataset_pose",
 ]
 for _m in _DATASET_MODULES:
     try:

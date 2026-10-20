@@ -13,7 +13,7 @@
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 #SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=aspis2000@virgilio.it
+#SBATCH --mail-user=richitrebbia@gmail.com
 
 set -euo pipefail
 module load python/3.11.7
@@ -27,8 +27,8 @@ export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export IAB_EXCLUDE_GENERATORS=dalle3
 
-REPO="$WORK/hyp_fine_tuning/hyperbolic_CLIP_giuseppe"
-DATA="$FAST/datasets/iab_dataset"
+REPO="${REPO:-$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo}"
+DATA="${DATA:-$FAST/datasets/iab_dataset}"
 cd "$REPO"
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 

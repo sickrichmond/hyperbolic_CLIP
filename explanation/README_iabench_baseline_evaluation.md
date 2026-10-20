@@ -1,11 +1,12 @@
 # Evaluate baseline checkpoints on IABench
 
 One shared launcher supports ResNet50, DCT-CNN, HiFi-Net, DEFL, DNA-Det stage two,
-RepMix, PatchForensics and UCF. Submit one job per explicitly selected checkpoint:
+RepMix, PatchForensics, UCF, LIDA, DeFake and POSE. Submit one job per explicitly
+selected checkpoint:
 
 ```bash
 cd "$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo"
-sbatch comparison/training/scripts/cineca_baselines_test_iabench.sh \
+sbatch comparison/training/scripts/test_iabench.sh \
   /path/to/ckpt_best.pth
 ```
 
@@ -43,7 +44,7 @@ the selected checkpoint; the exporter preserves this compatibility. For example:
 
 ```bash
 DATA=/path/to/IABench/data NUM_WORKERS=2 BATCH_SIZE=32 \
-  sbatch comparison/training/scripts/cineca_baselines_test_iabench.sh \
+  sbatch comparison/training/scripts/test_iabench.sh \
     /path/to/resnet50/ckpt_best.pth
 ```
 
@@ -88,9 +89,12 @@ requested levels; the default job-ID directory keeps separate submissions apart.
 
 CPU checks: `python -m tests.test_iabench_baseline_evaluation` and
 `python -m tests.test_iabench_baseline_eval_slurm`. They cover Arrow/export parity,
-all eight baseline formats, exact test membership at all seven levels, singleton
+all eleven baseline formats, exact test membership at all seven levels, singleton
 final batches, metadata/weight rejection and native PatchForensics metric parity.
 Full GPU execution and throughput require verification on Leonardo.
+
+LIDA, DeFake and POSE training/resume commands are in
+[their IABench training guide](README_iabench_lida_defake_pose.md).
 
 ## Train with our corruption policy
 

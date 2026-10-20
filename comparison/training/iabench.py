@@ -114,7 +114,8 @@ def prepare_iabench_test(root, split_manifest, checkpoint):
     if [i for i, name in enumerate(names) if name.casefold() == 'real'] != [0]:
         raise ValueError("IABench manifest must contain exactly one real class, first")
     method = checkpoint.get('model_name')
-    if method not in ('resnet50', 'dct', 'hifi_net', 'defl', 'dna', 'repmix', 'patch', 'ucf'):
+    if method not in ('resnet50', 'dct', 'hifi_net', 'defl', 'dna', 'repmix', 'patch', 'ucf',
+                      'lida', 'defake', 'pose'):
         raise ValueError(f"Unsupported IABench baseline: {method!r}")
     expected = {
         'dataset': 'iabench', 'class_names': names, 'num_classes': len(names),

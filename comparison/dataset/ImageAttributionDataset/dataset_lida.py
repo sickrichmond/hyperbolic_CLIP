@@ -39,7 +39,8 @@ def _low_bit_image(image, size=256, patch_size=32, patch_mode="max", output_mode
 @DATASET.register_module(module_name="lida")
 class LIDADataset(ImageAttributionDataset):
     def __init__(self, root_dir, num_images_per_semantic_per_class=2000, transform=None, degraded=0, config=None, **kwargs):
-        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded)
+        super().__init__(root_dir, num_images_per_semantic_per_class, transform, degraded=degraded,
+                         iabench_source=kwargs.get("iabench_source"))
         self.config = config or {}
         self.image_size = self.config.get("image_size", 256)
         self.patch_size = self.config.get("patch_size", 32)

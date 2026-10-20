@@ -13,20 +13,20 @@
 #SBATCH --output=%x_%j.out
 #SBATCH --error=%x_%j.err
 #SBATCH --mail-type=END,FAIL
-#SBATCH --mail-user=aspis2000@virgilio.com
+#SBATCH --mail-user=richitrebbia@gmail.com
 set -euo pipefail
 module load python/3.11.7
 module load cuda/12.6
-source $WORK/hyp_fine_tuning/bin/activate
+source "$WORK/hyp_fine_tuning/bin/activate"
 export HF_HOME=$WORK/hyp_fine_tuning/hf_cache
 export TORCH_HOME=$WORK/hyp_fine_tuning/torch_cache
 export TOKENIZERS_PARALLELISM=false
 export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export IAB_EXCLUDE_GENERATORS=dalle3
-REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_giuseppe
-DATA=$FAST/datasets/iab_dataset
-cd $REPO
+REPO="${REPO:-$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo}"
+DATA="${DATA:-$FAST/datasets/iab_dataset}"
+cd "$REPO"
 export PYTHONPATH="$REPO:${PYTHONPATH:-}"
 echo "Node: $(hostname) | GPU: ${CUDA_VISIBLE_DEVICES:-?} | exclude=${IAB_EXCLUDE_GENERATORS}"
 python -m comparison.training.train \

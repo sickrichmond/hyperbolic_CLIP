@@ -11,7 +11,7 @@ import unittest
 class EvaluationLauncherTests(unittest.TestCase):
     def test_launch_command_defaults_overrides_and_missing_inputs(self):
         repo = Path(__file__).resolve().parents[1]
-        script = repo / 'comparison/training/scripts/cineca_baselines_test_iabench.sh'
+        script = repo / 'comparison/training/scripts/test_iabench.sh'
         for directive in ('--time=4-00:00:00', '--qos=boost_qos_lprod', '--gpus-per-node=1', '--cpus-per-task=8'):
             self.assertIn(f'#SBATCH {directive}', script.read_text())
         self.assertNotIn('IAB_EXCLUDE_GENERATORS', script.read_text())

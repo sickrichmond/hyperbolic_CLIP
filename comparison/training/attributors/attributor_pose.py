@@ -20,7 +20,7 @@ class POSEAttributor(AbstractAttributor):
         super().__init__(config, load_param)
         self.config = config or {}
         self.num_classes = self.config.get("num_classes", len(model_class_to_label))
-        if self.num_classes != len(model_class_to_label):
+        if self.config.get("dataset", "iab") == "iab" and self.num_classes != len(model_class_to_label):
             raise ValueError(
                 f"POSE config has {self.num_classes} classes, but the active IAB "
                 f"label map has {len(model_class_to_label)}. Check "

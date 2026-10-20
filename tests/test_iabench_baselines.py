@@ -30,8 +30,10 @@ from comparison.training.iabench import (
     prepare_iabench, get_iabench_dataloaders, validate_dna_stage_one)
 from comparison.training import train
 from comparison.training.trainer.trainer import Trainer
+from comparison.training.trainer.pose_trainer import POSETrainer
 
-METHODS = ('resnet50', 'dct', 'hifi_net', 'defl', 'dna', 'repmix', 'patch', 'ucf')
+METHODS = ('resnet50', 'dct', 'hifi_net', 'defl', 'dna', 'repmix', 'patch', 'ucf',
+           'lida', 'defake', 'pose')
 CONFIGS = Path('comparison/training/config/model')
 
 
@@ -91,6 +93,23 @@ class TinyAttributor(nn.Module):
 class TinyReconstruction(nn.Module):
     def forward(self, forgery, content):
         return forgery.mean(dim=(1, 2, 3)).view(-1, 1, 1, 1).expand(-1, 3, 256, 256)
+
+
+class TinyPOSEFeatureExtractor(nn.Module):
+    def __init__(self, num_classes, **kwargs):
+        super().__init__()
+        self.projection = nn.Linear(3, 8)
+        self.classification_head = nn.Sequential(nn.Linear(8, num_classes))
+
+    def extract_features(self, images):
+        return self.projection(images.mean(dim=(-2, -1)))
+
+    def classify(self, features):
+        return self.classification_head(features)
+
+    def forward(self, images):
+        features = self.extract_features(images)
+        return self.classify(features), features
 
 
 class BaselineIABenchTests(unittest.TestCase):
@@ -176,7 +195,8 @@ class BaselineIABenchTests(unittest.TestCase):
                     self.assertEqual(read_rows, [self.manifest['train'][0], self.manifest['train'][-1]])
                     self.assertTrue(set(read_rows) <= set(self.manifest['train']))
                 else:
-                    size = 224 if method == 'resnet50' else 64 if method == 'dna' else 256
+                    size = (224 if method in ('resnet50', 'defake') else 128 if method == 'pose'
+                            else 64 if method == 'dna' else 256)
                     self.assertEqual(tuple(batch['image'].shape), (2, 3, size, size))
                 if method == 'hifi_net':
                     self.assertEqual(len(batch['hierachi_label']), 4)
@@ -241,13 +261,27 @@ class BaselineIABenchTests(unittest.TestCase):
                 elif method == 'ucf':
                     stack.enter_context(patch.object(UCFAttributor, 'build_backbone', return_value=nn.Identity()))
                     stack.enter_context(patch('comparison.training.attributors.attributor_ucf.Conditional_UNet', return_value=TinyReconstruction()))
+                elif method in ('lida', 'defake'):
+                    backbone = nn.Identity()
+                    backbone.output_dim = 2048
+                    symbol = 'LIDABackbone' if method == 'lida' else 'DeFakeImageEncoder'
+                    stack.enter_context(patch(f'comparison.training.attributors.attributor_{method}.{symbol}',
+                                              return_value=backbone))
+                elif method == 'pose':
+                    stack.enter_context(patch('comparison.training.attributors.attributor_pose.POSEFeatureExtractor',
+                                              TinyPOSEFeatureExtractor))
                 model = ATTRIBUTOR[method](config)
                 head = {'resnet50': lambda: model.fc, 'dct': lambda: model.feature_extractor.fc,
                         'defl': lambda: model.nn_classifier.fc3, 'dna': lambda: model.backbone.classification_head[-1],
                         'hifi_net': lambda: model.SegNet.branch_cls_level_4.fc,
                         'repmix': lambda: model.attribution, 'patch': lambda: model.net_D,
-                        'ucf': lambda: model.head_spe.mlp[-1]}[method]()
+                        'ucf': lambda: model.head_spe.mlp[-1], 'lida': lambda: model.fc,
+                        'defake': lambda: model.fc3,
+                        'pose': lambda: model.feature_extractor.classification_head[-1]}[method]()
                 self.assertEqual(head.out_features, 29)
+                if method == 'pose':
+                    with self.assertRaisesRegex(ValueError, 'active IAB'):
+                        ATTRIBUTOR[method](dict(config, dataset='iab'))
                 if method == 'hifi_net':
                     self.assertEqual(model.SegNet.branch_cls_level_3.fc.out_features, 7)
                     self.assertEqual(model.SegNet.parent_idx_2.tolist(), [0, 0, 1, 0])
@@ -273,7 +307,7 @@ class BaselineIABenchTests(unittest.TestCase):
                     config.update(resize_size=[64, 64], multi_size=[[16, 16]] * 2)
                 _, val_loader = get_iabench_dataloaders(*sources, config, 2, 0, transforms.ToTensor())
                 batch = next(iter(val_loader))
-                if method in ('resnet50', 'defl'):
+                if method in ('resnet50', 'defl', 'lida', 'defake'):
                     stack.enter_context(patch.object(model, 'extract_features', return_value=torch.zeros(2, 2048)))
                 elif method == 'hifi_net':
                     stack.enter_context(patch.object(model, 'extract_features', return_value=None))
@@ -299,10 +333,13 @@ class BaselineIABenchTests(unittest.TestCase):
                     stack.enter_context(patch.object(model, 'extract_features', return_value={
                         'forgery': torch.zeros(2, 512, 4, 4), 'content': torch.zeros(2, 512, 4, 4)}))
                 optimizer = torch.optim.SGD(model.parameters(), lr=.001)
-                trainer = Trainer(config, model, optimizer, None, logging.getLogger('native-heads'),
-                                  log_dir=self.tmp.name)
+                trainer_class = POSETrainer if method == 'pose' else Trainer
+                trainer = trainer_class(config, model, optimizer, None, logging.getLogger('native-heads'),
+                                        log_dir=self.tmp.name)
+                if method == 'pose':
+                    trainer.current_epoch = 1
                 losses, pred = trainer.train_step(batch)
-                self.assertTrue(torch.isfinite(losses['overall']))
+                self.assertTrue(torch.isfinite(torch.as_tensor(losses['overall'])))
                 expected_shape = (2, 29, 1, 1) if method == 'patch' else (2, 29)
                 self.assertEqual(tuple(pred['logits'].shape), expected_shape)
                 self.assertTrue(any(p.grad is not None for p in head.parameters()))
@@ -361,7 +398,17 @@ class BaselineIABenchTests(unittest.TestCase):
                         argv = ['--config', str(config_path), '--dataset', 'iabench',
                                 '--root_dir', str(root), '--split_manifest', str(manifest_path),
                                 '--batch_size', '4', '--num_workers', '0', '--n_epoch', '1', '--log_dir', str(log)]
-                        with patch.dict(ATTRIBUTOR.data, {method: TinyAttributor}):
+                        model_factory = TinyAttributor
+                        if method == 'pose':
+                            from comparison.training.attributors.attributor_pose import POSEAttributor
+                            model_factory = POSEAttributor
+                        with ExitStack() as stack:
+                            stack.enter_context(patch.dict(ATTRIBUTOR.data, {method: model_factory}))
+                            if method == 'pose':
+                                stack.enter_context(patch('comparison.training.attributors.attributor_pose.POSEFeatureExtractor',
+                                                          TinyPOSEFeatureExtractor))
+                                stack.enter_context(patch('comparison.training.attributors.attributor_pose.SingleLayerAugmenter',
+                                                          side_effect=lambda **kw: nn.Conv2d(3, 3, 1)))
                             train.main(argv)
                             last = next(log.rglob('ckpt_last.pth'))
                             saved = torch.load(last, weights_only=False)
@@ -375,9 +422,21 @@ class BaselineIABenchTests(unittest.TestCase):
                             self.assertEqual(len(list(log.rglob('ckpt_last.pth'))), 1)
                             self.assertGreaterEqual(resumed['best_metrics']['val_metric'], saved['best_metrics']['val_metric'])
                             if resumed['scheduler_state_dict']:
-                                self.assertEqual(resumed['scheduler_state_dict']['last_epoch'], 2)
+                                self.assertEqual(resumed['scheduler_state_dict']['last_epoch'], 8 if method == 'pose' else 2)
                             steps = [v['step'].item() for v in resumed['optimizer_state_dict']['state'].values()]
-                            self.assertEqual(steps, [8., 8.])
+                            self.assertEqual(steps, [8.] * (4 if method == 'pose' else 2))
+                            if method == 'pose':
+                                self.assertEqual(set(resumed['augmenter_optimizer_state_dicts']), {0, 1})
+                                self.assertEqual(set(resumed['augmenter_scheduler_state_dicts']), {0, 1})
+                                self.assertEqual(resumed['augmenter_scheduler_state_dicts'][0],
+                                                 saved['augmenter_scheduler_state_dicts'][0])
+                                for state in resumed['augmenter_optimizer_state_dicts'].values():
+                                    self.assertEqual([v['step'].item() for v in state['state'].values()], [4., 4.])
+                                broken = dict(resumed, augmenter_optimizer_state_dicts={})
+                                torch.save(broken, last)
+                                with self.assertRaisesRegex(ValueError, 'each trained augmenter'):
+                                    train.main(argv + ['--resume_checkpoint', str(last), '--n_epoch', '3'])
+                                torch.save(resumed, last)
                             if method == 'dna':
                                 stage_two_config = config_for('dna')
                                 stage_two_config.update(resize_size=[64, 64], multi_size=[[16, 16]] * 2)

@@ -20,6 +20,7 @@ class POSEDataset(ImageAttributionDataset):
             num_images_per_semantic_per_class,
             transform,
             degraded=degraded,
+            iabench_source=kwargs.get("iabench_source"),
         )
         if self.transform is None:
             image_size = (config or {}).get("image_size", 128)
