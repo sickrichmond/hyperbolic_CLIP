@@ -47,3 +47,7 @@ external/
 
 # codex files
 AGENTS.md
+
+/logs/
+
+/tmp*/

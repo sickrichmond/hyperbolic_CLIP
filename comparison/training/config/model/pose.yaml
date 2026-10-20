@@ -1,0 +1,30 @@
+model_name: pose
+num_classes: 22
+num_augmenters: 30
+input_data: dct
+image_size: 128
+feature_dim: 512
+inc: 32
+kernel_size: 3
+
+optimizer:
+  type: adam
+  adam:
+    lr: 0.00003
+
+start_epoch: 1
+nEpochs: 30
+save_freq: 5
+metric_scoring: acc
+lr_scheduler: step
+lr_step: 10000
+lr_gamma: 0.9
+scheduler_step_per_batch: true
+
+augnet_lr: 0.01
+triplet_margin: 0.3
+temp: 0.1
+w_dist_pre: 0.0001
+w_close_known: 0.01
+known_sim_limit: 0.95
+cls_pre: true

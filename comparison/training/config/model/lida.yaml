@@ -1,0 +1,24 @@
+model_name: lida
+
+pretrained: false
+num_classes: 22
+image_size: 256
+output_mode: full
+patch_mode: max
+patch_size: 32
+
+optimizer:
+  type: adam
+  adam:
+    lr: 0.0001
+  sgd:
+    lr: 0.01
+
+lr_scheduler: cosine
+lr_T_max: 30
+lr_eta_min: 0.000001
+
+start_epoch: 1
+nEpochs: 30
+save_freq: 5
+metric_scoring: acc
