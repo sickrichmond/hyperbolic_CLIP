@@ -4,15 +4,15 @@
 # No captions. AUGMENT=1 enables training degradations; AUG_POLICY selects
 # corruption (default) or omnidfa. Checkpoint names distinguish these modes.
 #
-# Submit: sbatch slurm/slurm_train_22cls_cos_penalty.sh
-#         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_22cls_cos_penalty.sh
-#         sbatch --export=ALL,OPTIMIZER=sgd,LAMBDA_COSINE=0.5,ANCHOR_INIT=random slurm/slurm_train_22cls_cos_penalty.sh
-# Defaults: OPTIMIZER=adamw, LAMBDA_COSINE=0.2, ANCHOR_INIT=random.
+# Submit: sbatch slurm/slurm_train_22cls_final_loss.sh
+#         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_22cls_final_loss.sh
+#         sbatch --export=ALL,LAMBDA_ANCHOR=0.5,GEODESIC_MARGIN=3 slurm/slurm_train_22cls_final_loss.sh
+# Defaults: OPTIMIZER=adamw, LAMBDA_ANCHOR=0.2, GEODESIC_MARGIN=3, ANCHOR_INIT=random.
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
-#SBATCH --job-name=attr_22cls_cosine_penalty
+#SBATCH --job-name=attr_22cls_final_loss
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=16
@@ -44,7 +44,8 @@ MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 AUGMENT=${AUGMENT:-0}
 AUG_POLICY=${AUG_POLICY:-corruption}
 OPTIMIZER=${OPTIMIZER:-adamw}
-LAMBDA_COSINE=${LAMBDA_COSINE:-0.2}
+LAMBDA_ANCHOR=${LAMBDA_ANCHOR:-0.2}
+GEODESIC_MARGIN=${GEODESIC_MARGIN:-3}
 ANCHOR_INIT=${ANCHOR_INIT:-random}
 
 case "$OPTIMIZER" in
@@ -55,13 +56,16 @@ case "$ANCHOR_INIT" in
     text|image_centroid|text_free|random) ;;
     *) echo "ERROR: ANCHOR_INIT must be text, image_centroid, text_free, or random (got: $ANCHOR_INIT)" >&2; exit 2 ;;
 esac
-if [[ ! "$LAMBDA_COSINE" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
-    echo "ERROR: LAMBDA_COSINE must be a non-negative number (got: $LAMBDA_COSINE)" >&2
-    exit 2
-fi
+for name in LAMBDA_ANCHOR GEODESIC_MARGIN; do
+    if [[ ! "${!name}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
+        echo "ERROR: $name must be a non-negative number (got: ${!name})" >&2
+        exit 2
+    fi
+done
 
-LAMBDA_TAG=${LAMBDA_COSINE//./p}
-RUN_TAG="cos${LAMBDA_TAG}_${ANCHOR_INIT}_${OPTIMIZER}"
+LAMBDA_TAG=${LAMBDA_ANCHOR//./p}
+MARGIN_TAG=${GEODESIC_MARGIN//./p}
+RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_${ANCHOR_INIT}_${OPTIMIZER}"
 if [ "$AUGMENT" = 1 ]; then
     AUG_FLAG="--train_augment --aug_policy $AUG_POLICY"
     if [ "$AUG_POLICY" = omnidfa ]; then
@@ -74,7 +78,7 @@ else
     CKPT=$OUT/attribution_22cls_${RUN_TAG}_vitl14.pt
 fi
 
-echo "Training with optimizer=$OPTIMIZER, lambda_cosine=$LAMBDA_COSINE, anchor_init=$ANCHOR_INIT"
+echo "Training with optimizer=$OPTIMIZER, lambda_anchor=$LAMBDA_ANCHOR, geodesic_margin=$GEODESIC_MARGIN, anchor_init=$ANCHOR_INIT"
 
 mkdir -p $OUT
 cd $REPO
@@ -105,7 +109,8 @@ python train_attribution.py \
     --lambda_neg      1.0 \
     --lambda_norm     0.5 \
     --target_norm     4.0 \
-    --lambda_cosine   "$LAMBDA_COSINE" \
+    --lambda_anchor   "$LAMBDA_ANCHOR" \
+    --geodesic_margin "$GEODESIC_MARGIN" \
     --no_captions \
     $AUG_FLAG \
     --batch_size      256 \
@@ -114,7 +119,7 @@ python train_attribution.py \
     --weight_decay    0.01 \
     --num_workers     8 \
     --split_manifest  $MANIFEST \
-    --diag_plot_dir "$WORK/hyp_fine_tuning/viz/cosine_penalty_${SLURM_JOB_ID}" \
+    --diag_plot_dir "$WORK/hyp_fine_tuning/viz/final_loss_${SLURM_JOB_ID}" \
     --log_every 10 \
     --lr_schedule cosine \
     --optimizer "$OPTIMIZER" \

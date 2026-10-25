@@ -139,6 +139,14 @@ class AttributionTrainingTests(unittest.TestCase):
         base = ["--dataset_path", "x", "--captions_dir", "y"]
         args = parse_args(base + ["--no_captions"])
         validate_args(args)
+        self.assertEqual((args.lambda_anchor, args.geodesic_margin), (.2, 3.))
+        legacy = parse_args(base + ["--lambda_cosine", "0.5"])
+        self.assertEqual(legacy.lambda_anchor, .5)
+        for flag in ("--lambda_anchor", "--geodesic_margin"):
+            for value in ("-1", "nan", "inf"):
+                with self.subTest(flag=flag, value=value), self.assertRaisesRegex(
+                        ValueError, "finite and non-negative"):
+                    validate_args(parse_args(base + [flag, value]))
         for options, error in ((["--profile_steps", "-1"], "non-negative"),
                                (["--profile_steps", "10"], "requires --diag_plot_dir")):
             with self.assertRaisesRegex(ValueError, error):
@@ -177,7 +185,8 @@ class AttributionTrainingTests(unittest.TestCase):
             (["--anchor_init", "random", "--freeze_anchors"], False),
             (["--anchor_init", "text", "--lambda_norm", "0.5",
               "--target_norm", "4", "--norm_mode", "bilateral"], True),
-            (["--anchor_init", "text_free", "--neg_samples", "1"], False),
+            (["--anchor_init", "text_free", "--neg_samples", "1",
+              "--lambda_anchor", ".5", "--geodesic_margin", "2.5"], False),
             (["--anchor_init", "image_centroid", "--anchor_norm_range", "1", "2"], False),
             (["--anchor_init", "random", "--require_caption"], True),
         ]
@@ -191,6 +200,11 @@ class AttributionTrainingTests(unittest.TestCase):
                 self.assertEqual(checkpoint["family_names"], [])
                 self.assertIsNone(checkpoint["family_of"])
                 self.assertEqual(checkpoint["loss"], "cone")
+                self.assertEqual(checkpoint["anchor_penalty"], "geodesic")
+                self.assertEqual(checkpoint["anchor_scope"], "classes")
+                self.assertEqual(checkpoint["lambda_anchor"], .5 if "--lambda_anchor" in options else .2)
+                self.assertEqual(checkpoint["geodesic_margin"], 2.5 if "--geodesic_margin" in options else 3.)
+                self.assertEqual(checkpoint["lambda_cosine"], 0.)
                 for key in ("anchor_sin_psi", "fixed_psi", "lambda_ce", "ce_tau",
                             "lambda_cover", "aperture_calibration"):
                     self.assertNotIn(key, checkpoint)
@@ -210,6 +224,8 @@ class AttributionTrainingTests(unittest.TestCase):
                 rows = (Path(directory) / "stats.csv").read_text().splitlines()
                 self.assertEqual(len(rows), 5)
                 self.assertTrue(rows[0].startswith("step,epoch,lr,loss,"))
+                self.assertIn("loss_anchor", rows[0].split(","))
+                self.assertNotIn("loss_cosine", rows[0].split(","))
 
 
 if __name__ == "__main__":

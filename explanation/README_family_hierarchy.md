@@ -46,9 +46,18 @@ each update, without negative subsampling; class anchors receive equal weight.
 The depth loss is `mean(max(0, family_depth[parent(c)] + gap - class_depth[c])**2)`.
 Depth here is tangent norm, equivalently geodesic distance from the origin.
 Both anchor levels receive gradients. The existing class norm regularizer
-continues to use Lorentz spatial norms. Cosine regularization retains its
-positive-cosine formula but acts **only on family pairs** in hierarchy mode.
-For a single active family, wrong-family and cosine losses are zero.
+continues to use Lorentz spatial norms. Anchor separation is the mean hinge
+`max(0, geodesic_margin - Lorentz_distance)` over unique pairs. It acts **only
+on family pairs** in hierarchy mode, and on class pairs otherwise. All family
+hinges and the relative depth loss remain unchanged. For a single active family,
+wrong-family and anchor-separation losses are zero.
+
+`--lambda_anchor` weights the new term (CLI default 0.2), and
+`--geodesic_margin` sets its distance threshold (default 3). The threshold is
+independent of the angular margin and spatial norm target. `--lambda_cosine`
+remains a legacy CLI alias for the new weight; it no longer enables cosine loss.
+The geodesic hinge encourages distance, not guaranteed directional separation
+or disjoint cones. Increasing depth can also satisfy it.
 
 There is no image-to-family training term. Class prediction still minimizes
 the class exterior angle. Checkpoints store learned family tangent vectors,
@@ -66,7 +75,8 @@ The legacy diagnostic CLI still uses the original IAB dataset workflow.
 | `--family_depth_margin` | 0.5 |
 | `--lambda_family` | 1 |
 | `--lambda_family_depth` | 0.5 |
-| `--lambda_cosine` | Existing CLI/launcher value (0.2 / 0.5) |
+| `--lambda_anchor` | Existing CLI/launcher weight (0.2 / 0.5) |
+| `--geodesic_margin` | 3 (geodesic distance, independent of the norm target) |
 
 With curvature 1 and `min_radius=0.5`, family/class depths 1.2/2 correspond
 to spatial norms 1.509/3.627 and half-apertures 41.49/16.00 degrees.
@@ -93,7 +103,7 @@ python train_iabench.py \
   --hierarchy increfa --anchor_init random --anchor_init_norm 2 --init_depth 3 \
   --family_init_norm 1.2 --family_depth_margin 0.5 \
   --curv 1 --min_radius 0.5 --margin 0.3 --lambda_neg 1 \
-  --lambda_norm 0.5 --target_norm 4 --lambda_cosine 0.5 \
+  --lambda_norm 0.5 --target_norm 4 --lambda_anchor 0.5 --geodesic_margin 3 \
   --clip_name openai/clip-vit-large-patch14 \
   --lora_target 'vision_model\.encoder\.layers\.[0-9]+\.self_attn\.(q_proj|v_proj)' \
   --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 \
@@ -117,7 +127,7 @@ mean parent-child gaps, depth-margin violations, image/class ordering violations
 family aperture extrema, family cosine mean/max and exterior-angle saturation.
 Family containment diagnostics do not contribute gradients. Epoch values average
 batch statistics: reported minima/maxima are averages of batch extrema.
-`loss_cosine` refers to the family penalty in hierarchy mode; `mean_anc_cos_sim`
+`loss_anchor` refers to the family penalty in hierarchy mode; `mean_anc_cos_sim`
 and `max_anc_cos_sim` continue to describe classes. New family cosine columns
 are `mean_fam_cos_sim` and `max_fam_cos_sim`.
 

@@ -227,6 +227,8 @@ class IABenchIntegrationTests(unittest.TestCase):
                     if mode == "hierarchy":
                         self.assertEqual(ckpt["hierarchy"], "increfa")
                         self.assertEqual(ckpt["cosine_scope"], "families")
+                        self.assertEqual(ckpt["anchor_scope"], "families")
+                        self.assertEqual(ckpt["geodesic_margin"], 3.)
                         self.assertEqual(ckpt["family_names"], ["real", "autoregressive", "diffusion"])
                         self.assertEqual(ckpt["family_of"], [0, 2, 1])
                         self.assertEqual(ckpt["family_tangent"].shape, (3, 4))

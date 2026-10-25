@@ -1,11 +1,11 @@
-"""Image-class entailment-cone hinges with anchor-norm and cosine regularization.
+"""Image-class entailment-cone hinges with norm and geodesic anchor regularization.
 
 Positive pairs pay max(0, xi-psi); wrong-class pairs pay max(0, psi+margin-xi).
-The cosine penalty averages max(0, cosine(a_i, a_j)) over unique anchor pairs.
+The anchor penalty averages max(0, geodesic_margin - distance) over unique pairs.
 With family inputs, class-to-family hinges and a relative tangent-depth penalty
-are added, and the cosine penalty acts exclusively on family anchors.
-Cosine penalizes directions less than 90 degrees apart, independent of anchor
-norms; it does not constrain apertures or guarantee non-overlapping cones.
+are added, and the anchor penalty acts exclusively on family anchors.
+Geodesic separation depends on directions and depths; it does not constrain
+apertures or guarantee non-overlapping cones.
 Apertures depend on anchor depth. Prediction minimizes the exterior angle xi.
 Inputs use Lorentz spatial coordinates; returned diagnostics are detached.
 """
@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from geometry.lorentz import half_aperture, oxy_angle
+from geometry.lorentz import half_aperture, oxy_angle, pairwise_dist
 
 def _pairwise_xi(apex: torch.Tensor, point: torch.Tensor, curv: float) -> torch.Tensor:
     """Pairwise oxy_angle: result[a, p] = oxy_angle(apex[a], point[p]).
@@ -46,20 +46,22 @@ class EntailmentConeLoss(nn.Module):
         margin: float = 0.1,
         lambda_neg: float = 1.0,
         lambda_norm: float = 0.0,
-        lambda_cosine: float = 0.0,
+        lambda_anchor: float = 0.0,
         target_norm: float = 0.0,
+        geodesic_margin: float = 0.0,
         norm_mode: str = "floor",
         neg_samples: int = 0,
         lambda_family: float = 0.0,
         lambda_family_depth: float = 0.0,
         family_depth_margin: float = 0.5,
     ):
-        """Configure hinges, spatial anchor-norm and pairwise cosine penalties.
+        """Configure hinges, spatial anchor-norm and pairwise distance penalties.
 
         neg_samples=0 uses all wrong classes; otherwise subsample per image.
         The norm penalty is enabled when both lambda_norm and target_norm are positive.
-        Positive lambda_cosine separates families when family inputs are provided,
+        Positive lambda_anchor separates families when family inputs are provided,
         otherwise classes. This constructor defaults to zero; the CLI defaults to 0.2.
+        geodesic_margin is a distance threshold, independent of target_norm and margin.
         Family losses use all classes each call; the relative depth loss is tangent-based.
         """
         super().__init__()
@@ -67,6 +69,8 @@ class EntailmentConeLoss(nn.Module):
             raise ValueError("norm_mode must be 'floor' or 'bilateral'")
         if not math.isfinite(curv) or curv <= 0:
             raise ValueError("curv must be positive and finite")
+        if not all(math.isfinite(v) and v >= 0 for v in (lambda_anchor, geodesic_margin)):
+            raise ValueError("Anchor weight and geodesic margin must be finite and non-negative")
         if not all(math.isfinite(v) and v >= 0 for v in
                    (lambda_family, lambda_family_depth, family_depth_margin)):
             raise ValueError("Family weights and depth margin must be finite and non-negative")
@@ -75,8 +79,9 @@ class EntailmentConeLoss(nn.Module):
         self.margin = margin
         self.lambda_neg = lambda_neg
         self.lambda_norm = lambda_norm
-        self.lambda_cosine = lambda_cosine
+        self.lambda_anchor = lambda_anchor
         self.target_norm = target_norm
+        self.geodesic_margin = geodesic_margin
         self.norm_mode = norm_mode
         self.neg_samples = neg_samples
         self.lambda_family = lambda_family
@@ -94,9 +99,9 @@ class EntailmentConeLoss(nn.Module):
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Return the weighted loss and detached image/cone geometry diagnostics.
 
-        loss_cosine is unweighted. Mean/max cosine statistics use all unique
+        loss_anchor is unweighted. Mean/max cosine statistics use all unique
         class anchor pairs, including negative similarities; both report zero for K=1.
-        Family cosine diagnostics have separate keys; loss_cosine uses family pairs
+        Family cosine diagnostics have separate keys; loss_anchor uses family pairs
         whenever family inputs are provided, even when family loss weights are zero.
         """
         B = x_img.shape[0]
@@ -152,17 +157,17 @@ class EntailmentConeLoss(nn.Module):
             depth_gap = class_depth - family_depth[family_of]
             L_family_depth = (self.family_depth_margin - depth_gap).clamp_min(0).square().mean()
 
-        cosine_anchors = x_anc if x_fam is None else x_fam
-        cosine_count = len(cosine_anchors)
-        L_cosine = x_anc.new_zeros(())
-        if self.lambda_cosine > 0 and cosine_count > 1:
-            anc_dir = F.normalize(cosine_anchors, dim=-1)
-            cos_sim = anc_dir @ anc_dir.T
-            iu = torch.triu_indices(cosine_count, cosine_count, offset=1, device=device)
-            pairwise_cos = cos_sim[iu[0], iu[1]]
-            L_cosine = pairwise_cos.clamp_min(0.0).mean()
+        anchors = x_anc if x_fam is None else x_fam
+        anchor_count = len(anchors)
+        L_anchor = x_anc.new_zeros(())
+        if self.lambda_anchor > 0 and anchor_count > 1:
+            # Keep acosh away from 1 even in float32, including self-pairs.
+            distances = pairwise_dist(anchors, anchors, curv=self.curv, eps=1e-5)
+            iu = torch.triu_indices(anchor_count, anchor_count, offset=1, device=device)
+            distances = distances[iu[0], iu[1]]
+            L_anchor = (self.geodesic_margin - distances).clamp_min(0).mean()
 
-        loss = (L_img_in_class + self.lambda_norm * L_norm + self.lambda_cosine * L_cosine
+        loss = (L_img_in_class + self.lambda_norm * L_norm + self.lambda_anchor * L_anchor
                 + self.lambda_family * L_family + self.lambda_family_depth * L_family_depth)
 
         # These geometry diagnostics do not contribute gradients to the loss.
@@ -177,7 +182,7 @@ class EntailmentConeLoss(nn.Module):
                 "loss_pos": L_pos.detach(),
                 "loss_neg": L_neg.detach(),
                 "loss_norm": L_norm.detach(),
-                "loss_cosine": L_cosine.detach(),
+                "loss_anchor": L_anchor.detach(),
                 "mean_anc_cos_sim": cos_eval.mean(),
                 "max_anc_cos_sim": cos_eval.max(),
                 "inside_img": (xi_pos < psi_pos).float().mean(),

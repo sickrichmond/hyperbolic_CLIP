@@ -77,6 +77,51 @@ def test_norm_mode():
     print(f"4 ok  norm: floor 0.0 at depth 8.18, bilateral {st_both['loss_norm'].item():.3f}")
 
 
+def test_geodesic_anchor_hinge():
+    """Same-ray distances equal depth differences; only one of three pairs violates z."""
+    for curv in (0.5, 1.0, 2.0):
+        tangent = torch.tensor([[1.], [1.5], [3.]], dtype=torch.float64, requires_grad=True)
+        anchors = exp_map0(tangent, curv=curv)
+        images = exp_map0(torch.tensor([[4.]], dtype=torch.float64), curv=curv)
+        labels = torch.tensor([0])
+        baseline, _ = EntailmentConeLoss(curv=curv)(images, anchors, labels)
+        loss, stats = EntailmentConeLoss(curv=curv, lambda_anchor=.6,
+                                        geodesic_margin=1)(images, anchors, labels)
+        assert torch.allclose(stats["loss_anchor"], tangent.new_tensor(1 / 6))
+        assert torch.allclose(loss - baseline, tangent.new_tensor(.1))
+        gradient, = torch.autograd.grad(loss - baseline, tangent)
+        assert torch.allclose(gradient, tangent.new_tensor([[.2], [-.2], [0.]]), atol=1e-7)
+        for weight, margin in ((0, 1), (1, 0)):
+            _, disabled = EntailmentConeLoss(curv=curv, lambda_anchor=weight,
+                geodesic_margin=margin)(images, anchors, labels)
+            assert disabled["loss_anchor"] == 0
+        _, single = EntailmentConeLoss(curv=curv, lambda_anchor=1,
+            geodesic_margin=1)(images, anchors[:1], labels)
+        assert single["loss_anchor"] == 0
+    for option in ("lambda_anchor", "geodesic_margin"):
+        for value in (-1., float("nan"), float("inf")):
+            try:
+                EntailmentConeLoss(**{option: value})
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"Accepted invalid {option}: {value}")
+    print("geodesic hinge values, unique-pair averaging, gradients and disabled cases: OK")
+
+
+def test_geodesic_float32_gradients():
+    tangent = torch.tensor([[1., 0.], [1., 0.], [1., 1e-4]], requires_grad=True)
+    anchors = exp_map0(tangent)
+    images = exp_map0(torch.tensor([[3., .3]]))
+    loss, stats = EntailmentConeLoss(lambda_anchor=1, geodesic_margin=3)(
+        images, anchors, torch.tensor([0]))
+    loss.backward()
+    assert stats["loss_anchor"] > 0
+    assert torch.isfinite(loss)
+    assert torch.isfinite(tangent.grad).all()
+    print("float32 gradients with self-pairs and coincident anchors: OK")
+
+
 def test_negative_subsample():
     mask = torch.ones(5, 22, dtype=torch.bool)
     mask.scatter_(1, torch.arange(5).unsqueeze(1), False)      # 21 negatives per row
@@ -115,6 +160,8 @@ if __name__ == "__main__":
     test_hinges_and_norm_match_formula()
     test_positive_hinge_stops_inside()
     test_norm_mode()
+    test_geodesic_anchor_hinge()
+    test_geodesic_float32_gradients()
     test_negative_subsample()
     test_anchor_clamp_and_poincare_round_trip()
     print("All hinge-loss checks passed.")

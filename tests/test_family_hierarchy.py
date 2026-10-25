@@ -5,9 +5,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 import torch
-from torch.nn import functional as F
 
-from geometry.lorentz import exp_map0, half_aperture, oxy_angle
+from geometry.lorentz import exp_map0, half_aperture, oxy_angle, elementwise_dist
 from losses.attribution_loss import EntailmentConeLoss
 from training.attribution_args import parse_args, validate_args
 from training.families import INCREFA_FAMILIES, increfa_mapping, minimum_cone_depth
@@ -56,7 +55,7 @@ class FamilyHierarchyTests(unittest.TestCase):
                 xa, xf = exp_map0(classes, curv), exp_map0(families, curv)
                 mapping, labels = torch.tensor([0, 1, 0]), torch.tensor([0, 2])
                 loss_fn = EntailmentConeLoss(curv=curv, min_radius=.1, margin=.3,
-                    lambda_neg=.7, lambda_cosine=.2, lambda_family=1.3,
+                    lambda_neg=.7, lambda_anchor=.2, geodesic_margin=3, lambda_family=1.3,
                     lambda_family_depth=.4, family_depth_margin=.5)
                 loss, stats = loss_fn(images, xa, labels, x_fam=xf, family_of=mapping)
                 baseline, _ = EntailmentConeLoss(curv=curv, min_radius=.1,
@@ -67,8 +66,8 @@ class FamilyHierarchyTests(unittest.TestCase):
                 wrong = torch.arange(2)[None, :] != mapping[:, None]
                 negative = (psi[None, :] + .3 - xi).clamp_min(0)[wrong].mean()
                 depth = (.5 + families.norm(dim=-1)[mapping] - classes.norm(dim=-1)).clamp_min(0).square().mean()
-                cosine = F.cosine_similarity(xf[0], xf[1], dim=0).clamp_min(0)
-                expected = baseline + 1.3 * (positive + .7 * negative) + .4 * depth + .2 * cosine
+                anchor = (3 - elementwise_dist(xf[:1], xf[1:], curv, eps=1e-5)).clamp_min(0).mean()
+                expected = baseline + 1.3 * (positive + .7 * negative) + .4 * depth + .2 * anchor
                 self.assertTrue(torch.allclose(loss, expected))
                 self.assertTrue(torch.allclose(stats["loss_family_depth"], depth))
                 actual_grad = torch.autograd.grad(loss, (classes, families), retain_graph=True)
@@ -79,18 +78,19 @@ class FamilyHierarchyTests(unittest.TestCase):
                     self.assertTrue(torch.allclose(actual, reference, atol=1e-8))
                 self.assertTrue(all(not v.requires_grad for v in stats.values()))
 
-    def test_depth_and_cosine_gradients_are_separate(self):
+    def test_depth_and_anchor_gradients_are_separate(self):
         classes = torch.tensor([[2., .0], [1., 1.732]], dtype=torch.float64, requires_grad=True)
         families = torch.tensor([[1.2, .0], [1.2, .2]], dtype=torch.float64, requires_grad=True)
         images = exp_map0(torch.tensor([[3., .0], [1.5, 2.598]], dtype=torch.float64))
         mapping = labels = torch.arange(2)
         xa, xf = exp_map0(classes), exp_map0(families)
         baseline, _ = EntailmentConeLoss()(images, xa, labels)
-        cosine, stats = EntailmentConeLoss(lambda_cosine=1)(
+        anchor, stats = EntailmentConeLoss(lambda_anchor=1, geodesic_margin=3)(
             images, xa, labels, x_fam=xf, family_of=mapping)
-        class_grad, family_grad = torch.autograd.grad(cosine - baseline, (classes, families))
+        class_grad, family_grad = torch.autograd.grad(anchor - baseline, (classes, families))
         self.assertTrue(torch.allclose(class_grad, torch.zeros_like(class_grad)))
         self.assertGreater(family_grad.norm().item(), 0)
+        self.assertGreater(stats["loss_anchor"].item(), 0)
         self.assertGreater(stats["mean_fam_cos_sim"].item(), 0)
         for depth, violated in ((1.4, True), (2., False)):
             classes = torch.tensor([[depth, .0], [depth, .0]], dtype=torch.float64, requires_grad=True)
@@ -113,10 +113,10 @@ class FamilyHierarchyTests(unittest.TestCase):
         xf = exp_map0(torch.tensor([[1.2, .0]]))
         images = exp_map0(torch.tensor([[3., .0], [3., .1]]))
         labels, mapping = torch.arange(2), torch.zeros(2, dtype=torch.long)
-        criterion = EntailmentConeLoss(lambda_family=1, lambda_cosine=1)
+        criterion = EntailmentConeLoss(lambda_family=1, lambda_anchor=1, geodesic_margin=3)
         loss, stats = criterion(images, xa, labels, x_fam=xf, family_of=mapping)
         self.assertTrue(torch.isfinite(loss))
-        for key in ("loss_cosine", "loss_family_neg", "wrong_family_violations",
+        for key in ("loss_anchor", "loss_family_neg", "wrong_family_violations",
                     "mean_fam_cos_sim", "max_fam_cos_sim"):
             self.assertEqual(stats[key], 0)
         for inputs in ({}, {"x_fam": xf},

@@ -94,9 +94,14 @@ def parse_args(argv=None, dataset="iab"):
     p.add_argument("--neg_samples",    type=int,   default=0,
                    help="Random negatives retained per sample (0 uses all); full pairwise "
                         "scores are still computed.")
-    p.add_argument("--lambda_cosine", type=float, default=0.2,
-                   help="Weight of mean positive cosine similarity over unique anchor pairs "
-                        "(families in hierarchy mode; default: 0.2; 0 disables).")
+    p.add_argument("--lambda_anchor", "--lambda_cosine", dest="lambda_anchor",
+                   type=float, default=0.2,
+                   help="Weight of mean geodesic-distance hinge over unique anchor pairs "
+                        "(families in hierarchy mode; default: 0.2; 0 disables). "
+                        "--lambda_cosine is a legacy spelling for this new penalty.")
+    p.add_argument("--geodesic_margin", type=float, default=3.0,
+                   help="Minimum pairwise anchor geodesic distance (default: 3); "
+                        "independent of the angular margin and spatial norm target.")
     p.add_argument("--batch_size",     type=int,   default=256)
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
@@ -155,6 +160,9 @@ def parse_args(argv=None, dataset="iab"):
 
 def validate_args(args):
     """Validate mode combinations before loading data or model weights."""
+    if not all(math.isfinite(value) and value >= 0 for value in
+               (args.lambda_anchor, args.geodesic_margin)):
+        raise ValueError("Anchor weight and geodesic margin must be finite and non-negative")
     if args.hierarchy != "none":
         if args.dataset != "iabench":
             raise ValueError("--hierarchy increfa is supported only for IABench")
@@ -163,7 +171,7 @@ def validate_args(args):
         settings = (args.curv, args.min_radius, args.family_init_norm,
                     args.family_depth_margin, args.lambda_family, args.lambda_family_depth,
                     args.anchor_init_norm, args.init_depth, args.fixed_image_radius,
-                    args.margin, args.lambda_neg, args.lambda_cosine,
+                    args.margin, args.lambda_neg, args.lambda_anchor, args.geodesic_margin,
                     args.lambda_norm, args.target_norm)
         if not all(math.isfinite(value) and value >= 0 for value in settings) or args.curv == 0:
             raise ValueError("Hierarchy settings must be finite and non-negative, with positive curvature")
