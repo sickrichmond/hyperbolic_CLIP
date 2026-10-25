@@ -3,9 +3,11 @@
 # All generator labels are discovered; the trainer creates/reuses an 80/10/10
 # manifest shared by clean and augmented training. Validation stays clean.
 # AUGMENT=1 enables corruption (default) or omnidfa via AUG_POLICY.
+# Geodesic anchor separation: LAMBDA_ANCHOR=0.5 and GEODESIC_MARGIN=3 by default.
 # Submit: sbatch slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1 slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_iabench.sh
+#         sbatch --export=ALL,GEODESIC_MARGIN=1.5 slurm/slurm_train_iabench.sh
 # Timing: PROFILE_STEPS=100 sbatch slurm/slurm_train_iabench.sh
 
 #SBATCH --account=EUHPC_D35_189
@@ -41,6 +43,15 @@ NUM_WORKERS="${NUM_WORKERS:-8}"
 AUGMENT="${AUGMENT:-0}"
 AUG_POLICY="${AUG_POLICY:-corruption}"
 HIERARCHY="${HIERARCHY:-none}"
+LAMBDA_ANCHOR="${LAMBDA_ANCHOR:-0.5}"
+GEODESIC_MARGIN="${GEODESIC_MARGIN:-3}"
+
+for name in LAMBDA_ANCHOR GEODESIC_MARGIN; do
+    if [[ ! "${!name}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
+        echo "ERROR: $name must be a non-negative number (got: ${!name})" >&2
+        exit 2
+    fi
+done
 
 case "$AUGMENT" in
     0|1) ;;
@@ -79,6 +90,7 @@ cd "$REPO"
 echo "Slurm GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "Dataset: $DATA | Manifest: $SPLIT_MANIFEST"
 echo "Training with AUGMENT=$AUGMENT, AUG_POLICY=$AUG_POLICY, HIERARCHY=$HIERARCHY → $CKPT"
+echo "Geodesic anchor separation: lambda_anchor=$LAMBDA_ANCHOR, geodesic_margin=$GEODESIC_MARGIN"
 
 python train_iabench.py \
     --dataset_path "$DATA" \
@@ -96,7 +108,8 @@ python train_iabench.py \
     --lambda_neg 1.0 \
     --lambda_norm 0.5 \
     --target_norm 4.0 \
-    --lambda_cosine 0.5 \
+    --lambda_anchor "$LAMBDA_ANCHOR" \
+    --geodesic_margin "$GEODESIC_MARGIN" \
     --init_depth 3.0 \
     --batch_size 256 \
     --num_epochs 20 \
