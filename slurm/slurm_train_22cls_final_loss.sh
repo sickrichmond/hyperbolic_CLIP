@@ -114,7 +114,7 @@ python train_attribution.py \
     --no_captions \
     $AUG_FLAG \
     --batch_size      256 \
-    --num_epochs      20 \
+    --num_epochs      30 \
     --lr              3e-4 \
     --weight_decay    0.01 \
     --num_workers     8 \

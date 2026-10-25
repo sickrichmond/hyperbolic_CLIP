@@ -112,7 +112,7 @@ python train_iabench.py \
     --geodesic_margin "$GEODESIC_MARGIN" \
     --init_depth 3.0 \
     --batch_size 256 \
-    --num_epochs 20 \
+    --num_epochs 30 \
     --lr 3e-4 \
     --weight_decay 0.01 \
     --optimizer adamw \
