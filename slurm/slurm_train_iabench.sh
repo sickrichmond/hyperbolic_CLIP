@@ -3,11 +3,12 @@
 # All generator labels are discovered; the trainer creates/reuses an 80/10/10
 # manifest shared by clean and augmented training. Validation stays clean.
 # AUGMENT=1 enables corruption (default) or omnidfa via AUG_POLICY.
-# Geodesic anchor separation: LAMBDA_ANCHOR=0.5 and GEODESIC_MARGIN=3 by default.
+# Geodesic anchor separation: LAMBDA_ANCHOR=0.5, TARGET_NORM=4 by default.
+# z=TARGET_NORM for classes; hierarchy mode uses z=TARGET_NORM/2 for families.
 # Submit: sbatch slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1 slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_iabench.sh
-#         sbatch --export=ALL,GEODESIC_MARGIN=1.5 slurm/slurm_train_iabench.sh
+#         sbatch --export=ALL,TARGET_NORM=4 slurm/slurm_train_iabench.sh
 # Timing: PROFILE_STEPS=100 sbatch slurm/slurm_train_iabench.sh
 
 #SBATCH --account=EUHPC_D35_189
@@ -44,9 +45,15 @@ AUGMENT="${AUGMENT:-0}"
 AUG_POLICY="${AUG_POLICY:-corruption}"
 HIERARCHY="${HIERARCHY:-none}"
 LAMBDA_ANCHOR="${LAMBDA_ANCHOR:-0.5}"
-GEODESIC_MARGIN="${GEODESIC_MARGIN:-3}"
+TARGET_NORM="${TARGET_NORM:-4}"
+if [ "$HIERARCHY" = increfa ]; then
+    DEFAULT_GEODESIC_MARGIN=$(awk -v target="$TARGET_NORM" 'BEGIN { printf "%.17g", target / 2 }')
+else
+    DEFAULT_GEODESIC_MARGIN="$TARGET_NORM"
+fi
+GEODESIC_MARGIN="${GEODESIC_MARGIN:-$DEFAULT_GEODESIC_MARGIN}"
 
-for name in LAMBDA_ANCHOR GEODESIC_MARGIN; do
+for name in LAMBDA_ANCHOR TARGET_NORM GEODESIC_MARGIN; do
     if [[ ! "${!name}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
         echo "ERROR: $name must be a non-negative number (got: ${!name})" >&2
         exit 2
@@ -107,7 +114,7 @@ python train_iabench.py \
     --margin 0.3 \
     --lambda_neg 1.0 \
     --lambda_norm 0.5 \
-    --target_norm 4.0 \
+    --target_norm "$TARGET_NORM" \
     --lambda_anchor "$LAMBDA_ANCHOR" \
     --geodesic_margin "$GEODESIC_MARGIN" \
     --init_depth 3.0 \

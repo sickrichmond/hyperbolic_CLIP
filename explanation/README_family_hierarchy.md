@@ -52,9 +52,12 @@ on family pairs** in hierarchy mode, and on class pairs otherwise. All family
 hinges and the relative depth loss remain unchanged. For a single active family,
 wrong-family and anchor-separation losses are zero.
 
-`--lambda_anchor` weights the new term (CLI default 0.2), and
-`--geodesic_margin` sets its distance threshold (default 3). The threshold is
-independent of the angular margin and spatial norm target. `--lambda_cosine`
+`--lambda_anchor` weights the new term (CLI default 0.2). The distance threshold
+is tied to `--target_norm`: z=tau for class-only training, and z=tau/2 for
+hierarchy training. With the launcher default tau=4 this means z=4 for classes
+or z=2 for families. `TARGET_NORM` changes tau and the derived margin. The legacy
+explicit `--geodesic_margin` argument must match the active rule; conflicting values fail
+before loading data. The angular margin remains separate. `--lambda_cosine`
 remains a legacy CLI alias for the new weight; it no longer enables cosine loss.
 The geodesic hinge encourages distance, not guaranteed directional separation
 or disjoint cones. Increasing depth can also satisfy it.
@@ -76,7 +79,7 @@ The legacy diagnostic CLI still uses the original IAB dataset workflow.
 | `--lambda_family` | 1 |
 | `--lambda_family_depth` | 0.5 |
 | `--lambda_anchor` | Existing CLI/launcher weight (0.2 / 0.5) |
-| `--geodesic_margin` | 3 (geodesic distance, independent of the norm target) |
+| `--geodesic_margin` | z=tau/2 for families (2 by default); z=tau for classes |
 
 With curvature 1 and `min_radius=0.5`, family/class depths 1.2/2 correspond
 to spatial norms 1.509/3.627 and half-apertures 41.49/16.00 degrees.
@@ -103,7 +106,7 @@ python train_iabench.py \
   --hierarchy increfa --anchor_init random --anchor_init_norm 2 --init_depth 3 \
   --family_init_norm 1.2 --family_depth_margin 0.5 \
   --curv 1 --min_radius 0.5 --margin 0.3 --lambda_neg 1 \
-  --lambda_norm 0.5 --target_norm 4 --lambda_anchor 0.5 --geodesic_margin 3 \
+  --lambda_norm 0.5 --target_norm 4 --lambda_anchor 0.5 \
   --clip_name openai/clip-vit-large-patch14 \
   --lora_target 'vision_model\.encoder\.layers\.[0-9]+\.self_attn\.(q_proj|v_proj)' \
   --lora_r 16 --lora_alpha 32 --hyperbolic_dim 128 \

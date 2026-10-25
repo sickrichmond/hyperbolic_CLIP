@@ -48,7 +48,7 @@ class EntailmentConeLoss(nn.Module):
         lambda_norm: float = 0.0,
         lambda_anchor: float = 0.0,
         target_norm: float = 0.0,
-        geodesic_margin: float = 0.0,
+        geodesic_margin: float | None = None,
         norm_mode: str = "floor",
         neg_samples: int = 0,
         lambda_family: float = 0.0,
@@ -61,7 +61,8 @@ class EntailmentConeLoss(nn.Module):
         The norm penalty is enabled when both lambda_norm and target_norm are positive.
         Positive lambda_anchor separates families when family inputs are provided,
         otherwise classes. This constructor defaults to zero; the CLI defaults to 0.2.
-        geodesic_margin is a distance threshold, independent of target_norm and margin.
+        The distance threshold is target_norm for classes, or target_norm/2 for
+        families. An explicit geodesic_margin must match the active scope.
         Family losses use all classes each call; the relative depth loss is tangent-based.
         """
         super().__init__()
@@ -69,8 +70,9 @@ class EntailmentConeLoss(nn.Module):
             raise ValueError("norm_mode must be 'floor' or 'bilateral'")
         if not math.isfinite(curv) or curv <= 0:
             raise ValueError("curv must be positive and finite")
-        if not all(math.isfinite(v) and v >= 0 for v in (lambda_anchor, geodesic_margin)):
-            raise ValueError("Anchor weight and geodesic margin must be finite and non-negative")
+        if not all(math.isfinite(v) and v >= 0 for v in
+                   (lambda_anchor, target_norm, target_norm if geodesic_margin is None else geodesic_margin)):
+            raise ValueError("Anchor weight, norm target and geodesic margin must be finite and non-negative")
         if not all(math.isfinite(v) and v >= 0 for v in
                    (lambda_family, lambda_family_depth, family_depth_margin)):
             raise ValueError("Family weights and depth margin must be finite and non-negative")
@@ -119,6 +121,9 @@ class EntailmentConeLoss(nn.Module):
                     family_of.device != device or
                     bool(((family_of < 0) | (family_of >= len(x_fam))).any())):
                 raise ValueError("family_of must contain one valid family index per class on the image device")
+        geodesic_margin = self.target_norm / (2 if x_fam is not None else 1)
+        if self.geodesic_margin is not None and self.geodesic_margin != geodesic_margin:
+            raise ValueError("geodesic_margin must equal target_norm/2 for families, or target_norm for classes")
         psi_anc = half_aperture(x_anc, curv=self.curv, min_radius=self.min_radius)
         xi = _pairwise_xi(x_anc, x_img, curv=self.curv).T
         xi_pos = xi.gather(1, labels.unsqueeze(1)).squeeze(1)
@@ -165,7 +170,7 @@ class EntailmentConeLoss(nn.Module):
             distances = pairwise_dist(anchors, anchors, curv=self.curv, eps=1e-5)
             iu = torch.triu_indices(anchor_count, anchor_count, offset=1, device=device)
             distances = distances[iu[0], iu[1]]
-            L_anchor = (self.geodesic_margin - distances).clamp_min(0).mean()
+            L_anchor = (geodesic_margin - distances).clamp_min(0).mean()
 
         loss = (L_img_in_class + self.lambda_norm * L_norm + self.lambda_anchor * L_anchor
                 + self.lambda_family * L_family + self.lambda_family_depth * L_family_depth)

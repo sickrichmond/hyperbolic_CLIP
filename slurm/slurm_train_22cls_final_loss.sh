@@ -6,8 +6,9 @@
 #
 # Submit: sbatch slurm/slurm_train_22cls_final_loss.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_22cls_final_loss.sh
-#         sbatch --export=ALL,LAMBDA_ANCHOR=0.5,GEODESIC_MARGIN=3 slurm/slurm_train_22cls_final_loss.sh
-# Defaults: OPTIMIZER=adamw, LAMBDA_ANCHOR=0.2, GEODESIC_MARGIN=3, ANCHOR_INIT=random.
+#         sbatch --export=ALL,LAMBDA_ANCHOR=0.5,TARGET_NORM=4 slurm/slurm_train_22cls_final_loss.sh
+# Defaults: OPTIMIZER=adamw, LAMBDA_ANCHOR=0.5, TARGET_NORM=4, ANCHOR_INIT=random.
+# The geodesic margin follows TARGET_NORM (z=tau); a conflicting override is rejected.
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -44,8 +45,9 @@ MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
 AUGMENT=${AUGMENT:-0}
 AUG_POLICY=${AUG_POLICY:-corruption}
 OPTIMIZER=${OPTIMIZER:-adamw}
-LAMBDA_ANCHOR=${LAMBDA_ANCHOR:-0.2}
-GEODESIC_MARGIN=${GEODESIC_MARGIN:-3}
+LAMBDA_ANCHOR=${LAMBDA_ANCHOR:-0.5}
+TARGET_NORM=${TARGET_NORM:-4}
+GEODESIC_MARGIN=${GEODESIC_MARGIN:-$TARGET_NORM}
 ANCHOR_INIT=${ANCHOR_INIT:-random}
 
 case "$OPTIMIZER" in
@@ -56,7 +58,7 @@ case "$ANCHOR_INIT" in
     text|image_centroid|text_free|random) ;;
     *) echo "ERROR: ANCHOR_INIT must be text, image_centroid, text_free, or random (got: $ANCHOR_INIT)" >&2; exit 2 ;;
 esac
-for name in LAMBDA_ANCHOR GEODESIC_MARGIN; do
+for name in LAMBDA_ANCHOR TARGET_NORM GEODESIC_MARGIN; do
     if [[ ! "${!name}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
         echo "ERROR: $name must be a non-negative number (got: ${!name})" >&2
         exit 2
@@ -108,7 +110,7 @@ python train_attribution.py \
     --margin          0.3 \
     --lambda_neg      1.0 \
     --lambda_norm     0.5 \
-    --target_norm     4.0 \
+    --target_norm     "$TARGET_NORM" \
     --lambda_anchor   "$LAMBDA_ANCHOR" \
     --geodesic_margin "$GEODESIC_MARGIN" \
     --no_captions \

@@ -99,9 +99,9 @@ def parse_args(argv=None, dataset="iab"):
                    help="Weight of mean geodesic-distance hinge over unique anchor pairs "
                         "(families in hierarchy mode; default: 0.2; 0 disables). "
                         "--lambda_cosine is a legacy spelling for this new penalty.")
-    p.add_argument("--geodesic_margin", type=float, default=3.0,
-                   help="Minimum pairwise anchor geodesic distance (default: 3); "
-                        "independent of the angular margin and spatial norm target.")
+    p.add_argument("--geodesic_margin", type=float, default=None,
+                   help="Anchor distance threshold: --target_norm/2 in hierarchy mode, "
+                        "--target_norm otherwise. Explicit values must match this rule.")
     p.add_argument("--batch_size",     type=int,   default=256)
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
@@ -160,9 +160,15 @@ def parse_args(argv=None, dataset="iab"):
 
 def validate_args(args):
     """Validate mode combinations before loading data or model weights."""
+    expected_margin = args.target_norm / (2 if args.hierarchy != "none" else 1)
+    if args.geodesic_margin is None:
+        args.geodesic_margin = expected_margin
     if not all(math.isfinite(value) and value >= 0 for value in
-               (args.lambda_anchor, args.geodesic_margin)):
-        raise ValueError("Anchor weight and geodesic margin must be finite and non-negative")
+               (args.lambda_anchor, args.target_norm, args.geodesic_margin)):
+        raise ValueError("Anchor weight, norm target and geodesic margin must be finite and non-negative")
+    if args.geodesic_margin != expected_margin:
+        raise ValueError("--geodesic_margin must equal --target_norm/2 in hierarchy mode, "
+                         "or --target_norm otherwise")
     if args.hierarchy != "none":
         if args.dataset != "iabench":
             raise ValueError("--hierarchy increfa is supported only for IABench")

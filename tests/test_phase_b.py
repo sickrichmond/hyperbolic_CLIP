@@ -86,19 +86,29 @@ def test_geodesic_anchor_hinge():
         labels = torch.tensor([0])
         baseline, _ = EntailmentConeLoss(curv=curv)(images, anchors, labels)
         loss, stats = EntailmentConeLoss(curv=curv, lambda_anchor=.6,
-                                        geodesic_margin=1)(images, anchors, labels)
+                                        target_norm=1)(images, anchors, labels)
         assert torch.allclose(stats["loss_anchor"], tangent.new_tensor(1 / 6))
         assert torch.allclose(loss - baseline, tangent.new_tensor(.1))
         gradient, = torch.autograd.grad(loss - baseline, tangent)
         assert torch.allclose(gradient, tangent.new_tensor([[.2], [-.2], [0.]]), atol=1e-7)
         for weight, margin in ((0, 1), (1, 0)):
             _, disabled = EntailmentConeLoss(curv=curv, lambda_anchor=weight,
-                geodesic_margin=margin)(images, anchors, labels)
+                target_norm=margin)(images, anchors, labels)
             assert disabled["loss_anchor"] == 0
         _, single = EntailmentConeLoss(curv=curv, lambda_anchor=1,
-            geodesic_margin=1)(images, anchors[:1], labels)
+            target_norm=1)(images, anchors[:1], labels)
         assert single["loss_anchor"] == 0
-    for option in ("lambda_anchor", "geodesic_margin"):
+    _, automatic = EntailmentConeLoss(target_norm=4, lambda_anchor=1)(images, anchors, labels)
+    _, explicit = EntailmentConeLoss(target_norm=4, geodesic_margin=4,
+                                    lambda_anchor=1)(images, anchors, labels)
+    assert torch.allclose(automatic["loss_anchor"], explicit["loss_anchor"])
+    try:
+        EntailmentConeLoss(target_norm=4, geodesic_margin=3)(images, anchors, labels)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Accepted geodesic_margin different from target_norm")
+    for option in ("lambda_anchor", "target_norm", "geodesic_margin"):
         for value in (-1., float("nan"), float("inf")):
             try:
                 EntailmentConeLoss(**{option: value})
@@ -113,7 +123,7 @@ def test_geodesic_float32_gradients():
     tangent = torch.tensor([[1., 0.], [1., 0.], [1., 1e-4]], requires_grad=True)
     anchors = exp_map0(tangent)
     images = exp_map0(torch.tensor([[3., .3]]))
-    loss, stats = EntailmentConeLoss(lambda_anchor=1, geodesic_margin=3)(
+    loss, stats = EntailmentConeLoss(lambda_anchor=1, target_norm=3)(
         images, anchors, torch.tensor([0]))
     loss.backward()
     assert stats["loss_anchor"] > 0

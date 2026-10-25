@@ -139,10 +139,18 @@ class AttributionTrainingTests(unittest.TestCase):
         base = ["--dataset_path", "x", "--captions_dir", "y"]
         args = parse_args(base + ["--no_captions"])
         validate_args(args)
-        self.assertEqual((args.lambda_anchor, args.geodesic_margin), (.2, 3.))
+        self.assertEqual((args.lambda_anchor, args.geodesic_margin), (.2, 0.))
+        for target in ("2.5", "4"):
+            tied = parse_args(base + ["--target_norm", target])
+            validate_args(tied)
+            self.assertEqual(tied.geodesic_margin, float(target))
+        matching = parse_args(base + ["--target_norm", "4", "--geodesic_margin", "4"])
+        validate_args(matching)
+        with self.assertRaisesRegex(ValueError, "must equal --target_norm"):
+            validate_args(parse_args(base + ["--target_norm", "4", "--geodesic_margin", "3"]))
         legacy = parse_args(base + ["--lambda_cosine", "0.5"])
         self.assertEqual(legacy.lambda_anchor, .5)
-        for flag in ("--lambda_anchor", "--geodesic_margin"):
+        for flag in ("--lambda_anchor", "--target_norm", "--geodesic_margin"):
             for value in ("-1", "nan", "inf"):
                 with self.subTest(flag=flag, value=value), self.assertRaisesRegex(
                         ValueError, "finite and non-negative"):
@@ -186,7 +194,7 @@ class AttributionTrainingTests(unittest.TestCase):
             (["--anchor_init", "text", "--lambda_norm", "0.5",
               "--target_norm", "4", "--norm_mode", "bilateral"], True),
             (["--anchor_init", "text_free", "--neg_samples", "1",
-              "--lambda_anchor", ".5", "--geodesic_margin", "2.5"], False),
+              "--lambda_anchor", ".5", "--target_norm", "2.5"], False),
             (["--anchor_init", "image_centroid", "--anchor_norm_range", "1", "2"], False),
             (["--anchor_init", "random", "--require_caption"], True),
         ]
@@ -203,7 +211,7 @@ class AttributionTrainingTests(unittest.TestCase):
                 self.assertEqual(checkpoint["anchor_penalty"], "geodesic")
                 self.assertEqual(checkpoint["anchor_scope"], "classes")
                 self.assertEqual(checkpoint["lambda_anchor"], .5 if "--lambda_anchor" in options else .2)
-                self.assertEqual(checkpoint["geodesic_margin"], 2.5 if "--geodesic_margin" in options else 3.)
+                self.assertEqual(checkpoint["geodesic_margin"], checkpoint["target_norm"])
                 self.assertEqual(checkpoint["lambda_cosine"], 0.)
                 for key in ("anchor_sin_psi", "fixed_psi", "lambda_ce", "ce_tau",
                             "lambda_cover", "aperture_calibration"):

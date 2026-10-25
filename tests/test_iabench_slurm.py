@@ -35,7 +35,7 @@ class IABenchSlurmTests(unittest.TestCase):
                        SLURM_TEST_CAPTURE=str(capture))
             for name in ("CKPT", "LOGDIR", "SPLIT_MANIFEST", "NUM_WORKERS", "PROFILE_STEPS",
                          "AUGMENT", "AUG_POLICY", "DATA", "HIERARCHY",
-                         "LAMBDA_ANCHOR", "GEODESIC_MARGIN"):
+                         "LAMBDA_ANCHOR", "TARGET_NORM", "GEODESIC_MARGIN"):
                 env.pop(name, None)
             stub = r"""
 module() { :; }
@@ -53,9 +53,11 @@ exec bash "$1"
                     ({"HIERARCHY": "increfa"}, "_hierarchy_increfa", "corruption"),
                     ({"HIERARCHY": "increfa", "AUGMENT": "1"},
                      "_aug_hierarchy_increfa", "corruption"),
-                    ({"GEODESIC_MARGIN": "2.5", "LAMBDA_ANCHOR": "0.3"}, "", "corruption"),
-                    ({"HIERARCHY": "increfa", "AUGMENT": "1", "GEODESIC_MARGIN": "1.5",
-                      "LAMBDA_ANCHOR": "0"}, "_aug_hierarchy_increfa", "corruption")):
+                    ({"TARGET_NORM": "2.5", "LAMBDA_ANCHOR": "0.3"}, "", "corruption"),
+                    ({"HIERARCHY": "increfa", "AUGMENT": "1", "TARGET_NORM": "1.5",
+                      "LAMBDA_ANCHOR": "0"}, "_aug_hierarchy_increfa", "corruption"),
+                    ({"HIERARCHY": "increfa", "TARGET_NORM": "2.1234567"},
+                     "_hierarchy_increfa", "corruption")):
                 with self.subTest(settings=settings):
                     completed = subprocess.run(["bash", "-c", stub, "_", str(train_script)],
                                    env=dict(env, **settings), check=True, capture_output=True, text=True)
@@ -67,7 +69,9 @@ exec bash "$1"
                     self.assertIn("--geodesic_margin", command["argv"])
                     self.assertNotIn("--lambda_cosine", command["argv"])
                     self.assertEqual(args.lambda_anchor, float(settings.get("LAMBDA_ANCHOR", .5)))
-                    self.assertEqual(args.geodesic_margin, float(settings.get("GEODESIC_MARGIN", 3)))
+                    self.assertEqual(args.target_norm, float(settings.get("TARGET_NORM", 4)))
+                    self.assertEqual(args.geodesic_margin,
+                                     args.target_norm / (2 if args.hierarchy != "none" else 1))
                     self.assertEqual(args.train_augment, settings.get("AUGMENT") == "1")
                     self.assertEqual(args.hierarchy, settings.get("HIERARCHY", "none"))
                     self.assertEqual(args.aug_policy, policy)
@@ -79,14 +83,17 @@ exec bash "$1"
                     self.assertEqual(args.dataset_path, settings.get(
                         "DATA", str(scratch / "datasets/IABench_images")))
                     self.assertIn(f"Dataset: {args.dataset_path}", completed.stdout)
-                    self.assertIn(f"geodesic_margin={settings.get('GEODESIC_MARGIN', '3')}",
-                                  completed.stdout)
+                    margin_line = next(line for line in completed.stdout.splitlines()
+                                       if line.startswith("Geodesic anchor separation:"))
+                    self.assertEqual(float(margin_line.split("geodesic_margin=")[1]),
+                                     args.geodesic_margin)
                     self.assertEqual((args.val_frac, args.test_frac, args.seed), (0.1, 0.1, 42))
                     self.assertEqual(command["gpu"], "4")
             for settings in ({"AUGMENT": "2"}, {"AUG_POLICY": "unknown"},
                              {"HIERARCHY": "unknown"}, {"GEODESIC_MARGIN": "-1"},
                              {"GEODESIC_MARGIN": "nan"}, {"LAMBDA_ANCHOR": "-1"},
-                             {"LAMBDA_ANCHOR": "oops"}):
+                             {"LAMBDA_ANCHOR": "oops"}, {"TARGET_NORM": "-1"},
+                             {"TARGET_NORM": "nan"}):
                 capture.unlink(missing_ok=True)
                 failed = subprocess.run(["bash", "-c", stub, "_", str(train_script)],
                                         env=dict(env, **settings), capture_output=True, text=True)
