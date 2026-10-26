@@ -5,6 +5,7 @@
 # AUGMENT=1 enables corruption (default) or omnidfa via AUG_POLICY.
 # Geodesic anchor separation: LAMBDA_ANCHOR=0.5, TARGET_NORM=4 by default.
 # z=TARGET_NORM for classes; hierarchy mode uses z=TARGET_NORM/2 for families.
+# Checkpoint names include anchor weight, effective z and total NUM_EPOCHS (default 30).
 # Submit: sbatch slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1 slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_iabench.sh
@@ -41,6 +42,7 @@ OUT="$WORK/hyp_fine_tuning/checkpoints"
 SPLIT_MANIFEST="${SPLIT_MANIFEST:-$OUT/attribution_iabench_random_vitl14.splits.json}"
 PROFILE_STEPS="${PROFILE_STEPS:-0}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
+NUM_EPOCHS="${NUM_EPOCHS:-30}"
 AUGMENT="${AUGMENT:-0}"
 AUG_POLICY="${AUG_POLICY:-corruption}"
 HIERARCHY="${HIERARCHY:-none}"
@@ -53,6 +55,10 @@ else
 fi
 GEODESIC_MARGIN="${GEODESIC_MARGIN:-$DEFAULT_GEODESIC_MARGIN}"
 
+if [[ ! "$NUM_EPOCHS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: NUM_EPOCHS must be a positive integer (got: $NUM_EPOCHS)" >&2
+    exit 2
+fi
 for name in LAMBDA_ANCHOR TARGET_NORM GEODESIC_MARGIN; do
     if [[ ! "${!name}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
         echo "ERROR: $name must be a non-negative number (got: ${!name})" >&2
@@ -89,7 +95,10 @@ if [ "$AUGMENT" = 1 ]; then
         AUG_SUFFIX=_aug
     fi
 fi
-CKPT="$OUT/attribution_iabench_random${AUG_SUFFIX}${HIERARCHY_SUFFIX}_vitl14.pt"
+LAMBDA_TAG=${LAMBDA_ANCHOR//./p}
+MARGIN_TAG=${GEODESIC_MARGIN//./p}
+RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_ep${NUM_EPOCHS}"
+CKPT="$OUT/attribution_iabench_random_${RUN_TAG}${AUG_SUFFIX}${HIERARCHY_SUFFIX}_vitl14.pt"
 
 mkdir -p "$OUT"
 cd "$REPO"
@@ -119,7 +128,7 @@ python train_iabench.py \
     --geodesic_margin "$GEODESIC_MARGIN" \
     --init_depth 3.0 \
     --batch_size 256 \
-    --num_epochs 30 \
+    --num_epochs "$NUM_EPOCHS" \
     --lr 3e-4 \
     --weight_decay 0.01 \
     --optimizer adamw \

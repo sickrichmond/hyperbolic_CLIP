@@ -9,6 +9,7 @@
 #         sbatch --export=ALL,LAMBDA_ANCHOR=0.5,TARGET_NORM=4 slurm/slurm_train_22cls_final_loss.sh
 # Defaults: OPTIMIZER=adamw, LAMBDA_ANCHOR=0.5, TARGET_NORM=4, ANCHOR_INIT=random.
 # The geodesic margin follows TARGET_NORM (z=tau); a conflicting override is rejected.
+# Checkpoint names include total NUM_EPOCHS (default 30), not the selected best epoch.
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -49,6 +50,12 @@ LAMBDA_ANCHOR=${LAMBDA_ANCHOR:-0.5}
 TARGET_NORM=${TARGET_NORM:-4}
 GEODESIC_MARGIN=${GEODESIC_MARGIN:-$TARGET_NORM}
 ANCHOR_INIT=${ANCHOR_INIT:-random}
+NUM_EPOCHS=${NUM_EPOCHS:-30}
+
+if [[ ! "$NUM_EPOCHS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "ERROR: NUM_EPOCHS must be a positive integer (got: $NUM_EPOCHS)" >&2
+    exit 2
+fi
 
 case "$OPTIMIZER" in
     adamw|sgd) ;;
@@ -67,7 +74,7 @@ done
 
 LAMBDA_TAG=${LAMBDA_ANCHOR//./p}
 MARGIN_TAG=${GEODESIC_MARGIN//./p}
-RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_${ANCHOR_INIT}_${OPTIMIZER}"
+RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_${ANCHOR_INIT}_${OPTIMIZER}_ep${NUM_EPOCHS}"
 if [ "$AUGMENT" = 1 ]; then
     AUG_FLAG="--train_augment --aug_policy $AUG_POLICY"
     if [ "$AUG_POLICY" = omnidfa ]; then
@@ -116,7 +123,7 @@ python train_attribution.py \
     --no_captions \
     $AUG_FLAG \
     --batch_size      256 \
-    --num_epochs      30 \
+    --num_epochs      "$NUM_EPOCHS" \
     --lr              3e-4 \
     --weight_decay    0.01 \
     --num_workers     8 \

@@ -479,6 +479,7 @@ def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=
                     "semantics":       args.semantics,
                     "val_balanced":    val["balanced_acc"],
                     "epoch":           epoch,
+                    "num_epochs":      args.num_epochs,
                     **(checkpoint_metadata or {}),
                 },
                 out_path,

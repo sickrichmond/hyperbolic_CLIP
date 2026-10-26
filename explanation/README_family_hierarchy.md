@@ -9,14 +9,19 @@ sbatch --export=ALL,HIERARCHY=increfa,AUGMENT=1 slurm/slurm_train_iabench.sh
 ```
 
 The clean checkpoint is
-`$WORK/hyp_fine_tuning/checkpoints/attribution_iabench_random_hierarchy_increfa_vitl14.pt`.
+`$WORK/hyp_fine_tuning/checkpoints/attribution_iabench_random_anchor0p5_z2_ep30_hierarchy_increfa_vitl14.pt`.
 Augmented names insert `_aug` or `_omniaug` before `_hierarchy_increfa`.
 Diagnostics use the same suffix and the job ID. All modes reuse the existing
 split manifest; validation selects checkpoints and the comparison harness alone
 evaluates held-out test rows. Concurrent runs still need distinct output paths.
+Names record the anchor weight, effective geodesic margin and configured total
+epoch count. `NUM_EPOCHS` overrides the launchers' default of 30 and is passed to
+training as well as the filename. `ep30` describes the training budget; the
+selected checkpoint can come from an earlier epoch, recorded in its metadata.
+Identical configurations still reuse the same checkpoint path.
 
 ```bash
-CKPT="$WORK/hyp_fine_tuning/checkpoints/attribution_iabench_random_hierarchy_increfa_vitl14.pt" \
+CKPT="$WORK/hyp_fine_tuning/checkpoints/attribution_iabench_random_anchor0p5_z2_ep30_hierarchy_increfa_vitl14.pt" \
   sbatch slurm/slurm_eval_iabench.sh
 ```
 

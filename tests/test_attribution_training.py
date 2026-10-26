@@ -208,6 +208,7 @@ class AttributionTrainingTests(unittest.TestCase):
                 self.assertEqual(checkpoint["family_names"], [])
                 self.assertIsNone(checkpoint["family_of"])
                 self.assertEqual(checkpoint["loss"], "cone")
+                self.assertEqual(checkpoint["num_epochs"], 2)
                 self.assertEqual(checkpoint["anchor_penalty"], "geodesic")
                 self.assertEqual(checkpoint["anchor_scope"], "classes")
                 self.assertEqual(checkpoint["lambda_anchor"], .5 if "--lambda_anchor" in options else .2)
