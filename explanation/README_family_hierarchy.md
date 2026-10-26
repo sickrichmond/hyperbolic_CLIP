@@ -27,15 +27,21 @@ CKPT="$WORK/hyp_fine_tuning/checkpoints/attribution_iabench_random_anchor0p5_z2_
 
 ## Taxonomy and objective
 
-`training/families.py` stores the
+`training/families.py` adapts the
 [released IncreFA IABench mapping](https://github.com/Ant0ny44/IncreFA/blob/main/configs/iabench_families.json).
-It assigns four GANs, two autoregressive models (`cogview4`, `gpt4o`), and
-22 diffusion models, plus a separate real family. These are the paper's
-experimental assignments, not independently verified architectural ancestry.
+It assigns four GANs, one autoregressive model (`gpt4o`), 21 diffusion models,
+two models in an `unknown` group, and a separate real family.
+[CogView4's official implementation](https://github.com/zai-org/CogView4)
+identifies it as a diffusion transformer, so it belongs to diffusion.
+`midjourneyv6` and `nano-banana` share the `unknown` family instead of a guessed
+diffusion label. This operational group makes them share a learned parent;
+it does not assert common architecture. The `increfa` CLI name is retained for
+compatibility, but this corrected taxonomy differs from the released mapping.
 The comparison baselines retain their separate taxonomy. Active family order
-is real, GAN, autoregressive, diffusion, omitting absent families. Unknown class
-names fail rather than acquiring a guessed family. Indices follow the exact
-checkpoint class order.
+is real, GAN, autoregressive, diffusion, unknown, omitting absent families.
+Unrecognized class names still fail. Indices follow the exact checkpoint class
+order. Existing checkpoints retain their saved family mapping; fresh hierarchy
+runs use the corrected mapping and five family anchors for all 29 classes.
 
 Hierarchy mode currently requires random, learnable class anchors on IABench.
 Family directions are independently random and learnable; they use a separate

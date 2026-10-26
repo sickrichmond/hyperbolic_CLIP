@@ -19,7 +19,12 @@ class FamilyHierarchyTests(unittest.TestCase):
         self.assertEqual(len(set(names)), 29)
         self.assertEqual(increfa_mapping(["gpt4o", "real", "E4S", "Imagen3"]),
                          (["real", "gan", "autoregressive", "diffusion"], [2, 0, 1, 3]))
-        self.assertEqual(increfa_mapping(["Imagen3", "midjourneyv6"]), (["diffusion"], [0, 0]))
+        self.assertEqual(increfa_mapping(["Imagen3", "cogview4"]), (["diffusion"], [0, 0]))
+        self.assertEqual(increfa_mapping(["nano-banana", "cogview4", "midjourneyv6", "gpt4o"]),
+                         (["autoregressive", "diffusion", "unknown"], [2, 1, 2, 0]))
+        self.assertEqual(increfa_mapping(["midjourneyv6", "nano-banana"]),
+                         (["unknown"], [0, 0]))
+        self.assertEqual([len(group) for group in INCREFA_FAMILIES.values()], [1, 4, 1, 21, 2])
         with self.assertRaisesRegex(ValueError, "no family"):
             increfa_mapping(["unknown"])
 
