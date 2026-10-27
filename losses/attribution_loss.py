@@ -170,7 +170,7 @@ class EntailmentConeLoss(nn.Module):
             distances = pairwise_dist(anchors, anchors, curv=self.curv, eps=1e-5)
             iu = torch.triu_indices(anchor_count, anchor_count, offset=1, device=device)
             distances = distances[iu[0], iu[1]]
-            L_anchor = (geodesic_margin - distances).clamp_min(0).mean()
+            L_anchor = (geodesic_margin - distances).clamp_min(0).amax()
 
         loss = (L_img_in_class + self.lambda_norm * L_norm + self.lambda_anchor * L_anchor
                 + self.lambda_family * L_family + self.lambda_family_depth * L_family_depth)
