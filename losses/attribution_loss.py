@@ -1,7 +1,7 @@
 """Image-class entailment-cone hinges with norm and geodesic anchor regularization.
 
 Positive pairs pay max(0, xi-psi); wrong-class pairs pay max(0, psi+margin-xi).
-The anchor penalty averages max(0, geodesic_margin - distance) over unique pairs.
+The anchor penalty takes the maximum hinge over unique pairs (the closest pair).
 With family inputs, class-to-family hinges and a relative tangent-depth penalty
 are added, and the anchor penalty acts exclusively on family anchors.
 Geodesic separation depends on directions and depths; it does not constrain
@@ -170,7 +170,7 @@ class EntailmentConeLoss(nn.Module):
             distances = pairwise_dist(anchors, anchors, curv=self.curv, eps=1e-5)
             iu = torch.triu_indices(anchor_count, anchor_count, offset=1, device=device)
             distances = distances[iu[0], iu[1]]
-            L_anchor = (geodesic_margin - distances).clamp_min(0).amax()
+            L_anchor = (geodesic_margin - distances).clamp_min(0).mean()
 
         loss = (L_img_in_class + self.lambda_norm * L_norm + self.lambda_anchor * L_anchor
                 + self.lambda_family * L_family + self.lambda_family_depth * L_family_depth)

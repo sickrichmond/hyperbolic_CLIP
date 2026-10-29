@@ -31,14 +31,17 @@ INCREFA_FAMILIES = {
 }
 
 
-def increfa_mapping(class_names):
+def increfa_mapping(class_names, family_groups=None):
     """Return active families and indices aligned with the exact class order."""
-    parent = {name: family for family, names in INCREFA_FAMILIES.items() for name in names}
+    groups = INCREFA_FAMILIES if family_groups is None else family_groups
+    parent = {name: family for family, names in groups.items() for name in names}
+    if len(parent) != sum(len(names) for names in groups.values()):
+        raise ValueError("A generator cannot belong to multiple families")
     missing = [name for name in class_names if name not in parent]
     if missing:
         raise ValueError(f"IncreFA taxonomy has no family for {missing}")
     active = {parent[name] for name in class_names}
-    families = [family for family in INCREFA_FAMILIES if family in active]
+    families = [family for family in groups if family in active]
     return families, [families.index(parent[name]) for name in class_names]
 
 

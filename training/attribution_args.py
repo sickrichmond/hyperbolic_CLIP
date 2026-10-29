@@ -96,7 +96,7 @@ def parse_args(argv=None, dataset="iab"):
                         "scores are still computed.")
     p.add_argument("--lambda_anchor", "--lambda_cosine", dest="lambda_anchor",
                    type=float, default=0.2,
-                   help="Weight of mean geodesic-distance hinge over unique anchor pairs "
+                   help="Weight of maximum geodesic-distance hinge over unique anchor pairs "
                         "(families in hierarchy mode; default: 0.2; 0 disables). "
                         "--lambda_cosine is a legacy spelling for this new penalty.")
     p.add_argument("--geodesic_margin", type=float, default=None,
@@ -149,7 +149,7 @@ def parse_args(argv=None, dataset="iab"):
     p.add_argument("--plot_all_train", action="store_true", default=False,
                    help="Plot all clean training rows from the selected checkpoint in "
                         "train_all_final.png; adds one full data pass.")
-    if dataset == "iabench":
+    if dataset in ("iabench", "hybrid"):
         p.add_argument("--prepare_only", action="store_true",
                        help="Create or validate the split manifest, then exit without loading "
                             "the CLIP processor or model or decoding images.")
@@ -158,7 +158,7 @@ def parse_args(argv=None, dataset="iab"):
     return p.parse_args(argv)
 
 
-def validate_args(args):
+def validate_args(args, family_groups=None):
     """Validate mode combinations before loading data or model weights."""
     expected_margin = args.target_norm / (2 if args.hierarchy != "none" else 1)
     if args.geodesic_margin is None:
@@ -170,7 +170,7 @@ def validate_args(args):
         raise ValueError("--geodesic_margin must equal --target_norm/2 in hierarchy mode, "
                          "or --target_norm otherwise")
     if args.hierarchy != "none":
-        if args.dataset != "iabench":
+        if args.dataset != "iabench" and not (args.dataset == "hybrid" and family_groups is not None):
             raise ValueError("--hierarchy increfa is supported only for IABench")
         if args.anchor_init != "random" or args.freeze_anchors:
             raise ValueError("--hierarchy increfa requires learnable random class anchors")
@@ -193,7 +193,7 @@ def validate_args(args):
                     minimum <= lo <= args.anchor_init_norm <= hi):
                 raise ValueError("--anchor_norm_range must respect the cone domain and contain initial class depth")
         if args.generators is not None:
-            increfa_mapping(args.generators)
+            increfa_mapping(args.generators, family_groups)
     if args.profile_steps < 0:
         raise ValueError("--profile_steps must be non-negative")
     if args.profile_steps and not args.diag_plot_dir:

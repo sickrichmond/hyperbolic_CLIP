@@ -18,8 +18,11 @@ class HiFiNetDataset(ImageAttributionDataset):
         # Hierarchical labels [(level1, level2, level3, fine), ...] in the ACTIVE
         # class order — respects IAB_EXCLUDE_GENERATORS (e.g. 22 cls without dalle3).
         # self.model_class_to_label stays the base's (env-aware) map; no override.
-        self.label_mapping = hifi_label_mapping(
-            list(self.model_class_to_label), "iabench" if self.iabench_source is not None else "iab")
+        supplied = (kwargs.get('config') or {}).get('hierarchy_mapping')
+        self.label_mapping = (supplied if supplied is not None else hifi_label_mapping(
+            list(self.model_class_to_label), "iabench" if self.iabench_source is not None else "iab"))
+        if len(self.label_mapping) != len(self.model_class_to_label):
+            raise ValueError('Hierarchy mapping must follow the active dataset class order')
 
     def __getitem__(self, idx):
         item = super().__getitem__(idx)  
@@ -28,4 +31,4 @@ class HiFiNetDataset(ImageAttributionDataset):
             image = self.transform(image)  
         item["image"] = image  
         item["hierachi_label"] = self.label_mapping[item["label"]]
-        return item  
+        return item

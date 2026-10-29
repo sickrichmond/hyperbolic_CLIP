@@ -13,6 +13,20 @@ from training.families import INCREFA_FAMILIES, increfa_mapping, minimum_cone_de
 
 
 class FamilyHierarchyTests(unittest.TestCase):
+    def test_family_anchor_penalty_uses_worst_pair(self):
+        tangent = torch.tensor([[1.2, 0.], [1.4, 0.], [3., 0.]], dtype=torch.float64,
+                               requires_grad=True)
+        classes = exp_map0(torch.tensor([[4., 0.], [4., .1], [4., -.1]], dtype=torch.float64))
+        images = exp_map0(torch.tensor([[5., 0.]], dtype=torch.float64))
+        base, _ = EntailmentConeLoss()(images, classes, torch.tensor([0]))
+        loss, stats = EntailmentConeLoss(lambda_anchor=.5, target_norm=2)(
+            images, classes, torch.tensor([0]), x_fam=exp_map0(tangent), family_of=torch.arange(3))
+        # z=1; only the closest family pair (distance .2) violates the margin.
+        self.assertTrue(torch.allclose(stats['loss_anchor'], tangent.new_tensor(.8)))
+        self.assertTrue(torch.allclose(loss - base, tangent.new_tensor(.4)))
+        grad, = torch.autograd.grad(loss - base, tangent)
+        self.assertTrue(torch.allclose(grad, tangent.new_tensor([[.5, 0.], [-.5, 0.], [0., 0.]])))
+
     def test_taxonomy_and_subsets(self):
         names = [n for group in INCREFA_FAMILIES.values() for n in group]
         self.assertEqual(len(names), 29)

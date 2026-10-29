@@ -78,9 +78,9 @@ def build_iab_datasets(args):
     return train_ds, val_ds
 
 
-def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=True):
-    """Shared cone training; supplied datasets are training and validation only."""
-    validate_args(args)
+def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=True, family_groups=None):
+    """Train on supplied train/validation views; optional family groups are experiment-local."""
+    validate_args(args, family_groups)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(args.seed)
     print(f"Seed: {args.seed}")
@@ -133,7 +133,7 @@ def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=
         image_radius=args.fixed_image_radius,
     ).to(device)
 
-    anchors = AnchorState(model, train_ds, class_names, anchor_texts, args, device)
+    anchors = AnchorState(model, train_ds, class_names, anchor_texts, args, device, family_groups)
 
     calibrate_image_depth(model, train_loader, anchors, args, device)
 
@@ -456,6 +456,7 @@ def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=
                     "lambda_anchor":   args.lambda_anchor,
                     "geodesic_margin": args.geodesic_margin,
                     "anchor_penalty":  "geodesic",
+                    "anchor_reduction": "max",
                     "anchor_scope":    "families" if args.hierarchy != "none" else "classes",
                     "lambda_cosine":   0.0,  # Legacy metadata; cosine is diagnostic only.
                     "theta_max":       150.0,

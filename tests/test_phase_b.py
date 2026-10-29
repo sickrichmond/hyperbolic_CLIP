@@ -87,10 +87,10 @@ def test_geodesic_anchor_hinge():
         baseline, _ = EntailmentConeLoss(curv=curv)(images, anchors, labels)
         loss, stats = EntailmentConeLoss(curv=curv, lambda_anchor=.6,
                                         target_norm=1)(images, anchors, labels)
-        assert torch.allclose(stats["loss_anchor"], tangent.new_tensor(1 / 6))
-        assert torch.allclose(loss - baseline, tangent.new_tensor(.1))
+        assert torch.allclose(stats["loss_anchor"], tangent.new_tensor(.5))
+        assert torch.allclose(loss - baseline, tangent.new_tensor(.3))
         gradient, = torch.autograd.grad(loss - baseline, tangent)
-        assert torch.allclose(gradient, tangent.new_tensor([[.2], [-.2], [0.]]), atol=1e-7)
+        assert torch.allclose(gradient, tangent.new_tensor([[.6], [-.6], [0.]]), atol=1e-7)
         for weight, margin in ((0, 1), (1, 0)):
             _, disabled = EntailmentConeLoss(curv=curv, lambda_anchor=weight,
                 target_norm=margin)(images, anchors, labels)
@@ -116,7 +116,7 @@ def test_geodesic_anchor_hinge():
                 pass
             else:
                 raise AssertionError(f"Accepted invalid {option}: {value}")
-    print("geodesic hinge values, unique-pair averaging, gradients and disabled cases: OK")
+    print("geodesic maximum hinge, gradients and disabled cases: OK")
 
 
 def test_geodesic_float32_gradients():

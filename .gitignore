@@ -51,3 +51,6 @@ AGENTS.md
 /logs/
 
 /tmp*/
+
+# Local experiment documentation
+/experiment_docs/

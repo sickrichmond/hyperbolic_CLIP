@@ -113,7 +113,7 @@ class AnchorState:
     parameters; text_free adds a learned scaled offset to a fixed reference.
     """
 
-    def __init__(self, model, train_ds, class_names, anchor_texts, args, device):
+    def __init__(self, model, train_ds, class_names, anchor_texts, args, device, family_groups=None):
         self.anchor_tangent = None
         self.anchor_t0 = self.anchor_delta = self.anchor_drift = None
         self.family_tangent = None
@@ -168,7 +168,7 @@ class AnchorState:
                 print(f"  drift scale s={F.softplus(self.anchor_drift).item():.3f} (learned)")
 
         if args.hierarchy != "none":
-            self.family_names, mapping = increfa_mapping(class_names)
+            self.family_names, mapping = increfa_mapping(class_names, family_groups)
             self.family_of = torch.tensor(mapping, dtype=torch.long, device=device)
             # Keep class initialization and global RNG consumption unchanged.
             g = torch.Generator().manual_seed(args.seed + 1)
