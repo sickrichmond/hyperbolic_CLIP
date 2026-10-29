@@ -232,10 +232,15 @@ class HierarchyExperimentTests(unittest.TestCase):
                 self.assertEqual(ckpt['family_names'], list(FAMILY_GROUPS))
                 self.assertEqual(ckpt['experiment_digest'], self.data.digest)
                 if method == 'ours':
-                    self.assertEqual(ckpt['anchor_reduction'], 'max')
+                    self.assertEqual(ckpt['anchor_reduction'], 'mean')
                     stack.enter_context(patch('models.attribution_clip.AttributionCLIP.from_checkpoint', return_value=TinyModel()))
                 loaded = experiment.load_model(self.data, checkpoint, 'cpu')
                 self.assertFalse(loaded[1].training)
+                if method == 'ours':
+                    with patch.object(experiment.torch, 'load',
+                                      return_value=dict(ckpt, anchor_reduction='max')):
+                        legacy = experiment.load_model(self.data, checkpoint, 'cpu')
+                    self.assertFalse(legacy[1].training)
                 reads.clear()
                 def read_testing(key):
                     self.assertIn(key, self.data.descriptor['splits']['test'])

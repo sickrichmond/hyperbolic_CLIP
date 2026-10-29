@@ -6,6 +6,7 @@
 # Geodesic anchor separation: LAMBDA_ANCHOR=0.5, TARGET_NORM=4 by default.
 # z=TARGET_NORM for classes; hierarchy mode uses z=TARGET_NORM/2 for families.
 # Checkpoint names include anchor weight, effective z and total NUM_EPOCHS (default 30).
+# CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
 # Submit: sbatch slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1 slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_iabench.sh
@@ -98,7 +99,7 @@ fi
 LAMBDA_TAG=${LAMBDA_ANCHOR//./p}
 MARGIN_TAG=${GEODESIC_MARGIN//./p}
 RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_ep${NUM_EPOCHS}"
-CKPT="$OUT/attribution_iabench_random_${RUN_TAG}${AUG_SUFFIX}${HIERARCHY_SUFFIX}_vitl14.pt"
+CKPT="${CKPT:-$OUT/attribution_iabench_random_${RUN_TAG}${AUG_SUFFIX}${HIERARCHY_SUFFIX}_vitl14.pt}"
 
 mkdir -p "$OUT"
 cd "$REPO"

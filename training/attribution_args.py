@@ -96,7 +96,7 @@ def parse_args(argv=None, dataset="iab"):
                         "scores are still computed.")
     p.add_argument("--lambda_anchor", "--lambda_cosine", dest="lambda_anchor",
                    type=float, default=0.2,
-                   help="Weight of maximum geodesic-distance hinge over unique anchor pairs "
+                   help="Weight of mean geodesic-distance hinge over unique anchor pairs "
                         "(families in hierarchy mode; default: 0.2; 0 disables). "
                         "--lambda_cosine is a legacy spelling for this new penalty.")
     p.add_argument("--geodesic_margin", type=float, default=None,

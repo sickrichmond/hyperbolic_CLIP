@@ -456,7 +456,7 @@ def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=
                     "lambda_anchor":   args.lambda_anchor,
                     "geodesic_margin": args.geodesic_margin,
                     "anchor_penalty":  "geodesic",
-                    "anchor_reduction": "max",
+                    "anchor_reduction": "mean",
                     "anchor_scope":    "families" if args.hierarchy != "none" else "classes",
                     "lambda_cosine":   0.0,  # Legacy metadata; cosine is diagnostic only.
                     "theta_max":       150.0,

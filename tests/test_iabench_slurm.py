@@ -59,7 +59,10 @@ exec bash "$1"
                       "LAMBDA_ANCHOR": "0", "NUM_EPOCHS": "40"},
                      "_aug_hierarchy_increfa", "corruption"),
                     ({"HIERARCHY": "increfa", "TARGET_NORM": "2.1234567"},
-                     "_hierarchy_increfa", "corruption")):
+                     "_hierarchy_increfa", "corruption"),
+                    ({"CKPT": str(checkpoints / "mean checkpoint.pt"),
+                      "HIERARCHY": "increfa", "AUGMENT": "1"},
+                     "_aug_hierarchy_increfa", "corruption")):
                 with self.subTest(settings=settings):
                     completed = subprocess.run(["bash", "-c", stub, "_", str(train_script)],
                                    env=dict(env, **settings), check=True, capture_output=True, text=True)
@@ -80,8 +83,8 @@ exec bash "$1"
                     self.assertEqual(args.aug_policy, policy)
                     weight_tag = settings.get("LAMBDA_ANCHOR", "0.5").replace(".", "p")
                     margin_tag = format(args.geodesic_margin, ".17g").replace(".", "p")
-                    self.assertEqual(args.output, str(checkpoints /
-                        f"attribution_iabench_random_anchor{weight_tag}_z{margin_tag}_ep{args.num_epochs}{suffix}_vitl14.pt"))
+                    self.assertEqual(args.output, settings.get("CKPT", str(checkpoints /
+                        f"attribution_iabench_random_anchor{weight_tag}_z{margin_tag}_ep{args.num_epochs}{suffix}_vitl14.pt")))
                     self.assertEqual(args.split_manifest, str(manifest))
                     self.assertEqual(args.diag_plot_dir, str(
                         base / f"viz/iabench{suffix}_123"))
@@ -160,12 +163,16 @@ exec bash "$1"
             capture = root / "command.json"
             env = dict(os.environ, WORK=str(root), FAST=str(root / "fast"), SLURM_JOB_ID="123",
                        SLURM_TEST_PYTHON=sys.executable, SLURM_TEST_CAPTURE=str(capture))
-            for key in ("AUGMENT", "AUG_POLICY", "OPTIMIZER", "ANCHOR_INIT",
+            for key in ("CKPT", "AUGMENT", "AUG_POLICY", "OPTIMIZER", "ANCHOR_INIT",
                         "LAMBDA_ANCHOR", "GEODESIC_MARGIN", "TARGET_NORM", "NUM_EPOCHS"):
                 env.pop(key, None)
             for settings, suffix in (({}, ""), ({"AUGMENT": "1"}, "_aug"),
                     ({"AUGMENT": "1", "AUG_POLICY": "omnidfa"}, "_omniaug"),
-                    ({"LAMBDA_ANCHOR": "0.2", "TARGET_NORM": "3", "NUM_EPOCHS": "20"}, "")):
+                    ({"LAMBDA_ANCHOR": "0.2", "TARGET_NORM": "3", "NUM_EPOCHS": "20"}, ""),
+                    ({"CKPT": str(base / "mean checkpoint.pt")}, ""),
+                    ({"CKPT": str(base / "mean aug checkpoint.pt"), "AUGMENT": "1"}, "_aug"),
+                    ({"CKPT": str(base / "mean omni checkpoint.pt"), "AUGMENT": "1",
+                      "AUG_POLICY": "omnidfa"}, "_omniaug")):
                 with self.subTest(settings=settings):
                     subprocess.run(["bash", "-c", stub, "_", str(script)],
                         env=dict(env, **settings), check=True, capture_output=True, text=True)
@@ -176,8 +183,11 @@ exec bash "$1"
                     self.assertEqual(args.num_epochs, int(settings.get("NUM_EPOCHS", 30)))
                     weight = settings.get("LAMBDA_ANCHOR", "0.5").replace(".", "p")
                     margin = settings.get("TARGET_NORM", "4").replace(".", "p")
-                    self.assertEqual(Path(args.output).name,
-                        f"attribution_22cls_anchor{weight}_z{margin}_random_adamw_ep{args.num_epochs}{suffix}_vitl14.pt")
+                    if "CKPT" in settings:
+                        self.assertEqual(args.output, settings["CKPT"])
+                    else:
+                        self.assertEqual(Path(args.output).name,
+                            f"attribution_22cls_anchor{weight}_z{margin}_random_adamw_ep{args.num_epochs}{suffix}_vitl14.pt")
             for epochs in ("0", "-1", "2.5", "oops"):
                 with self.subTest(epochs=epochs):
                     capture.unlink(missing_ok=True)

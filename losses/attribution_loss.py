@@ -1,7 +1,7 @@
 """Image-class entailment-cone hinges with norm and geodesic anchor regularization.
 
 Positive pairs pay max(0, xi-psi); wrong-class pairs pay max(0, psi+margin-xi).
-The anchor penalty takes the maximum hinge over unique pairs (the closest pair).
+The anchor penalty averages the hinges over all unique pairs, including zeros.
 With family inputs, class-to-family hinges and a relative tangent-depth penalty
 are added, and the anchor penalty acts exclusively on family anchors.
 Geodesic separation depends on directions and depths; it does not constrain

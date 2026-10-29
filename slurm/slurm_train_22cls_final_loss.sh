@@ -10,6 +10,7 @@
 # Defaults: OPTIMIZER=adamw, LAMBDA_ANCHOR=0.5, TARGET_NORM=4, ANCHOR_INIT=random.
 # The geodesic margin follows TARGET_NORM (z=tau); a conflicting override is rejected.
 # Checkpoint names include total NUM_EPOCHS (default 30), not the selected best epoch.
+# CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -78,13 +79,13 @@ RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_${ANCHOR_INIT}_${OPTIMIZER}_ep${NUM_
 if [ "$AUGMENT" = 1 ]; then
     AUG_FLAG="--train_augment --aug_policy $AUG_POLICY"
     if [ "$AUG_POLICY" = omnidfa ]; then
-        CKPT=$OUT/attribution_22cls_${RUN_TAG}_omniaug_vitl14.pt
+        CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_omniaug_vitl14.pt}
     else
-        CKPT=$OUT/attribution_22cls_${RUN_TAG}_aug_vitl14.pt
+        CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_aug_vitl14.pt}
     fi
 else
     AUG_FLAG=
-    CKPT=$OUT/attribution_22cls_${RUN_TAG}_vitl14.pt
+    CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_vitl14.pt}
 fi
 
 echo "Training with optimizer=$OPTIMIZER, lambda_anchor=$LAMBDA_ANCHOR, geodesic_margin=$GEODESIC_MARGIN, anchor_init=$ANCHOR_INIT"
@@ -134,6 +135,6 @@ python train_attribution.py \
     --optimizer "$OPTIMIZER" \
     --momentum 0.9 \
     --init_depth 3.0 \
-    --output          $CKPT
+    --output          "$CKPT"
 
 echo "Done: $CKPT"

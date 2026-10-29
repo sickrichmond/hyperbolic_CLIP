@@ -199,10 +199,13 @@ def load_model(data, checkpoint, device):
         from geometry.lorentz import exp_map0
         from models.attribution_clip import AttributionCLIP
         from comparison.training.test_hypclip import load_anchors
-        for key, value in dict(hierarchy='increfa', anchor_penalty='geodesic', anchor_reduction='max',
+        for key, value in dict(hierarchy='increfa', anchor_penalty='geodesic',
                                anchor_scope='families', lambda_anchor=.5, target_norm=4, geodesic_margin=2).items():
             if ckpt.get(key) != value:
                 raise ValueError(f'Incompatible hierarchy checkpoint {key}')
+        # Both reductions have the same inference rule; keep older runs evaluable.
+        if ckpt.get('anchor_reduction') not in ('mean', 'max'):
+            raise ValueError('Incompatible hierarchy checkpoint anchor_reduction')
         tangent, class_tangent = ckpt.get('family_tangent'), ckpt.get('anchor_tangent')
         if (not isinstance(tangent, torch.Tensor) or not isinstance(class_tangent, torch.Tensor)
                 or class_tangent.ndim != 2 or class_tangent.shape[0] != 20
