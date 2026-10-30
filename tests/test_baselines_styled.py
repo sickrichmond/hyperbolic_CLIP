@@ -140,9 +140,37 @@ class StyledBaselineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'No images'):
                 evaluator.collect_samples(root, ['real', 'SDXL', 'FLUX'], paths, labels)
 
+    def test_generator_filter_preserves_full_labels_and_ignores_excluded_images(self):
+        names = ['real', 'FLUX', 'PLAYGROUND_2_5', 'SD3', 'SDXL', 'hunyuan']
+        requested = ['PLAYGROUND_2_5', 'hunyuan', 'SDXL']
+        with tempfile.TemporaryDirectory() as directory:
+            style = Path(directory) / 'watercolor'
+            for name in names[1:]:
+                path = style / name / 'COCO/image.png'
+                path.parent.mkdir(parents=True)
+                path.touch()
+            styles = evaluator.discover_styles(directory, names)
+            selected = evaluator.select_style_generators(styles, requested, names)
+            self.assertEqual(selected, [(style, ['PLAYGROUND_2_5', 'SDXL', 'hunyuan'])])
+            self.assertIs(evaluator.select_style_generators(styles, None, names), styles)
+            # Excluded folders must not be read or validated as input samples.
+            bad = style / 'FLUX/unsupported/image.png'
+            bad.parent.mkdir()
+            bad.touch()
+            samples = evaluator.collect_samples(style, names, {'COCO': 'COCO'}, {'COCO': 3},
+                                                selected[0][1])
+            self.assertEqual([row[1] for row in samples], [2, 4, 5])
+            self.assertEqual({Path(row[0]).parent.parent.name for row in samples}, set(requested))
+            with self.assertRaisesRegex(ValueError, 'absent from the IAB class map'):
+                evaluator.select_style_generators(styles, ['playground'], names)
+            with self.assertRaisesRegex(ValueError, 'folders missing'):
+                evaluator.select_style_generators(styles, ['real'], names)
+
     def test_array_launcher_selects_every_method_and_preserves_gpu(self):
         repo = Path(__file__).resolve().parents[1]
-        script = repo / 'slurm/slurm_eval_iab_styled_baselines.sh'
+        scripts = [(repo / 'slurm/slurm_eval_iab_styled_baselines.sh', 'baselines_iab_styled', []),
+                   (repo / 'slurm/slurm_eval_iab_styled_baselines_3models.sh',
+                    'baselines_iab_styled_3models', ['PLAYGROUND_2_5', 'hunyuan', 'SDXL'])]
         stub = r'''
 module() { :; }
 python() {
@@ -164,22 +192,29 @@ exec bash "$1" "$2"
                        CAPTURE=str(capture), CUDA_VISIBLE_DEVICES='4', SLURM_ARRAY_JOB_ID='123')
             for key in ('REPO', 'DATA', 'LOGDIR', 'BATCH_SIZE', 'NUM_WORKERS'):
                 env.pop(key, None)
-            for index, method in enumerate(evaluator.METHODS):
-                with self.subTest(method=method):
-                    subprocess.run(['bash', '-c', stub, '_', str(script), str(path)],
-                        env=dict(env, SLURM_ARRAY_TASK_ID=str(index)), check=True,
-                        capture_output=True, text=True)
-                    command = json.loads(capture.read_text())
-                    self.assertEqual(command['argv'][:2],
-                                     ['-m', 'comparison.training.test_baselines_styled'])
-                    flags = dict(zip(command['argv'][2::2], command['argv'][3::2]))
-                    self.assertEqual(flags['--method'], method)
-                    self.assertEqual(flags['--checkpoints'], str(path))
-                    self.assertEqual(flags['--root_dir'], str(root / 'datasets/iab_styled_eval'))
-                    self.assertEqual(flags['--log_dir'],
-                        str(root / f'outputs/baselines_iab_styled_123/{method}'))
-                    self.assertEqual(flags['--batch_size'], '8')
-                    self.assertEqual(command['gpu'], '4')
+            for script, output_prefix, selected in scripts:
+                for index, method in enumerate(evaluator.METHODS):
+                    with self.subTest(script=script.name, method=method):
+                        subprocess.run(['bash', '-c', stub, '_', str(script), str(path)],
+                            env=dict(env, SLURM_ARRAY_TASK_ID=str(index)), check=True,
+                            capture_output=True, text=True)
+                        command = json.loads(capture.read_text())
+                        argv = command['argv']
+                        self.assertEqual(argv[:2], ['-m', 'comparison.training.test_baselines_styled'])
+                        if selected:
+                            start = argv.index('--generators')
+                            self.assertEqual(argv[start + 1:], selected)
+                            argv = argv[:start]
+                        else:
+                            self.assertNotIn('--generators', argv)
+                        flags = dict(zip(argv[2::2], argv[3::2]))
+                        self.assertEqual(flags['--method'], method)
+                        self.assertEqual(flags['--checkpoints'], str(path))
+                        self.assertEqual(flags['--root_dir'], str(root / 'datasets/iab_styled_eval'))
+                        self.assertEqual(flags['--log_dir'],
+                            str(root / f'outputs/{output_prefix}_123/{method}'))
+                        self.assertEqual(flags['--batch_size'], '8')
+                        self.assertEqual(command['gpu'], '4')
             capture.unlink()
             result = subprocess.run(['bash', '-c', stub, '_', str(script), str(path)],
                 env=dict(env, SLURM_ARRAY_TASK_ID='11'), capture_output=True, text=True)
@@ -241,7 +276,10 @@ exec bash "$1" "$2"
                         evaluator.main(['--method', method, '--checkpoint', str(checkpoint),
                             '--root_dir', str(root / 'data'), '--log_dir', str(output),
                             '--batch_size', '2', '--num_workers', '0'])
-                    self.assertEqual(batch_sizes, [2, 1, 2, 1])
+                        evaluator.main(['--method', method, '--checkpoint', str(checkpoint),
+                            '--root_dir', str(root / 'data'), '--log_dir', str(output / 'filtered'),
+                            '--batch_size', '3', '--num_workers', '0', '--generators', 'SDXL'])
+                    self.assertEqual(batch_sizes, [2, 1, 2, 1, 2, 2])
                     for style in ('noir', 'watercolor'):
                         result = json.loads((output / style / 'metrics.json').read_text())
                         self.assertEqual(result['class_names'], names)
@@ -253,6 +291,14 @@ exec bash "$1" "$2"
                                              result['confusion_matrix']), 3)
                         if method == 'patch':
                             self.assertIn('acc_D_voted', result)
+                        filtered = json.loads((output / 'filtered' / style / 'metrics.json').read_text())
+                        self.assertEqual(filtered['num_images'], 2)
+                        self.assertEqual(filtered['class_names'], names)
+                        self.assertEqual(filtered['evaluated_generators'], ['SDXL'])
+                        self.assertEqual(filtered['support_per_class'][names.index('SDXL')], 2)
+                        self.assertEqual(sum(filtered['support_per_class']), 2)
+                        self.assertEqual(sum(row[names.index('real')] for row in
+                                             filtered['confusion_matrix']), 2)
                     with (output / 'summary.csv').open() as stream:
                         self.assertEqual(len(list(csv.DictReader(stream))), 2)
 

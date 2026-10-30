@@ -1,6 +1,7 @@
 #!/bin/bash
 # One task per IAB baseline, every style, native preprocessing/prediction rules.
 # Submit: sbatch slurm/slurm_eval_iab_styled_baselines.sh /path/to/checkpoints.json
+# Additional arguments after the map are passed to the evaluator.
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --job-name=eval_iab_styled_baselines
@@ -50,4 +51,4 @@ echo "Results: $LOGDIR/$METHOD | GPU: ${CUDA_VISIBLE_DEVICES:-?}"
 python -m comparison.training.test_baselines_styled \
     --method "$METHOD" --checkpoints "$CHECKPOINTS" \
     --root_dir "$DATA" --log_dir "$LOGDIR/$METHOD" \
-    --batch_size "$BATCH_SIZE" --num_workers "$NUM_WORKERS"
+    --batch_size "$BATCH_SIZE" --num_workers "$NUM_WORKERS" "${@:2}"
