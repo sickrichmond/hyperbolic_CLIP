@@ -3,7 +3,6 @@
 Reuse native dataset adapters and Trainer.test. Predictions compete over the
 full IAB class map; balanced accuracy averages supported generators only.
 No split, sampling cap or additional corruption is applied.
---generators restricts input images while retaining the full prediction space.
 """
 import argparse
 from collections import Counter
@@ -75,28 +74,11 @@ def prepare_config(checkpoint, method, fallback, class_names):
     return config
 
 
-def select_style_generators(styles, generators, class_names):
-    if generators is None:
-        return styles
-    unknown = set(generators) - set(class_names)
-    if unknown:
-        raise ValueError(f'Generators absent from the IAB class map: {sorted(unknown)}')
-    selected = []
-    for style, present in styles:
-        missing = set(generators) - set(present)
-        if missing:
-            raise ValueError(f'{style}: requested generator folders missing: {sorted(missing)}')
-        selected.append((style, [name for name in present if name in generators]))
-    return selected
-
-
-def collect_samples(style, class_names, semantic_paths, semantic_labels, generators=None):
+def collect_samples(style, class_names, semantic_paths, semantic_labels):
     """Enumerate complete IAB semantic directories, without filename/cap filters."""
     style = Path(style)
     samples = []
     for label, name in enumerate(class_names):
-        if generators is not None and name not in generators:
-            continue
         directory = style / name
         if not directory.is_dir():
             continue
@@ -119,8 +101,7 @@ def collect_samples(style, class_names, semantic_paths, semantic_labels, generat
     return samples
 
 
-def build_styled_loader(style, config, batch_size, num_workers, clip_preprocess=None,
-                        generators=None):
+def build_styled_loader(style, config, batch_size, num_workers, clip_preprocess=None):
     from torch.utils.data import DataLoader
     from comparison.dataset.ImageAttributionDataset import DATASET
     from comparison.dataset.ImageAttributionDataset.dataset import (
@@ -133,7 +114,7 @@ def build_styled_loader(style, config, batch_size, num_workers, clip_preprocess=
         root_dir='', config=config, degraded=0, clip_preprocess=clip_preprocess)
     dataset.root_dir = str(style)
     dataset.samples = collect_samples(style, config['class_names'],
-                                      semantic_to_relpath, semantic_label_map, generators)
+                                      semantic_to_relpath, semantic_label_map)
     if config['model_name'] == 'repmix':
         dataset.N = len(dataset.samples)
     dataset.set_test()
@@ -151,8 +132,6 @@ def parse_args(argv=None):
     parser.add_argument('--config', help='Legacy checkpoint YAML; otherwise use the method default')
     parser.add_argument('--root_dir', required=True)
     parser.add_argument('--log_dir', required=True)
-    parser.add_argument('--generators', nargs='+',
-                        help='Input generator folders to evaluate; predictions still use all IAB classes')
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_workers', type=int, default=8)
     args = parser.parse_args(argv)
@@ -177,8 +156,7 @@ def main(argv=None):
     from comparison.training.trainer.trainer import Trainer
 
     class_names = list(model_class_to_label)
-    styles = select_style_generators(discover_styles(args.root_dir, class_names),
-                                     args.generators, class_names)
+    styles = discover_styles(args.root_dir, class_names)
     checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     config_name = 'dna_default' if args.method == 'dna' else args.method
     config_path = Path(args.config) if args.config else (
@@ -199,7 +177,7 @@ def main(argv=None):
     summary = []
     for style, generators in styles:
         loader = build_styled_loader(style, config, args.batch_size, args.num_workers,
-                                     clip_preprocess=clip_preprocess, generators=generators)
+                                     clip_preprocess=clip_preprocess)
         counts = Counter(class_names[row[1]] for row in loader.dataset.samples)
         print(f'\nBaseline: {args.method} | Style: {style.name} | images: {len(loader.dataset)} '
               f'| counts: {dict(counts)}')
