@@ -1,6 +1,5 @@
 #!/bin/bash
 # Ours: sbatch slurm/slurm_train_hierarchy_holdout.sh ours
-# Baselines: use slurm_train_hierarchy_baseline.sh for one GPU/eight CPUs.
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
@@ -17,8 +16,8 @@
 set -euo pipefail
 METHOD="${1:-ours}"
 case "$METHOD" in
-  ours|resnet50|hifi_net) ;;
-  *) echo "Expected ours, resnet50 or hifi_net." >&2; exit 2 ;;
+  ours) ;;
+  *) echo "Only ours is supported in the hierarchy holdout experiment." >&2; exit 2 ;;
 esac
 module load python/3.11.7
 module load cuda/12.6

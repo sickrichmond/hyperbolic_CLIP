@@ -16,15 +16,13 @@ from PIL import Image
 import torch
 
 from comparison.training import hierarchy_experiment as experiment
-from comparison.dataset.ImageAttributionDataset import DATASET
-from comparison.dataset.ImageAttributionDataset.dataset import hifi_label_mapping
 from data.degradations import apply_degradation
 from data.hierarchy_experiment import (
     ExperimentData, FAMILY_GROUPS, IAB_GENERATORS, NEARBY, UNSEEN_LINES, UNSEEN, EXPLORATORY,
     prepare_experiment, protocol_digest,
 )
-from tests.test_iabench_baselines import make_data
-from tests.test_iabench_training import PixelProcessor
+from data.iabench_dataset import IABenchDataset
+from tests.test_iabench_training import PixelProcessor, save_arrow
 from tests.test_attribution_training import TinyModel, TinyTokenizer
 from training.families import INCREFA_FAMILIES, increfa_mapping
 
@@ -37,7 +35,10 @@ class HierarchyExperimentTests(unittest.TestCase):
         cls.root = Path(cls.tmp.name)
         cls.bench_root, cls.iab_root = cls.root / 'bench', cls.root / 'iab'
         names = [name for family in INCREFA_FAMILIES.values() for name in family]
-        cls.bench_manifest, cls.bm = make_data(cls.bench_root, names)
+        save_arrow(cls.bench_root, {name: 10 for name in names})
+        cls.bm = IABenchDataset(cls.bench_root, processor_name=None).make_split_manifest(generators=names)
+        cls.bench_manifest = cls.bench_root / 'splits.json'
+        cls.bench_manifest.write_text(json.dumps(cls.bm))
         cls.im = dict(seed=42, use_semantic_split=False, num_images_per_semantic_per_class=2000,
                       train=[], val=[], test=[])
         y, x = np.mgrid[:140, :180]
@@ -130,7 +131,7 @@ class HierarchyExperimentTests(unittest.TestCase):
                 prepare_experiment(self.bench_root, self.bench_manifest, self.iab_root,
                                    self.iab_manifest, target / 'modified')
 
-    def test_grok_crop_before_degradation_for_all_methods(self):
+    def test_grok_crop_before_degradation(self):
         source = self.data.view('test', PixelProcessor())
         row = next(i for i, (_, name, _) in enumerate(source.samples) if name == 'grok3')
         key = source.samples[row][0]
@@ -140,152 +141,212 @@ class HierarchyExperimentTests(unittest.TestCase):
             source.degraded = level
             expected = apply_degradation(cropped, level)
             torch.testing.assert_close(source[row]['pixel_values'], PixelProcessor()(images=expected)['pixel_values'][0])
-            for method in ('resnet50', 'hifi_net'):
-                config = dict(hierarchy_mapping=hifi_label_mapping(source.class_names, 'hybrid'))
-                dataset = DATASET[method]('', config=config, iabench_source=source, degraded=level)
-                dataset.set_test()
-                torch.testing.assert_close(dataset[row]['image'], dataset.transform(expected))
         with self.assertRaisesRegex(ValueError, 'outside'):
             self.data.view('train')._read_image(key)
 
-    def test_probability_aggregation_and_stratified_metrics(self):
-        probability = experiment.family_probabilities(torch.tensor([[.4, .3, .3]]).log(), [0, 1, 1], 4)
-        torch.testing.assert_close(probability, torch.tensor([[.4, .6, 0., 0.]]))
+    def test_reciprocal_distance_probabilities(self):
+        from geometry.lorentz import exp_map0, pairwise_dist
+        images = exp_map0(torch.tensor([[3., 0.]], dtype=torch.float64))
+        anchors = exp_map0(torch.tensor([[1., 0.], [2., 0.], [0., 1.], [-1., 0.]], dtype=torch.float64))
+        distances = pairwise_dist(images, anchors)
+        torch.testing.assert_close(distances[0, :2], torch.tensor([2., 1.], dtype=torch.float64))
+        probabilities = experiment.family_probabilities(distances)
+        torch.testing.assert_close(probabilities, (1 / distances).softmax(1))
+        self.assertEqual(probabilities.argmax(1).item(), 1)
+        self.assertFalse(torch.allclose(probabilities, (-distances).softmax(1)))
+        for distances in (torch.tensor([[0., 1., 2., 3.]]), torch.tensor([[0., 0., 1., 2.]])):
+            probabilities = experiment.family_probabilities(distances)
+            self.assertTrue(torch.isfinite(probabilities).all())
+            self.assertAlmostEqual(probabilities.sum().item(), 1.)
+            self.assertEqual(probabilities.argmax(1).item(), distances.argmin(1).item())
+        for invalid in (torch.tensor([1., 2.]), torch.empty(0, 4),
+                        torch.tensor([[float('nan'), 1.]]), torch.tensor([[float('inf'), 1.]]),
+                        torch.tensor([[-1., 1.]])):
+            with self.assertRaisesRegex(ValueError, 'geodesic distances'):
+                experiment.family_probabilities(invalid)
+
+    def test_unseen_only_stratified_metrics(self):
         desc = self.data.descriptor
-        labels, logits, scores = torch.arange(32), torch.zeros(32, 20), torch.zeros(32, 4)
-        for i, name in enumerate(desc['class_names']):
-            if name in desc['seen_classes']:
-                logits[i, desc['seen_classes'].index(name)] = 1
+        labels, scores = torch.arange(32), torch.zeros(32, 4)
         scores[:, 3] = 1  # Always diffusion: perfect diffusion recall, poor cross-family attribution.
-        result = experiment.prediction_metrics(logits, scores, labels, self.data)
-        self.assertEqual(result['seen_model_balanced_accuracy'], 1)
+        result = experiment.prediction_metrics(scores, labels, self.data)
         self.assertAlmostEqual(result['unseen_family_balanced_accuracy'], 1 / 3)
         self.assertAlmostEqual(result['unseen_family_macro_generator_recall'], .8)
         self.assertEqual(result['diffusion_nearby_macro_recall'], 1)
-        for value in result['exploratory'].values():
-            self.assertNotIn('recall', value)
-            self.assertNotIn('accuracy', value)
-            self.assertEqual(value['family_assignment_proportions']['diffusion'], 1)
+        self.assertEqual(set(result['unseen_per_family']), {'gan', 'autoregressive', 'diffusion'})
+        self.assertEqual(sum(map(sum, result['unseen_family_confusion_matrix'])), 10)
+        self.assertEqual(len(result['unseen_generator_family_confusion_matrix']), 10)
+        self.assertFalse(any(key.startswith('seen_') or key == 'exploratory' for key in result))
+        unseen = torch.tensor([name in desc['unseen_classes'] for name in desc['class_names']])
+        scores[~unseen] = torch.tensor([1., 0., 0., 0.])
+        self.assertEqual(result, experiment.prediction_metrics(scores, labels, self.data))
+        self.assertEqual(result, experiment.prediction_metrics(scores[unseen], labels[unseen], self.data))
+        with self.assertRaisesRegex(ValueError, 'No test samples'):
+            experiment.prediction_metrics(scores[unseen][1:], labels[unseen][1:], self.data)
         # Only one FLUX variant is correct: five-model mean=.2, four-line mean=.125.
         scores[:, :] = 0
         scores[:, 0] = 1
         scores[desc['class_names'].index(UNSEEN_LINES['FLUX'][0])] = torch.tensor([0., 0., 0., 1.])
-        result = experiment.prediction_metrics(logits, scores, labels, self.data)
+        result = experiment.prediction_metrics(scores, labels, self.data)
         self.assertAlmostEqual(result['diffusion_unseen_line_macro_generator_recall'], .2)
         self.assertAlmostEqual(result['diffusion_unseen_line_macro_line_recall'], .125)
 
     def test_selected_recipes(self):
         args = experiment.ours_args(self.data, Path('/tmp/unused'), 0)
         self.assertEqual((args.num_epochs, args.batch_size, args.lambda_anchor, args.geodesic_margin), (30, 256, .5, 2))
-        self.assertEqual(experiment.RECIPES['resnet50'], (10, 32))
-        self.assertEqual(experiment.RECIPES['hifi_net'], (10, 8))
+        self.assertEqual(experiment.METHODS, ('ours',))
+        self.assertEqual(set(experiment.RECIPES), {'ours'})
         self.assertFalse(args.train_augment)
         self.assertEqual(args.generators, self.data.descriptor['seen_classes'])
 
+    def test_unknown_assignment_percentages_and_typical_nearest_model(self):
+        desc = self.data.descriptor
+        labels = torch.tensor([desc['class_names'].index(name)
+                               for name in desc['exploratory_classes'] for _ in range(100)])
+        predictions = torch.tensor([3] * 80 + [2] * 15 + [1] * 2 + [0] * 3 + [1] * 100)
+        scores = torch.nn.functional.one_hot(predictions, 4).double()
+        sd3 = desc['seen_classes'].index('stabilityai@stable-diffusion-3-medium-diffusers')
+        gan = desc['seen_classes'].index('E4S')
+        nearest = torch.tensor([sd3] * 70 + [0] * 30 + [gan] * 100)
+        assignments = experiment.exploratory_assignments(scores, nearest, labels, self.data)
+        midjourney = assignments['midjourneyv6']
+        self.assertEqual(midjourney['family_assignment_proportions'],
+                         dict(real=.03, gan=.02, autoregressive=.15, diffusion=.8))
+        self.assertEqual(midjourney['most_frequent_nearest_model'], desc['seen_classes'][sd3])
+        self.assertEqual(midjourney['most_frequent_nearest_model_share'], .7)
+        self.assertEqual(assignments['nano-banana']['family_assignment_proportions']['gan'], 1)
+        self.assertEqual(assignments['nano-banana']['most_frequent_nearest_model'], 'E4S')
+        for stats in assignments.values():
+            self.assertEqual(sum(stats['family_assignment_counts'].values()), 100)
+            self.assertEqual(sum(stats['nearest_model_counts'].values()), 100)
+            self.assertAlmostEqual(sum(stats['nearest_model_proportions'].values()), 1)
+            self.assertNotIn('accuracy', stats)
+            self.assertNotIn('recall', stats)
+        with self.assertRaisesRegex(ValueError, 'nearest model-anchor'):
+            experiment.exploratory_assignments(scores, nearest + 20, labels, self.data)
+        with self.assertRaisesRegex(ValueError, 'No test samples'):
+            experiment.exploratory_assignments(scores[:100], nearest[:100], labels[:100], self.data)
+
     def test_training_restore_and_all_levels(self):
         import train_attribution
-        from comparison.training.attributors.attributor_resnet50 import Resnet50Attributor
-        from comparison.training.attributors.attributor_hifi_net import HiFiNetAttributor
-        from geometry.lorentz import exp_map0
-        from losses.attribution_loss import _pairwise_xi
-        for method in experiment.METHODS:
-            with self.subTest(method=method), tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
-                stack.enter_context(redirect_stdout(io.StringIO()))
-                stack.enter_context(redirect_stderr(io.StringIO()))
-                stack.enter_context(patch('torch.cuda.is_available', return_value=False))
-                stack.enter_context(patch('torch.cuda.device_count', return_value=0))
-                stack.enter_context(patch.dict(experiment.RECIPES, {method: (1, 128 if method == 'ours' else 8)}))
-                if method == 'ours':
-                    real_args = experiment.ours_args
-                    def tiny_args(*args, **kwargs):
-                        parsed = real_args(*args, **kwargs)
-                        parsed.hyperbolic_dim, parsed.init_depth = 4, 0
-                        return parsed
-                    stack.enter_context(patch.object(experiment, 'ours_args', side_effect=tiny_args))
-                    stack.enter_context(patch.object(train_attribution, 'AttributionCLIP', TinyModel))
-                    stack.enter_context(patch('transformers.CLIPImageProcessor.from_pretrained', return_value=PixelProcessor()))
-                    stack.enter_context(patch('transformers.CLIPTokenizer.from_pretrained', return_value=TinyTokenizer()))
-                elif method == 'resnet50':
-                    stack.enter_context(patch('torchvision.models.resnet50', return_value=torch.nn.Identity()))
-                    stack.enter_context(patch.object(Resnet50Attributor, 'extract_features',
-                        side_effect=lambda batch: torch.zeros(len(batch['image']), 2048)))
-                else:
-                    stack.enter_context(patch('comparison.training.attributors.attributor_hifi_net.get_seg_model',
-                                              return_value=torch.nn.Identity()))
-                    stack.enter_context(patch.object(HiFiNetAttributor, 'extract_features', return_value=None))
-                    def classify(model, features, images):
-                        return tuple(getattr(model.SegNet, f'branch_cls_level_{i}').fc(torch.zeros(len(images), 18))
-                                     for i in range(1, 5))
-                    stack.enter_context(patch.object(HiFiNetAttributor, 'classifier', classify))
-                reads = []
-                original = self.data.read_image
-                def read_training(key):
-                    self.assertIn(key, self.data.descriptor['splits']['train'] + self.data.descriptor['splits']['val'])
-                    self.assertNotIn(self.data.records[key]['generator'], UNSEEN + EXPLORATORY)
-                    reads.append(key)
-                    return original(key)
-                with patch.object(self.data, 'read_image', side_effect=read_training):
-                    checkpoint = experiment.train_experiment(self.data, method, Path(tmp) / 'train', 0)
-                self.assertTrue(reads)
-                ckpt = torch.load(checkpoint, weights_only=False, map_location='cpu')
-                self.assertEqual(len(ckpt['class_names']), 20)
-                self.assertEqual(ckpt['family_names'], list(FAMILY_GROUPS))
-                self.assertEqual(ckpt['experiment_digest'], self.data.digest)
-                if method == 'ours':
-                    self.assertEqual(ckpt['anchor_reduction'], 'mean')
-                    stack.enter_context(patch('models.attribution_clip.AttributionCLIP.from_checkpoint', return_value=TinyModel()))
-                loaded = experiment.load_model(self.data, checkpoint, 'cpu')
-                self.assertFalse(loaded[1].training)
-                if method == 'ours':
-                    with patch.object(experiment.torch, 'load',
-                                      return_value=dict(ckpt, anchor_reduction='max')):
-                        legacy = experiment.load_model(self.data, checkpoint, 'cpu')
-                    self.assertFalse(legacy[1].training)
-                reads.clear()
-                def read_testing(key):
-                    self.assertIn(key, self.data.descriptor['splits']['test'])
-                    reads.append(key)
-                    return original(key)
-                real_metrics = experiment.prediction_metrics
-                def check_scores(logits, families, labels, data):
-                    self.assertEqual(set(labels.tolist()), set(range(32)))
-                    if method == 'ours' and not scored:
-                        pixels = torch.cat([PixelProcessor()(images=original(key))['pixel_values']
-                                            for key in self.data.descriptor['splits']['test']])
-                        images, _ = loaded[1].encode_image(pixels)
-                        torch.testing.assert_close(families, -_pairwise_xi(loaded[4], images, 1).T)
-                        torch.testing.assert_close(loaded[4], exp_map0(ckpt['family_tangent']))
-                    scored.append(True)
-                    return real_metrics(logits, families, labels, data)
-                scored = []
-                output = Path(tmp) / 'results'
-                with patch.object(self.data, 'read_image', side_effect=read_testing), \
-                        patch.object(experiment, 'prediction_metrics', side_effect=check_scores):
-                    experiment.evaluate_experiment(self.data, checkpoint, output, 7, 0)
-                self.assertEqual(reads, self.data.descriptor['splits']['test'] * 7)
-                self.assertEqual(len(scored), 7)
-                for level in range(7):
-                    result = json.loads((output / f'test_results_degraded_{level}.json').read_text())
-                    self.assertEqual(result['test_samples'], 32)
-                    self.assertEqual(sum(v['support'] for v in result['seen_per_generator'].values()), 20)
-                    self.assertEqual(sum(v['support'] for v in result['unseen_per_generator'].values()), 10)
-                    self.assertEqual(sum(v['support'] for v in result['exploratory'].values()), 2)
-                summary = io.StringIO()
-                with redirect_stdout(summary):
-                    experiment.summarize([output])
-                self.assertIn(experiment.LABELS[method], summary.getvalue())
-                self.assertIn('diffusion_unseen_line_macro_line_recall', summary.getvalue())
-                self.assertIn('midjourneyv6: predicted family share', summary.getvalue())
-                with self.assertRaisesRegex(ValueError, 'Duplicate'):
-                    experiment.summarize([output, output])
-                damaged = dict(ckpt, experiment_digest='bad')
+        from geometry.lorentz import exp_map0, pairwise_dist
+        with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
+            stack.enter_context(redirect_stdout(io.StringIO()))
+            stack.enter_context(redirect_stderr(io.StringIO()))
+            stack.enter_context(patch('torch.cuda.is_available', return_value=False))
+            stack.enter_context(patch('torch.cuda.device_count', return_value=0))
+            stack.enter_context(patch.dict(experiment.RECIPES, ours=(1, 128)))
+            real_args = experiment.ours_args
+            def tiny_args(*args, **kwargs):
+                parsed = real_args(*args, **kwargs)
+                parsed.hyperbolic_dim, parsed.init_depth = 4, 0
+                return parsed
+            stack.enter_context(patch.object(experiment, 'ours_args', side_effect=tiny_args))
+            stack.enter_context(patch.object(train_attribution, 'AttributionCLIP', TinyModel))
+            stack.enter_context(patch('transformers.CLIPImageProcessor.from_pretrained', return_value=PixelProcessor()))
+            stack.enter_context(patch('transformers.CLIPTokenizer.from_pretrained', return_value=TinyTokenizer()))
+            reads = []
+            original = self.data.read_image
+            def read_training(key):
+                self.assertIn(key, self.data.descriptor['splits']['train'] + self.data.descriptor['splits']['val'])
+                self.assertNotIn(self.data.records[key]['generator'], UNSEEN + EXPLORATORY)
+                reads.append(key)
+                return original(key)
+            with patch.object(self.data, 'read_image', side_effect=read_training):
+                checkpoint = experiment.train_experiment(self.data, 'ours', Path(tmp) / 'train', 0)
+            self.assertTrue(reads)
+            ckpt = torch.load(checkpoint, weights_only=False, map_location='cpu')
+            self.assertEqual(len(ckpt['class_names']), 20)
+            self.assertEqual(ckpt['family_names'], list(FAMILY_GROUPS))
+            self.assertEqual(ckpt['experiment_digest'], self.data.digest)
+            self.assertEqual(ckpt['anchor_reduction'], 'mean')
+            stack.enter_context(patch('models.attribution_clip.AttributionCLIP.from_checkpoint', return_value=TinyModel()))
+            loaded = experiment.load_model(self.data, checkpoint, 'cpu')
+            self.assertFalse(loaded[1].training)
+            with patch.object(experiment.torch, 'load', return_value=dict(ckpt, anchor_reduction='max')):
+                legacy = experiment.load_model(self.data, checkpoint, 'cpu')
+            self.assertFalse(legacy[1].training)
+            reads.clear()
+            def read_testing(key):
+                self.assertIn(key, self.data.descriptor['splits']['test'])
+                self.assertNotIn(self.data.records[key]['generator'], self.data.descriptor['seen_classes'])
+                reads.append(key)
+                return original(key)
+            output = Path(tmp) / 'results'
+            with patch.object(self.data, 'read_image', side_effect=read_testing):
+                experiment.evaluate_experiment(self.data, checkpoint, output, 7, 0)
+            test_keys = [key for key in self.data.descriptor['splits']['test']
+                         if self.data.records[key]['generator'] not in self.data.descriptor['seen_classes']]
+            self.assertEqual(reads, test_keys * 7)
+            torch.testing.assert_close(loaded[4], exp_map0(ckpt['family_tangent']))
+            for level in range(7):
+                result = json.loads((output / f'test_results_degraded_{level}.json').read_text())
+                self.assertEqual(result['test_samples'], 12)
+                self.assertEqual(result['test_scope'], 'unseen_and_exploratory')
+                self.assertEqual(result['family_readout'], 'softmax_inverse_geodesic_distance')
+                self.assertFalse(any(key.startswith('seen_') and key != 'seen_classes' for key in result))
+                self.assertEqual(set(result['exploratory']), set(EXPLORATORY))
+                self.assertEqual(sum(v['support'] for v in result['unseen_per_generator'].values()), 10)
+                saved = torch.load(output / result['sample_diagnostics'], weights_only=True)
+                self.assertEqual(saved['sample_keys'], test_keys)
+                self.assertEqual(saved['generator_indices'].tolist(),
+                                 [self.data.descriptor['class_names'].index(self.data.records[key]['generator'])
+                                  for key in saved['sample_keys']])
+                self.assertEqual(saved['model_anchor_names'], self.data.descriptor['seen_classes'])
+                self.assertEqual(saved['top3_model_indices'].shape, (12, 3))
+                self.assertEqual(saved['top3_model_distances'].shape, (12, 3))
+                self.assertEqual(saved['family_probabilities'].shape, (12, 4))
+                for row, key in enumerate(saved['sample_keys']):
+                    name = self.data.records[key]['generator']
+                    expected = next((i for i, group in enumerate(FAMILY_GROUPS.values()) if name in group), -1)
+                    self.assertEqual(saved['target_family_indices'][row].item(), expected)
+                # Recompute distances from image features, independently checking anchor order and top-3 alignment.
+                pixels = torch.cat([PixelProcessor()(images=apply_degradation(original(key), level))['pixel_values']
+                                    for key in saved['sample_keys']])
+                with torch.no_grad():
+                    images, _ = loaded[1].encode_image(pixels)
+                    family_distances = pairwise_dist(images.double(), loaded[4].double(), 1)
+                    model_distances = pairwise_dist(images.double(), loaded[3].double(), 1)
+                torch.testing.assert_close(saved['family_distances'], family_distances)
+                torch.testing.assert_close(saved['family_probabilities'], (1 / family_distances.clamp_min(1e-8)).softmax(1))
+                torch.testing.assert_close(saved['predicted_family_indices'], family_distances.argmin(1))
+                torch.testing.assert_close(saved['top3_model_distances'], model_distances.sort(1).values[:, :3])
+                torch.testing.assert_close(saved['top3_model_distances'], model_distances.gather(1, saved['top3_model_indices']))
+                self.assertEqual(result['exploratory'], experiment.exploratory_assignments(
+                    saved['family_probabilities'], saved['top3_model_indices'][:, 0], saved['generator_indices'], self.data))
+            summary = io.StringIO()
+            with redirect_stdout(summary):
+                experiment.summarize([output])
+            self.assertIn(experiment.LABELS['ours'], summary.getvalue())
+            self.assertIn('diffusion_unseen_line_macro_line_recall', summary.getvalue())
+            self.assertNotIn('seen_model', summary.getvalue())
+            for name in EXPLORATORY:
+                self.assertIn(f'{name}: family assignments (no family accuracy target)', summary.getvalue())
+            self.assertIn('most frequently nearest model:', summary.getvalue())
+            with self.assertRaisesRegex(ValueError, 'Duplicate'):
+                experiment.summarize([output, output])
+            legacy_results = dict(result, family_readout='minimum_exterior_angle')
+            path = Path(tmp) / 'old_results.json'
+            path.write_text(json.dumps(legacy_results))
+            with self.assertRaisesRegex(ValueError, 'geodesic results'):
+                experiment.summarize([path])
+            # Existing angle results must never be silently overwritten.
+            provenance = json.loads((output / 'evaluation.json').read_text())
+            provenance['family_readout'] = 'minimum_exterior_angle'
+            (output / 'evaluation.json').write_text(json.dumps(provenance))
+            with self.assertRaisesRegex(ValueError, 'Refusing'):
+                experiment.evaluate_experiment(self.data, checkpoint, output, 7, 0)
+            for damaged, message in ((dict(ckpt, experiment_digest='bad'), 'experiment_digest'),
+                                     (dict(ckpt, model_name='resnet50'), 'our hierarchy experiment')):
                 torch.save(damaged, Path(tmp) / 'bad.pt')
-                with self.assertRaisesRegex(ValueError, 'experiment_digest'):
+                with self.assertRaisesRegex(ValueError, message):
                     experiment.load_model(self.data, Path(tmp) / 'bad.pt', 'cpu')
+            for method in ('resnet50', 'hifi_net'):
+                with self.assertRaisesRegex(ValueError, 'Invalid method'):
+                    experiment.train_experiment(self.data, method, Path(tmp) / method, 0)
 
     def test_slurm_syntax_and_resources(self):
         for script, gpu, cpus in [('slurm_train_hierarchy_holdout.sh', 2, 16),
-                                   ('slurm_train_hierarchy_baseline.sh', 1, 8),
                                    ('slurm_eval_hierarchy_holdout.sh', 1, 8)]:
             path = experiment.REPO / 'slurm' / script
             subprocess.run(['bash', '-n', str(path)], check=True)
@@ -316,7 +377,6 @@ class HierarchyExperimentTests(unittest.TestCase):
                        IABENCH_DATA=str(root / 'bench root'), IAB_DATA=str(root / 'iab root'),
                        SLURM_JOB_ID='123', CUDA_VISIBLE_DEVICES='3', HYBRID_CAPTURE=str(capture))
             for script, argument, command in [('slurm_train_hierarchy_holdout.sh', 'ours', 'train'),
-                                              ('slurm_train_hierarchy_baseline.sh', 'hifi_net', 'train'),
                                               ('slurm_eval_hierarchy_holdout.sh', str(checkpoint), 'evaluate')]:
                 subprocess.run(['bash', str(experiment.REPO / 'slurm' / script), argument], env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)

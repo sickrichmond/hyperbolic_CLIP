@@ -13,7 +13,7 @@ from data.iabench_dataset import IABenchDataset, manifest_digest
 from data.image_io import retry_image_read
 from training.families import INCREFA_FAMILIES
 
-METHODS = ('ours', 'resnet50', 'hifi_net')
+METHODS = ('ours',)
 IAB_GENERATORS = ('grok3', 'janus-pro', 'infinity')
 NEARBY = ('CompVis@stable-diffusion-v1-4', 'stabilityai@stable-diffusion-2-1', 'stabilityai@sdxl-turbo')
 UNSEEN_LINES = {
@@ -170,7 +170,7 @@ class ExperimentData:
 
 
 class ExperimentView(Dataset):
-    """Raw image source for native baseline adapters, or processed pixels for ours."""
+    """Image views with frozen membership and native CLIP preprocessing."""
     def __init__(self, data, split, processor):
         self.data, self.split, self.processor = data, split, processor
         self.class_names = data.descriptor['class_names' if split == 'test' else 'seen_classes']
@@ -198,4 +198,4 @@ class ExperimentView(Dataset):
         image = retry_image_read(lambda: self._read_image(key))
         image = apply_degradation(image, self.degraded)
         return dict(pixel_values=self.processor(images=image, return_tensors='pt')['pixel_values'][0],
-                    generator=generator, source=source)
+                    generator=generator, source=source, sample_key=key)

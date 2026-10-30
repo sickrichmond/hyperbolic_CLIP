@@ -1,5 +1,5 @@
 #!/bin/bash
-# Submit once per best checkpoint; evaluate all 32 test generators at levels 0..6.
+# Score unseen-family attribution and save sample diagnostics at levels 0..6.
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod

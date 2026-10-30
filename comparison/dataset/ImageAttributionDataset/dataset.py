@@ -114,11 +114,7 @@ def hifi_label_mapping(class_names=None, dataset='iab'):
     0..N-1 index. Drives both the level-4 head size and parent_idx_4 so removing a
     generator (e.g. dalle3) needs no manual edits."""
     names = list(model_class_to_label) if class_names is None else class_names
-    if dataset == 'hybrid':
-        taxonomy = dict(_IABENCH_HIERARCHY,
-                        **{name: _HIFI_HIERARCHY[name] for name in ('grok3', 'janus-pro', 'infinity')})
-    else:
-        taxonomy = _IABENCH_HIERARCHY if dataset == 'iabench' else _HIFI_HIERARCHY
+    taxonomy = _IABENCH_HIERARCHY if dataset == 'iabench' else _HIFI_HIERARCHY
     mapping = []
     for i, name in enumerate(names):
         if name.casefold() == 'real':
