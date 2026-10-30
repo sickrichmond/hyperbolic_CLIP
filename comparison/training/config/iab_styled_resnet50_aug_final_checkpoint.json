@@ -1,0 +1,3 @@
+{
+  "resnet50": "/leonardo_work/EUHPC_D35_189/hyp_fine_tuning/hyperbolic_CLIP_igor/comparison/training/logs_22cls_aug_corruption/default_split/resnet50/_2026-09-14-16-45-19/ckpt_epoch_10.pth"
+}
