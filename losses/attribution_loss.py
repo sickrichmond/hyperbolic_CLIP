@@ -61,8 +61,8 @@ class EntailmentConeLoss(nn.Module):
         The norm penalty is enabled when both lambda_norm and target_norm are positive.
         Positive lambda_anchor separates families when family inputs are provided,
         otherwise classes. This constructor defaults to zero; the CLI defaults to 0.2.
-        The distance threshold is target_norm for classes, or target_norm/2 for
-        families. An explicit geodesic_margin must match the active scope.
+        An explicit geodesic_margin is independent of target_norm. If omitted,
+        the threshold is target_norm for classes, or target_norm/2 for families.
         Family losses use all classes each call; the relative depth loss is tangent-based.
         """
         super().__init__()
@@ -121,9 +121,8 @@ class EntailmentConeLoss(nn.Module):
                     family_of.device != device or
                     bool(((family_of < 0) | (family_of >= len(x_fam))).any())):
                 raise ValueError("family_of must contain one valid family index per class on the image device")
-        geodesic_margin = self.target_norm / (2 if x_fam is not None else 1)
-        if self.geodesic_margin is not None and self.geodesic_margin != geodesic_margin:
-            raise ValueError("geodesic_margin must equal target_norm/2 for families, or target_norm for classes")
+        geodesic_margin = (self.geodesic_margin if self.geodesic_margin is not None else
+                           self.target_norm / (2 if x_fam is not None else 1))
         psi_anc = half_aperture(x_anc, curv=self.curv, min_radius=self.min_radius)
         xi = _pairwise_xi(x_anc, x_img, curv=self.curv).T
         xi_pos = xi.gather(1, labels.unsqueeze(1)).squeeze(1)

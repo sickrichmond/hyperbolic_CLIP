@@ -102,12 +102,15 @@ def test_geodesic_anchor_hinge():
     _, explicit = EntailmentConeLoss(target_norm=4, geodesic_margin=4,
                                     lambda_anchor=1)(images, anchors, labels)
     assert torch.allclose(automatic["loss_anchor"], explicit["loss_anchor"])
-    try:
-        EntailmentConeLoss(target_norm=4, geodesic_margin=3)(images, anchors, labels)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("Accepted geodesic_margin different from target_norm")
+    # The two knobs affect separate terms, including an explicitly disabled z=0.
+    for target in (2., 4., 6.):
+        for margin in (0., 1., 3.):
+            _, stats = EntailmentConeLoss(curv=curv, target_norm=target, geodesic_margin=margin,
+                lambda_anchor=1, lambda_norm=1)(images, anchors, labels)
+            distances = torch.tensor([.5, 2., 1.5], dtype=torch.float64)
+            assert torch.allclose(stats["loss_anchor"], (margin - distances).clamp_min(0).mean())
+            assert torch.allclose(stats["loss_norm"],
+                                  (target - anchors.norm(dim=-1)).clamp_min(0).square().mean())
     for option in ("lambda_anchor", "target_norm", "geodesic_margin"):
         for value in (-1., float("nan"), float("inf")):
             try:

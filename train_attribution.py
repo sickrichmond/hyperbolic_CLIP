@@ -2,8 +2,8 @@
 
 Supports text and free class anchors, image-only training, validation-based
 checkpoint selection, and Poincare diagnostics. The pairwise geodesic anchor
-penalty defaults to weight 0.2 and uses z=target_norm; --lambda_anchor 0 disables it.
-In IABench hierarchy mode it separates families with z=target_norm/2 instead.
+penalty defaults to weight 0.2; --lambda_anchor 0 disables it. Its independent
+geodesic margin z defaults to target_norm, or target_norm/2 for hierarchy families.
 """
 from pathlib import Path
 from time import perf_counter

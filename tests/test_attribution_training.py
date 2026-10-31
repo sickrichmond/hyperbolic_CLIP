@@ -162,8 +162,9 @@ class AttributionTrainingTests(unittest.TestCase):
             self.assertEqual(tied.geodesic_margin, float(target))
         matching = parse_args(base + ["--target_norm", "4", "--geodesic_margin", "4"])
         validate_args(matching)
-        with self.assertRaisesRegex(ValueError, "must equal --target_norm"):
-            validate_args(parse_args(base + ["--target_norm", "4", "--geodesic_margin", "3"]))
+        independent = parse_args(base + ["--target_norm", "4", "--geodesic_margin", "3"])
+        validate_args(independent)
+        self.assertEqual((independent.target_norm, independent.geodesic_margin), (4, 3))
         legacy = parse_args(base + ["--lambda_cosine", "0.5"])
         self.assertEqual(legacy.lambda_anchor, .5)
         for flag in ("--lambda_anchor", "--target_norm", "--geodesic_margin"):
@@ -213,6 +214,9 @@ class AttributionTrainingTests(unittest.TestCase):
               "--lambda_anchor", ".5", "--target_norm", "2.5"], False),
             (["--anchor_init", "image_centroid", "--anchor_norm_range", "1", "2"], False),
             (["--anchor_init", "random", "--require_caption"], True),
+            (["--anchor_init", "random", "--target_norm", "6", "--geodesic_margin", "3",
+              "--lambda_anchor", ".5", "--lambda_norm", ".5", "--train_augment",
+              "--aug_policy", "omnidfa"], True),
         ]
         for options, manifest in cases:
             with self.subTest(options=options), tempfile.TemporaryDirectory() as directory:
@@ -228,7 +232,9 @@ class AttributionTrainingTests(unittest.TestCase):
                 self.assertEqual(checkpoint["anchor_penalty"], "geodesic")
                 self.assertEqual(checkpoint["anchor_scope"], "classes")
                 self.assertEqual(checkpoint["lambda_anchor"], .5 if "--lambda_anchor" in options else .2)
-                self.assertEqual(checkpoint["geodesic_margin"], checkpoint["target_norm"])
+                self.assertEqual(checkpoint["geodesic_margin"],
+                                 3 if "--geodesic_margin" in options else checkpoint["target_norm"])
+                self.assertEqual(checkpoint["anchor_reduction"], "mean")
                 self.assertEqual(checkpoint["lambda_cosine"], 0.)
                 for key in ("anchor_sin_psi", "fixed_psi", "lambda_ce", "ce_tau",
                             "lambda_cover", "aperture_calibration"):

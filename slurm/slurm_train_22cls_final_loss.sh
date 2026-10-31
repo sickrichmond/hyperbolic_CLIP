@@ -8,7 +8,7 @@
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_22cls_final_loss.sh
 #         sbatch --export=ALL,LAMBDA_ANCHOR=0.5,TARGET_NORM=4 slurm/slurm_train_22cls_final_loss.sh
 # Defaults: OPTIMIZER=adamw, LAMBDA_ANCHOR=0.5, TARGET_NORM=4, ANCHOR_INIT=random.
-# The geodesic margin follows TARGET_NORM (z=tau); a conflicting override is rejected.
+# GEODESIC_MARGIN sets z independently; it defaults to TARGET_NORM (tau).
 # Checkpoint names include total NUM_EPOCHS (default 30), not the selected best epoch.
 # CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
 # The trainer rejects concurrent writers and existing augmentation/hierarchy conflicts.
@@ -29,7 +29,7 @@
 set -e
 module load python/3.11.7
 module load cuda/12.6
-source $WORK/hyp_fine_tuning/bin/activate
+source "$WORK/hyp_fine_tuning/bin/activate"
 
 export HF_HOME=$WORK/hyp_fine_tuning/hf_cache
 export TOKENIZERS_PARALLELISM=false
@@ -37,11 +37,12 @@ export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 export IAB_EXCLUDE_GENERATORS=dalle3      # <-- 22-class toggle (whole pipeline)
 
-REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
-DATA=$FAST/datasets/iab_dataset
-CAPS=$WORK/hyp_fine_tuning/iab_captions
-OUT=$WORK/hyp_fine_tuning/checkpoints
-MANIFEST=$WORK/hyp_fine_tuning/split_manifest_22cls.json
+REPO=${REPO:-$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo}
+DATA=${DATA:-$FAST/datasets/iab_dataset}
+CAPS=${CAPS:-$WORK/hyp_fine_tuning/iab_captions}
+OUT=${OUT:-$WORK/hyp_fine_tuning/checkpoints}
+MANIFEST=${MANIFEST:-$WORK/hyp_fine_tuning/split_manifest_22cls.json}
+DIAG_PLOT_DIR=${DIAG_PLOT_DIR:-$WORK/hyp_fine_tuning/viz/final_loss_${SLURM_JOB_ID}}
 
 # AUGMENT=1 applies the selected data.degradations policy to training images.
 # Validation is clean; report the augmentation policy with robustness results.
@@ -76,7 +77,8 @@ done
 
 LAMBDA_TAG=${LAMBDA_ANCHOR//./p}
 MARGIN_TAG=${GEODESIC_MARGIN//./p}
-RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_${ANCHOR_INIT}_${OPTIMIZER}_ep${NUM_EPOCHS}"
+TARGET_TAG=${TARGET_NORM//./p}
+RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_tau${TARGET_TAG}_${ANCHOR_INIT}_${OPTIMIZER}_ep${NUM_EPOCHS}"
 if [ "$AUGMENT" = 1 ]; then
     AUG_FLAG="--train_augment --aug_policy $AUG_POLICY"
     if [ "$AUG_POLICY" = omnidfa ]; then
@@ -89,11 +91,11 @@ else
     CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_vitl14.pt}
 fi
 
-echo "Training with optimizer=$OPTIMIZER, lambda_anchor=$LAMBDA_ANCHOR, geodesic_margin=$GEODESIC_MARGIN, anchor_init=$ANCHOR_INIT"
+echo "Training with optimizer=$OPTIMIZER, lambda_anchor=$LAMBDA_ANCHOR, target_norm=$TARGET_NORM, geodesic_margin=$GEODESIC_MARGIN, anchor_init=$ANCHOR_INIT"
 echo "Training with AUGMENT=$AUGMENT, AUG_POLICY=$AUG_POLICY → $CKPT"
 
-mkdir -p $OUT
-cd $REPO
+mkdir -p "$OUT"
+cd "$REPO"
 
 if [ ! -f "$MANIFEST" ]; then
     echo "ERROR: 22-class manifest not found at $MANIFEST"; exit 1
@@ -103,8 +105,8 @@ echo "Node: $(hostname)"
 echo "Slurm GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
 
 python train_attribution.py \
-    --dataset_path    $DATA \
-    --captions_dir    $CAPS \
+    --dataset_path    "$DATA" \
+    --captions_dir    "$CAPS" \
     --generators      real 4o CogView3_PLUS FLUX KANDINSKY PIXART PLAYGROUND_2_5 \
                       SD1_5 SD2_1 SD3 SD3_5 SDXL gemini grok3 hidream hunyuan \
                       ideogram infinity janus-pro kling mid-5.2 mid-6.0 \
@@ -120,6 +122,7 @@ python train_attribution.py \
     --margin          0.3 \
     --lambda_neg      1.0 \
     --lambda_norm     0.5 \
+    --norm_mode       floor \
     --target_norm     "$TARGET_NORM" \
     --lambda_anchor   "$LAMBDA_ANCHOR" \
     --geodesic_margin "$GEODESIC_MARGIN" \
@@ -130,8 +133,9 @@ python train_attribution.py \
     --lr              3e-4 \
     --weight_decay    0.01 \
     --num_workers     8 \
-    --split_manifest  $MANIFEST \
-    --diag_plot_dir "$WORK/hyp_fine_tuning/viz/final_loss_${SLURM_JOB_ID}" \
+    --seed            42 \
+    --split_manifest  "$MANIFEST" \
+    --diag_plot_dir   "$DIAG_PLOT_DIR" \
     --log_every 10 \
     --lr_schedule cosine \
     --optimizer "$OPTIMIZER" \

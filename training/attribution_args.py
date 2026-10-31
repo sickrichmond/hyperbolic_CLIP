@@ -100,8 +100,8 @@ def parse_args(argv=None, dataset="iab"):
                         "(families in hierarchy mode; default: 0.2; 0 disables). "
                         "--lambda_cosine is a legacy spelling for this new penalty.")
     p.add_argument("--geodesic_margin", type=float, default=None,
-                   help="Anchor distance threshold: --target_norm/2 in hierarchy mode, "
-                        "--target_norm otherwise. Explicit values must match this rule.")
+                   help="Independent anchor geodesic-distance threshold z. If omitted, "
+                        "defaults to --target_norm/2 in hierarchy mode, --target_norm otherwise.")
     p.add_argument("--batch_size",     type=int,   default=256)
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
@@ -166,9 +166,6 @@ def validate_args(args, family_groups=None):
     if not all(math.isfinite(value) and value >= 0 for value in
                (args.lambda_anchor, args.target_norm, args.geodesic_margin)):
         raise ValueError("Anchor weight, norm target and geodesic margin must be finite and non-negative")
-    if args.geodesic_margin != expected_margin:
-        raise ValueError("--geodesic_margin must equal --target_norm/2 in hierarchy mode, "
-                         "or --target_norm otherwise")
     if args.hierarchy != "none":
         if args.dataset != "iabench" and not (args.dataset == "hybrid" and family_groups is not None):
             raise ValueError("--hierarchy increfa is supported only for IABench")

@@ -54,13 +54,15 @@ class FamilyHierarchyTests(unittest.TestCase):
             self.assertEqual(tied.geodesic_margin, float(target) / 2)
         matching = parse_args(base + ["--target_norm", "4", "--geodesic_margin", "2"], dataset="iabench")
         validate_args(matching)
+        independent = parse_args(base + ["--target_norm", "4", "--geodesic_margin", "3"], dataset="iabench")
+        validate_args(independent)
+        self.assertEqual(independent.geodesic_margin, 3)
         cases = [(["--freeze_anchors"], "learnable random"),
                  (["--anchor_init", "text"], "learnable random"),
                  (["--family_init_norm", "0.8", "--min_radius", "0.5"], "valid cones"),
                  (["--family_depth_margin", "1"], "Initial class depth"),
                  (["--lambda_family", "nan"], "finite"),
                  (["--family_depth_margin", "-1"], "non-negative"),
-                 (["--target_norm", "4", "--geodesic_margin", "4"], "hierarchy mode"),
                  (["--curv", "0"], "positive curvature"),
                  (["--anchor_norm_range", "0", "3"], "cone domain"),
                  (["--generators", "unknown"], "no family")]
@@ -121,9 +123,11 @@ class FamilyHierarchyTests(unittest.TestCase):
                     _, explicit = EntailmentConeLoss(curv=curv, lambda_anchor=1,
                         target_norm=4, geodesic_margin=margin)(images, xa, labels, **inputs)
                     self.assertTrue(torch.allclose(explicit["loss_anchor"], expected))
-                    with self.assertRaisesRegex(ValueError, "must equal"):
-                        EntailmentConeLoss(curv=curv, target_norm=4,
-                            geodesic_margin=6 - margin)(images, xa, labels, **inputs)
+                    _, independent = EntailmentConeLoss(curv=curv, target_norm=4,
+                        lambda_anchor=1, geodesic_margin=3)(images, xa, labels, **inputs)
+                    expected_independent = (3 - elementwise_dist(points[:1], points[1:], curv,
+                                                                 eps=1e-5)).clamp_min(0).mean()
+                    self.assertTrue(torch.allclose(independent["loss_anchor"], expected_independent))
 
     def test_depth_and_anchor_gradients_are_separate(self):
         classes = torch.tensor([[2., .0], [1., 1.732]], dtype=torch.float64, requires_grad=True)

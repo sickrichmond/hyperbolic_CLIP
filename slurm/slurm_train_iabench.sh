@@ -5,8 +5,8 @@
 # AUGMENT=1 enables corruption (default) or omnidfa via AUG_POLICY.
 # Augmented checkpoint suffixes name the policy: _corruption / _omnidfa.
 # Geodesic anchor separation: LAMBDA_ANCHOR=0.5, TARGET_NORM=4 by default.
-# z=TARGET_NORM for classes; hierarchy mode uses z=TARGET_NORM/2 for families.
-# Checkpoint names include anchor weight, effective z and total NUM_EPOCHS (default 30).
+# GEODESIC_MARGIN sets z independently; defaults to tau for classes or tau/2 for families.
+# Checkpoint names include anchor weight, z, tau and total NUM_EPOCHS (default 30).
 # CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
 # The trainer rejects concurrent writers and existing augmentation/hierarchy conflicts.
 # Submit: sbatch slurm/slurm_train_iabench.sh
@@ -96,7 +96,8 @@ if [ "$AUGMENT" = 1 ]; then
 fi
 LAMBDA_TAG=${LAMBDA_ANCHOR//./p}
 MARGIN_TAG=${GEODESIC_MARGIN//./p}
-RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_ep${NUM_EPOCHS}"
+TARGET_TAG=${TARGET_NORM//./p}
+RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_tau${TARGET_TAG}_ep${NUM_EPOCHS}"
 CKPT="${CKPT:-$OUT/attribution_iabench_random_${RUN_TAG}${AUG_SUFFIX}${HIERARCHY_SUFFIX}_vitl14.pt}"
 
 mkdir -p "$OUT"
