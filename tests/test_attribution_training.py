@@ -118,6 +118,22 @@ def run_tiny_training(module, directory, options, manifest=False):
 
 
 class AttributionTrainingTests(unittest.TestCase):
+    def test_checkpoint_mode_conflict_fails_before_backbone_loading(self):
+        for dataset in ("iab", "iabench"):
+            with self.subTest(dataset=dataset), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "clean.pt"
+                torch.save({"train_augment": False, "hierarchy": "none"}, output)
+                args = parse_args([
+                    "--dataset_path", "unused", "--output", str(output),
+                    "--train_augment", "--aug_policy", "omnidfa",
+                    *(["--captions_dir", "unused"] if dataset == "iab" else []),
+                ], dataset=dataset)
+                with patch.object(trainer, "AttributionCLIP") as backbone:
+                    with self.assertRaisesRegex(ValueError, "Refusing to overwrite"):
+                        trainer.run_training(args)
+                    backbone.assert_not_called()
+                self.assertFalse(torch.load(output, weights_only=True)["train_augment"])
+
     def test_checkpoint_loss_compatibility(self):
         # Reject incompatible scoring rules before downloading model weights.
         for loss in ("axis", "unknown"):

@@ -2,7 +2,7 @@
 # CINECA Leonardo
 #
 # No captions. AUGMENT=1 enables training degradations; AUG_POLICY selects
-# corruption (default) or omnidfa. Checkpoint names distinguish these modes.
+# corruption (default) or omnidfa. Checkpoint suffixes are _corruption / _omnidfa.
 #
 # Submit: sbatch slurm/slurm_train_22cls_final_loss.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_22cls_final_loss.sh
@@ -11,6 +11,7 @@
 # The geodesic margin follows TARGET_NORM (z=tau); a conflicting override is rejected.
 # Checkpoint names include total NUM_EPOCHS (default 30), not the selected best epoch.
 # CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
+# The trainer rejects concurrent writers and existing augmentation/hierarchy conflicts.
 
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -79,9 +80,9 @@ RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_${ANCHOR_INIT}_${OPTIMIZER}_ep${NUM_
 if [ "$AUGMENT" = 1 ]; then
     AUG_FLAG="--train_augment --aug_policy $AUG_POLICY"
     if [ "$AUG_POLICY" = omnidfa ]; then
-        CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_omniaug_vitl14.pt}
+        CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_omnidfa_vitl14.pt}
     else
-        CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_aug_vitl14.pt}
+        CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_corruption_vitl14.pt}
     fi
 else
     AUG_FLAG=
@@ -89,6 +90,7 @@ else
 fi
 
 echo "Training with optimizer=$OPTIMIZER, lambda_anchor=$LAMBDA_ANCHOR, geodesic_margin=$GEODESIC_MARGIN, anchor_init=$ANCHOR_INIT"
+echo "Training with AUGMENT=$AUGMENT, AUG_POLICY=$AUG_POLICY → $CKPT"
 
 mkdir -p $OUT
 cd $REPO

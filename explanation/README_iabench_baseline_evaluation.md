@@ -109,8 +109,8 @@ sbatch --export=ALL,AUGMENT=1,AUG_POLICY=corruption comparison/training/scripts/
 ```
 
 Both modes share the existing manifest; validation stays clean. HypCLIP saves
-`attribution_iabench_random_aug_vitl14.pt`. ResNet50 saves best/last checkpoints
-under `comparison/training/logs/iabench/resnet50/_aug_TIMESTAMP/`. Clean defaults
+`attribution_iabench_random_anchor0p5_z4_ep30_corruption_vitl14.pt`. ResNet50 saves
+best/last checkpoints under `comparison/training/logs/iabench/resnet50/_aug_TIMESTAMP/`. Clean defaults
 and the original clean checkpoints are preserved. The new ResNet50 flag supports
 our corruption policy; an explicit incompatible `AUG_POLICY` is rejected.
 

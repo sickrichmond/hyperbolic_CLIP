@@ -24,7 +24,7 @@ class IABenchSlurmTests(unittest.TestCase):
             (base / "hyperbolic_CLIP_riccardo").mkdir()
             checkpoints = base / "checkpoints"
             checkpoints.mkdir()
-            checkpoint = checkpoints / "attribution_iabench_random_anchor0p5_z4_ep30_aug_vitl14.pt"
+            checkpoint = checkpoints / "attribution_iabench_random_anchor0p5_z4_ep30_corruption_vitl14.pt"
             manifest = checkpoints / "attribution_iabench_random_vitl14.splits.json"
             checkpoint.touch()
             manifest.touch()
@@ -47,22 +47,29 @@ exec bash "$1"
 """
             train_script = repo / "slurm/slurm_train_iabench.sh"
             for settings, suffix, policy in (({}, "", "corruption"),
-                    ({"AUGMENT": "1"}, "_aug", "corruption"),
+                    ({"AUGMENT": "1"}, "_corruption", "corruption"),
                     ({"AUGMENT": "1", "AUG_POLICY": "omnidfa", "DATA": str(work / "image cache")},
-                     "_omniaug", "omnidfa"),
+                     "_omnidfa", "omnidfa"),
                     ({"HIERARCHY": "increfa"}, "_hierarchy_increfa", "corruption"),
                     ({"HIERARCHY": "increfa", "AUGMENT": "1"},
-                     "_aug_hierarchy_increfa", "corruption"),
+                     "_corruption_hierarchy_increfa", "corruption"),
+                    ({"HIERARCHY": "increfa", "AUGMENT": "1", "AUG_POLICY": "omnidfa"},
+                     "_omnidfa_hierarchy_increfa", "omnidfa"),
                     ({"TARGET_NORM": "2.5", "LAMBDA_ANCHOR": "0.3", "NUM_EPOCHS": "20"},
                      "", "corruption"),
                     ({"HIERARCHY": "increfa", "AUGMENT": "1", "TARGET_NORM": "1.5",
                       "LAMBDA_ANCHOR": "0", "NUM_EPOCHS": "40"},
-                     "_aug_hierarchy_increfa", "corruption"),
+                     "_corruption_hierarchy_increfa", "corruption"),
                     ({"HIERARCHY": "increfa", "TARGET_NORM": "2.1234567"},
                      "_hierarchy_increfa", "corruption"),
                     ({"CKPT": str(checkpoints / "mean checkpoint.pt"),
                       "HIERARCHY": "increfa", "AUGMENT": "1"},
-                     "_aug_hierarchy_increfa", "corruption")):
+                     "_corruption_hierarchy_increfa", "corruption"),
+                    ({"CKPT": str(checkpoints / "clean_mean_vitl14.pt"),
+                      "AUGMENT": "0", "HIERARCHY": "none"}, "", "corruption"),
+                    ({"CKPT": str(checkpoints / "clean_mean_hierarchy_increfa_vitl14.pt"),
+                      "AUGMENT": "0", "HIERARCHY": "increfa"},
+                     "_hierarchy_increfa", "corruption")):
                 with self.subTest(settings=settings):
                     completed = subprocess.run(["bash", "-c", stub, "_", str(train_script)],
                                    env=dict(env, **settings), check=True, capture_output=True, text=True)
@@ -166,13 +173,13 @@ exec bash "$1"
             for key in ("CKPT", "AUGMENT", "AUG_POLICY", "OPTIMIZER", "ANCHOR_INIT",
                         "LAMBDA_ANCHOR", "GEODESIC_MARGIN", "TARGET_NORM", "NUM_EPOCHS"):
                 env.pop(key, None)
-            for settings, suffix in (({}, ""), ({"AUGMENT": "1"}, "_aug"),
-                    ({"AUGMENT": "1", "AUG_POLICY": "omnidfa"}, "_omniaug"),
+            for settings, suffix in (({}, ""), ({"AUGMENT": "1"}, "_corruption"),
+                    ({"AUGMENT": "1", "AUG_POLICY": "omnidfa"}, "_omnidfa"),
                     ({"LAMBDA_ANCHOR": "0.2", "TARGET_NORM": "3", "NUM_EPOCHS": "20"}, ""),
                     ({"CKPT": str(base / "mean checkpoint.pt")}, ""),
-                    ({"CKPT": str(base / "mean aug checkpoint.pt"), "AUGMENT": "1"}, "_aug"),
+                    ({"CKPT": str(base / "mean aug checkpoint.pt"), "AUGMENT": "1"}, "_corruption"),
                     ({"CKPT": str(base / "mean omni checkpoint.pt"), "AUGMENT": "1",
-                      "AUG_POLICY": "omnidfa"}, "_omniaug")):
+                      "AUG_POLICY": "omnidfa"}, "_omnidfa")):
                 with self.subTest(settings=settings):
                     subprocess.run(["bash", "-c", stub, "_", str(script)],
                         env=dict(env, **settings), check=True, capture_output=True, text=True)
@@ -181,6 +188,8 @@ exec bash "$1"
                     args = parse_args(argv[1:])
                     validate_args(args)
                     self.assertEqual(args.num_epochs, int(settings.get("NUM_EPOCHS", 30)))
+                    self.assertEqual(args.train_augment, settings.get("AUGMENT") == "1")
+                    self.assertEqual(args.aug_policy, settings.get("AUG_POLICY", "corruption"))
                     weight = settings.get("LAMBDA_ANCHOR", "0.5").replace(".", "p")
                     margin = settings.get("TARGET_NORM", "4").replace(".", "p")
                     if "CKPT" in settings:

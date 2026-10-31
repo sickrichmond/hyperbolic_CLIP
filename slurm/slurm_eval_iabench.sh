@@ -1,7 +1,7 @@
 #!/bin/bash
 # CINECA Leonardo — IABench test evaluation through the comparison harness.
 # Levels 0..6 match ImageAttributionBench: clean, DS0.5/0.25, JPEG65/30, Blur3/5.
-# Defaults to the augmented checkpoint; CKPT and LOGDIR can select another run.
+# Defaults to the corruption checkpoint; CKPT and LOGDIR can select another run.
 # SPLIT_MANIFEST must match the selected checkpoint's digest.
 # Submit: sbatch slurm/slurm_eval_iabench.sh
 
@@ -31,7 +31,7 @@ export HF_DATASETS_OFFLINE=1
 
 REPO="$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo"
 DATA="${DATA:-$SCRATCH/datasets/IABench_images}"
-CKPT="${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_iabench_random_anchor0p5_z4_ep30_aug_vitl14.pt}"
+CKPT="${CKPT:-$WORK/hyp_fine_tuning/checkpoints/attribution_iabench_random_anchor0p5_z4_ep30_corruption_vitl14.pt}"
 SPLIT_MANIFEST="${SPLIT_MANIFEST:-$WORK/hyp_fine_tuning/checkpoints/attribution_iabench_random_vitl14.splits.json}"
 LOGDIR="${LOGDIR:-$WORK/outputs/hypclip_iabench_${SLURM_JOB_ID}}"
 NUM_WORKERS="${NUM_WORKERS:-8}"

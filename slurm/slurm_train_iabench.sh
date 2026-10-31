@@ -3,10 +3,12 @@
 # All generator labels are discovered; the trainer creates/reuses an 80/10/10
 # manifest shared by clean and augmented training. Validation stays clean.
 # AUGMENT=1 enables corruption (default) or omnidfa via AUG_POLICY.
+# Augmented checkpoint suffixes name the policy: _corruption / _omnidfa.
 # Geodesic anchor separation: LAMBDA_ANCHOR=0.5, TARGET_NORM=4 by default.
 # z=TARGET_NORM for classes; hierarchy mode uses z=TARGET_NORM/2 for families.
 # Checkpoint names include anchor weight, effective z and total NUM_EPOCHS (default 30).
 # CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
+# The trainer rejects concurrent writers and existing augmentation/hierarchy conflicts.
 # Submit: sbatch slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1 slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_iabench.sh
@@ -90,11 +92,7 @@ AUG_FLAGS=()
 AUG_SUFFIX=
 if [ "$AUGMENT" = 1 ]; then
     AUG_FLAGS=(--train_augment --aug_policy "$AUG_POLICY")
-    if [ "$AUG_POLICY" = omnidfa ]; then
-        AUG_SUFFIX=_omniaug
-    else
-        AUG_SUFFIX=_aug
-    fi
+    AUG_SUFFIX="_${AUG_POLICY}"
 fi
 LAMBDA_TAG=${LAMBDA_ANCHOR//./p}
 MARGIN_TAG=${GEODESIC_MARGIN//./p}

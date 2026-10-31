@@ -15,7 +15,7 @@ from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from checkpoint_io import atomic_torch_save
+from checkpoint_io import atomic_torch_save, attribution_checkpoint_output
 from data.iab_clip_dataset import IABCLIPDataset
 from geometry.lorentz import exp_map0
 from models.attribution_clip import AttributionCLIP
@@ -81,6 +81,13 @@ def build_iab_datasets(args):
 def run_training(args, datasets=None, checkpoint_metadata=None, plot_each_epoch=True, family_groups=None):
     """Train on supplied train/validation views; optional family groups are experiment-local."""
     validate_args(args, family_groups)
+    with attribution_checkpoint_output(
+            args.output, train_augment=args.train_augment,
+            aug_policy=args.aug_policy, hierarchy=args.hierarchy):
+        return _run_training(args, datasets, checkpoint_metadata, plot_each_epoch, family_groups)
+
+
+def _run_training(args, datasets, checkpoint_metadata, plot_each_epoch, family_groups):
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(args.seed)
     print(f"Seed: {args.seed}")
