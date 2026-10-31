@@ -11,11 +11,13 @@ from data.degradations import LEVEL_LABELS
 from data.hierarchy_experiment import (
     ExperimentData, METHODS, prepare_experiment, write_json,
 )
+from losses.attribution_loss import _pairwise_xi
 from training.families import increfa_mapping
 
 REPO = Path(__file__).resolve().parents[2]
 RECIPES = dict(ours=(30, 256))
 LABELS = dict(ours='ours (hierarchy)')
+FAMILY_READOUTS = dict(geodesic='softmax_inverse_geodesic_distance', cone='minimum_exterior_angle')
 
 
 def checkpoint_metadata(data):
@@ -217,7 +219,8 @@ def evaluate_experiment(data, checkpoint, output_dir, batch_size=8, workers=8):
                       unseen_classes=desc['unseen_classes'], exploratory_classes=desc['exploratory_classes'],
                       nearby_diffusion=desc['nearby_diffusion'], unseen_lines=desc['unseen_lines'],
                       source_digests=desc['source_digests'], source_manifest_digests=desc['source_manifest_digests'],
-                      family_readout='softmax_inverse_geodesic_distance', inverse_distance_epsilon=1e-8,
+                      family_readout=FAMILY_READOUTS['geodesic'], inverse_distance_epsilon=1e-8,
+                      compared_family_readouts=FAMILY_READOUTS,
                       model_anchor_readout='geodesic_distance', metrics_scope='scored_unseen',
                       routing=desc['routing'], train_augment=False, test_samples=len(dataset),
                       test_scope='unseen_and_exploratory')
@@ -229,11 +232,15 @@ def evaluate_experiment(data, checkpoint, output_dir, batch_size=8, workers=8):
         loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, num_workers=workers,
                                              shuffle=False, drop_last=False)
         distances_all, families_all, labels_all, top_distances, top_indices, sample_keys = [], [], [], [], [], []
+        cone_angles_all = []
         for batch in tqdm(loader, desc=f'{LABELS[method]} {LEVEL_LABELS[level]}'):
             images, _ = model.encode_image(batch['pixel_values'].to(device))
             # Float64 avoids cancellation near coincident Lorentz points.
             distances = pairwise_dist(images.double(), families.double(), config['curv'])
             probabilities = family_probabilities(distances)
+            cone_angles = _pairwise_xi(families.double(), images.double(), config['curv']).T
+            if not torch.isfinite(cone_angles).all():
+                raise ValueError('Invalid family cone angles')
             model_distances = pairwise_dist(images.double(), anchors.double(), config['curv'])
             if not torch.isfinite(model_distances).all():
                 raise ValueError('Invalid model-anchor geodesic distances')
@@ -241,6 +248,7 @@ def evaluate_experiment(data, checkpoint, output_dir, batch_size=8, workers=8):
             labels_all.append(torch.tensor([desc['class_names'].index(name) for name in batch['generator']]))
             distances_all.append(distances.cpu())
             families_all.append(probabilities.cpu())
+            cone_angles_all.append(cone_angles.cpu())
             top_distances.append(nearest.values.cpu())
             top_indices.append(nearest.indices.cpu())
             sample_keys.extend(batch['sample_key'])
@@ -248,8 +256,15 @@ def evaluate_experiment(data, checkpoint, output_dir, batch_size=8, workers=8):
             raise ValueError('Evaluation must retain every unseen and exploratory test row in order')
         labels, probabilities = torch.cat(labels_all), torch.cat(families_all)
         nearest_models = torch.cat(top_indices)
+        cone_angles = torch.cat(cone_angles_all)
+        cone_probabilities = (-cone_angles).softmax(1)
         metrics = prediction_metrics(probabilities, labels, data)
         exploratory = exploratory_assignments(probabilities, nearest_models[:, 0], labels, data)
+        cone_results = dict(
+            family_readout=FAMILY_READOUTS['cone'],
+            exploratory=exploratory_assignments(cone_probabilities, nearest_models[:, 0], labels, data),
+            **prediction_metrics(cone_probabilities, labels, data),
+        )
         diagnostics_path = output / f'sample_diagnostics_degraded_{level}.pt'
         atomic_torch_save(dict(
             provenance, level=level, degradation=LEVEL_LABELS[level], sample_keys=sample_keys,
@@ -257,17 +272,21 @@ def evaluate_experiment(data, checkpoint, output_dir, batch_size=8, workers=8):
             target_family_indices=torch.tensor([target_families.get(desc['class_names'][i], -1) for i in labels.tolist()]),
             predicted_family_indices=probabilities.argmax(1),
             family_distances=torch.cat(distances_all), family_probabilities=probabilities,
+            cone_family_angles=cone_angles, cone_family_probabilities=cone_probabilities,
+            cone_predicted_family_indices=cone_angles.argmin(1),
             model_anchor_names=desc['seen_classes'],
             model_anchor_family_indices=torch.tensor(increfa_mapping(desc['seen_classes'], desc['family_groups'])[1]),
             top3_model_indices=nearest_models, top3_model_distances=torch.cat(top_distances),
         ), diagnostics_path)
         result = dict(provenance, level=level, degradation=LEVEL_LABELS[level],
                       sample_diagnostics=diagnostics_path.name,
-                      exploratory=exploratory, **metrics)
+                      exploratory=exploratory, cone=cone_results, **metrics)
         write_json(output / f'test_results_degraded_{level}.json', result)
         (output / f'test_results_degraded_{level}.txt').write_text(
             '\n'.join(f'{key}: {json.dumps(value, allow_nan=False)}' for key, value in result.items()) + '\n')
-        print(f"{LEVEL_LABELS[level]}: unseen family BA={result['unseen_family_balanced_accuracy']:.3%}", flush=True)
+        for rule, scores in (('geodesic', result), ('cone', cone_results)):
+            print(f"{LEVEL_LABELS[level]} {rule}: unseen family accuracy={scores['unseen_family_accuracy']:.3%}, "
+                  f"balanced accuracy={scores['unseen_family_balanced_accuracy']:.3%}", flush=True)
 
 
 def summarize(paths):
@@ -283,37 +302,42 @@ def summarize(paths):
                 raise ValueError('Cannot compare different experiments')
             digest = result['experiment_digest']
             if (result.get('method') != 'ours'
-                    or result.get('family_readout') != 'softmax_inverse_geodesic_distance'
+                    or result.get('family_readout') != FAMILY_READOUTS['geodesic']
                     or result.get('metrics_scope') != 'scored_unseen'
                     or result.get('test_scope') != 'unseen_and_exploratory'):
                 raise ValueError('Expected unseen-only geodesic results from our hierarchy model')
-            key = (result['method'], result['level'])
+            key = ('geodesic', result['level'])
             if key in records:
                 raise ValueError(f'Duplicate method/level {key}')
             records[key] = result
-    metrics = ('unseen_family_balanced_accuracy',
+            if 'cone' in result:
+                if result['cone'].get('family_readout') != FAMILY_READOUTS['cone']:
+                    raise ValueError('Expected minimum-exterior-angle cone results')
+                records['cone', result['level']] = result['cone']
+    metrics = ('unseen_family_accuracy', 'unseen_family_balanced_accuracy',
                'unseen_family_macro_generator_recall', 'diffusion_nearby_macro_recall',
                'diffusion_unseen_line_macro_generator_recall', 'diffusion_unseen_line_macro_line_recall')
+    print(f"{LABELS['ours']}: family decision rules")
     for metric in metrics:
         print('\n' + metric + ' (%)')
-        print(f"{'Method':<18}" + ''.join(f'{LEVEL_LABELS[i]:>10}' for i in range(7)))
-        for method in METHODS:
-            if any(m == method for m, _ in records):
-                print(f'{LABELS[method]:<18}' + ''.join(
-                    f'{records[method, i][metric] * 100:10.2f}' if (method, i) in records else f"{'missing':>10}"
-                    for i in range(7)))
+        print(f"{'Rule':<18}" + ''.join(f'{LEVEL_LABELS[i]:>10}' for i in range(7)))
+        for rule in FAMILY_READOUTS:
+            print(f'{rule:<18}' + ''.join(
+                f'{records[rule, i][metric] * 100:10.2f}' if (rule, i) in records else f"{'missing':>10}"
+                for i in range(7)))
     for name in next(iter(records.values()))['exploratory_classes']:
         print(f'\n{name}: family assignments (no family accuracy target)')
-        for level in range(7):
-            result = records.get(('ours', level))
-            if result is None:
-                print(f'{LEVEL_LABELS[level]}: missing')
-                continue
-            stats = result['exploratory'][name]
-            shares = ', '.join(f'{family} {share:.1%}'
-                               for family, share in stats['family_assignment_proportions'].items())
-            print(f"{LEVEL_LABELS[level]}: {shares}; most frequently nearest model: "
-                  f"{stats['most_frequent_nearest_model']} ({stats['most_frequent_nearest_model_share']:.1%})")
+        for rule in FAMILY_READOUTS:
+            for level in range(7):
+                result = records.get((rule, level))
+                if result is None:
+                    print(f'{rule} {LEVEL_LABELS[level]}: missing')
+                    continue
+                stats = result['exploratory'][name]
+                shares = ', '.join(f'{family} {share:.1%}'
+                                   for family, share in stats['family_assignment_proportions'].items())
+                print(f"{rule} {LEVEL_LABELS[level]}: {shares}; most frequently nearest model: "
+                      f"{stats['most_frequent_nearest_model']} ({stats['most_frequent_nearest_model_share']:.1%})")
 
 
 def main(argv=None):

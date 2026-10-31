@@ -170,6 +170,7 @@ class HierarchyExperimentTests(unittest.TestCase):
         labels, scores = torch.arange(32), torch.zeros(32, 4)
         scores[:, 3] = 1  # Always diffusion: perfect diffusion recall, poor cross-family attribution.
         result = experiment.prediction_metrics(scores, labels, self.data)
+        self.assertAlmostEqual(result['unseen_family_accuracy'], .8)
         self.assertAlmostEqual(result['unseen_family_balanced_accuracy'], 1 / 3)
         self.assertAlmostEqual(result['unseen_family_macro_generator_recall'], .8)
         self.assertEqual(result['diffusion_nearby_macro_recall'], 1)
@@ -177,6 +178,12 @@ class HierarchyExperimentTests(unittest.TestCase):
         self.assertEqual(sum(map(sum, result['unseen_family_confusion_matrix'])), 10)
         self.assertEqual(len(result['unseen_generator_family_confusion_matrix']), 10)
         self.assertFalse(any(key.startswith('seen_') or key == 'exploratory' for key in result))
+        extra_labels = torch.tensor([desc['class_names'].index('StyleGAN-XL')] * 9)
+        imbalanced = experiment.prediction_metrics(
+            torch.cat((scores, scores[extra_labels])), torch.cat((labels, extra_labels)), self.data)
+        self.assertAlmostEqual(imbalanced['unseen_family_accuracy'], 8 / 19)
+        self.assertAlmostEqual(imbalanced['unseen_family_balanced_accuracy'], 1 / 3)
+        self.assertAlmostEqual(imbalanced['unseen_family_macro_generator_recall'], .8)
         unseen = torch.tensor([name in desc['unseen_classes'] for name in desc['class_names']])
         scores[~unseen] = torch.tensor([1., 0., 0., 0.])
         self.assertEqual(result, experiment.prediction_metrics(scores, labels, self.data))
@@ -190,6 +197,17 @@ class HierarchyExperimentTests(unittest.TestCase):
         result = experiment.prediction_metrics(scores, labels, self.data)
         self.assertAlmostEqual(result['diffusion_unseen_line_macro_generator_recall'], .2)
         self.assertAlmostEqual(result['diffusion_unseen_line_macro_line_recall'], .125)
+
+    def test_geodesic_and_cone_rules_can_disagree(self):
+        from geometry.lorentz import exp_map0, pairwise_dist, oxy_angle
+        images = exp_map0(torch.tensor([[3., 0.]], dtype=torch.float64))
+        anchors = exp_map0(torch.tensor([[1., 0.], [3., .1], [-1., 0.], [0., -1.]], dtype=torch.float64))
+        probabilities = experiment.family_probabilities(pairwise_dist(images, anchors))
+        angles = experiment._pairwise_xi(anchors, images, 1).T
+        expected = torch.stack([oxy_angle(anchor.expand_as(images), images) for anchor in anchors], dim=1)
+        torch.testing.assert_close(angles, expected)
+        self.assertEqual(probabilities.argmax(1).item(), 1)
+        self.assertEqual((-angles).softmax(1).argmax(1).item(), 0)
 
     def test_selected_recipes(self):
         args = experiment.ours_args(self.data, Path('/tmp/unused'), 0)
@@ -229,7 +247,7 @@ class HierarchyExperimentTests(unittest.TestCase):
 
     def test_training_restore_and_all_levels(self):
         import train_attribution
-        from geometry.lorentz import exp_map0, pairwise_dist
+        from geometry.lorentz import exp_map0, pairwise_dist, oxy_angle
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             stack.enter_context(redirect_stdout(io.StringIO()))
             stack.enter_context(redirect_stderr(io.StringIO()))
@@ -273,8 +291,10 @@ class HierarchyExperimentTests(unittest.TestCase):
                 reads.append(key)
                 return original(key)
             output = Path(tmp) / 'results'
-            with patch.object(self.data, 'read_image', side_effect=read_testing):
+            with patch.object(self.data, 'read_image', side_effect=read_testing), \
+                    patch.object(loaded[1], 'encode_image', wraps=loaded[1].encode_image) as encode:
                 experiment.evaluate_experiment(self.data, checkpoint, output, 7, 0)
+                self.assertEqual(encode.call_count, 14)  # Two batches per level, shared by both rules.
             test_keys = [key for key in self.data.descriptor['splits']['test']
                          if self.data.records[key]['generator'] not in self.data.descriptor['seen_classes']]
             self.assertEqual(reads, test_keys * 7)
@@ -284,6 +304,8 @@ class HierarchyExperimentTests(unittest.TestCase):
                 self.assertEqual(result['test_samples'], 12)
                 self.assertEqual(result['test_scope'], 'unseen_and_exploratory')
                 self.assertEqual(result['family_readout'], 'softmax_inverse_geodesic_distance')
+                self.assertEqual(result['compared_family_readouts'], experiment.FAMILY_READOUTS)
+                self.assertEqual(result['cone']['family_readout'], 'minimum_exterior_angle')
                 self.assertFalse(any(key.startswith('seen_') and key != 'seen_classes' for key in result))
                 self.assertEqual(set(result['exploratory']), set(EXPLORATORY))
                 self.assertEqual(sum(v['support'] for v in result['unseen_per_generator'].values()), 10)
@@ -307,17 +329,31 @@ class HierarchyExperimentTests(unittest.TestCase):
                     images, _ = loaded[1].encode_image(pixels)
                     family_distances = pairwise_dist(images.double(), loaded[4].double(), 1)
                     model_distances = pairwise_dist(images.double(), loaded[3].double(), 1)
+                    cone_angles = torch.stack([oxy_angle(anchor.expand_as(images.double()), images.double())
+                                               for anchor in loaded[4].double()], dim=1)
                 torch.testing.assert_close(saved['family_distances'], family_distances)
                 torch.testing.assert_close(saved['family_probabilities'], (1 / family_distances.clamp_min(1e-8)).softmax(1))
                 torch.testing.assert_close(saved['predicted_family_indices'], family_distances.argmin(1))
+                torch.testing.assert_close(saved['cone_family_angles'], cone_angles)
+                torch.testing.assert_close(saved['cone_family_probabilities'], (-cone_angles).softmax(1))
+                torch.testing.assert_close(saved['cone_predicted_family_indices'], cone_angles.argmin(1))
+                cone_metrics = experiment.prediction_metrics((-cone_angles).softmax(1), saved['generator_indices'], self.data)
+                for metric, value in cone_metrics.items():
+                    self.assertEqual(result['cone'][metric], value)
                 torch.testing.assert_close(saved['top3_model_distances'], model_distances.sort(1).values[:, :3])
                 torch.testing.assert_close(saved['top3_model_distances'], model_distances.gather(1, saved['top3_model_indices']))
                 self.assertEqual(result['exploratory'], experiment.exploratory_assignments(
                     saved['family_probabilities'], saved['top3_model_indices'][:, 0], saved['generator_indices'], self.data))
+                self.assertEqual(result['cone']['exploratory'], experiment.exploratory_assignments(
+                    saved['cone_family_probabilities'], saved['top3_model_indices'][:, 0], saved['generator_indices'], self.data))
             summary = io.StringIO()
             with redirect_stdout(summary):
                 experiment.summarize([output])
             self.assertIn(experiment.LABELS['ours'], summary.getvalue())
+            self.assertIn('unseen_family_accuracy (%)', summary.getvalue())
+            self.assertIn('unseen_family_balanced_accuracy (%)', summary.getvalue())
+            self.assertIn('geodesic', summary.getvalue())
+            self.assertIn('cone', summary.getvalue())
             self.assertIn('diffusion_unseen_line_macro_line_recall', summary.getvalue())
             self.assertNotIn('seen_model', summary.getvalue())
             for name in EXPLORATORY:
@@ -325,14 +361,25 @@ class HierarchyExperimentTests(unittest.TestCase):
             self.assertIn('most frequently nearest model:', summary.getvalue())
             with self.assertRaisesRegex(ValueError, 'Duplicate'):
                 experiment.summarize([output, output])
+            # Existing geodesic-only files can expose overall accuracy without rerunning CLIP.
+            geodesic_only = dict(result)
+            geodesic_only.pop('cone')
+            geodesic_only.pop('compared_family_readouts')
+            path = Path(tmp) / 'geodesic_only.json'
+            path.write_text(json.dumps(geodesic_only))
+            summary = io.StringIO()
+            with redirect_stdout(summary):
+                experiment.summarize([path])
+            self.assertIn('unseen_family_accuracy (%)', summary.getvalue())
+            self.assertIn('cone clean: missing', summary.getvalue())
             legacy_results = dict(result, family_readout='minimum_exterior_angle')
             path = Path(tmp) / 'old_results.json'
             path.write_text(json.dumps(legacy_results))
             with self.assertRaisesRegex(ValueError, 'geodesic results'):
                 experiment.summarize([path])
-            # Existing angle results must never be silently overwritten.
+            # Existing geodesic-only results must never be silently overwritten.
             provenance = json.loads((output / 'evaluation.json').read_text())
-            provenance['family_readout'] = 'minimum_exterior_angle'
+            provenance.pop('compared_family_readouts')
             (output / 'evaluation.json').write_text(json.dumps(provenance))
             with self.assertRaisesRegex(ValueError, 'Refusing'):
                 experiment.evaluate_experiment(self.data, checkpoint, output, 7, 0)
