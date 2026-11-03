@@ -13,7 +13,7 @@ class BaselineLauncherTests(unittest.TestCase):
         repo = Path(__file__).resolve().parents[1]
         scripts = sorted(path for path in (repo / 'comparison/training/scripts').glob('cineca_*_iabench.sh')
                          if '_test_' not in path.name)
-        self.assertEqual(len(scripts), 12)
+        self.assertEqual(len(scripts), 13)
         with tempfile.TemporaryDirectory(prefix='baseline slurm ') as directory:
             work = Path(directory)
             (work / 'hyp_fine_tuning/bin').mkdir(parents=True)
@@ -24,7 +24,7 @@ class BaselineLauncherTests(unittest.TestCase):
             env = dict(os.environ, WORK=str(work), SCRATCH=str(work / 'scratch'), REPO=str(repo),
                        TEST_PYTHON=sys.executable, CAPTURE=str(capture))
             for key in ('DATA', 'SPLIT_MANIFEST', 'NUM_WORKERS', 'LOGDIR', 'RESUME_CHECKPOINT', 'STAGE_ONE_CHECKPOINT',
-                        'AUGMENT', 'AUG_POLICY'):
+                        'AUGMENT', 'AUG_POLICY', 'BATCH_SIZE'):
                 env.pop(key, None)
             stub = r'''
 module() { :; }
@@ -60,9 +60,10 @@ exec bash "$@"
                             work / 'hyp_fine_tuning/checkpoints/attribution_iabench_random_vitl14.splits.json')))
                         self.assertEqual(flags['--num_workers'], overrides.get('NUM_WORKERS', '2' if 'defl' in script.name else '8'))
                         self.assertEqual(flags['--log_dir'], overrides.get('LOGDIR', str(repo / 'comparison/training/logs')))
-                        self.assertEqual(flags['--batch_size'], '8' if any(m in script.name for m in ('defl', 'hifi_net')) else '32')
+                        self.assertEqual(flags['--batch_size'], '144' if 'omnidfa' in script.name else
+                                         '8' if any(m in script.name for m in ('defl', 'hifi_net')) else '32')
                         method = script.name.removeprefix('cineca_').removesuffix('_train_iabench.sh')
-                        epochs = '30' if method in ('lida', 'defake', 'pose') else '20' if method == 'patch' else '10'
+                        epochs = '30' if method in ('lida', 'defake', 'pose') else '20' if method in ('patch', 'omnidfa') else '10'
                         self.assertEqual(flags['--n_epoch'], epochs)
                         if overrides:
                             self.assertEqual(flags['--resume_checkpoint'], str(checkpoint))
@@ -95,6 +96,43 @@ exec bash "$@"
                                         capture_output=True, text=True)
                 self.assertEqual(failed.returncode, 2)
                 self.assertFalse(capture.exists())
+
+    def test_omnidfa_iab_launchers(self):
+        repo = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory(prefix='omnidfa launch ') as directory:
+            work = Path(directory)
+            (work / 'hyp_fine_tuning/bin').mkdir(parents=True)
+            (work / 'hyp_fine_tuning/bin/activate').touch()
+            checkpoint = work / 'checkpoint.pth'
+            checkpoint.touch()
+            capture = work / 'command.json'
+            env = dict(os.environ, WORK=str(work), FAST=str(work / 'fast'), REPO=str(repo),
+                       TEST_PYTHON=sys.executable, CAPTURE=str(capture), BATCH_SIZE='72',
+                       NUM_WORKERS='3', LOGDIR=str(work / 'logs'), RESUME_CHECKPOINT=str(checkpoint))
+            env.pop('DATA', None)
+            stub = r'''
+module() { :; }
+python() {
+    "$TEST_PYTHON" -c 'import json, os, sys; from pathlib import Path; Path(os.environ["CAPTURE"]).write_text(json.dumps({"argv": sys.argv[1:], "exclude": os.environ.get("IAB_EXCLUDE_GENERATORS")}))' "$@"
+}
+export -f module python
+exec bash "$@"
+'''
+            for name, module in (('cineca_omnidfa_train_22cls.sh', 'train'), ('cineca_omnidfa_test.sh', 'test')):
+                script = repo / 'comparison/training/scripts' / name
+                subprocess.run(['bash', '-n', str(script)], check=True)
+                command = ['bash', '-c', stub, '_', str(script)]
+                if module == 'test':
+                    command.append(str(checkpoint))
+                subprocess.run(command, env=env, check=True, capture_output=True)
+                captured = json.loads(capture.read_text())
+                argv = captured['argv']
+                self.assertEqual(argv[:2], ['-m', f'comparison.training.{module}'])
+                self.assertEqual(captured['exclude'], 'dalle3')
+                self.assertEqual(argv[argv.index('--root_dir') + 1], str(work / 'fast/datasets/iab_dataset'))
+                self.assertEqual(argv[argv.index('--batch_size') + 1], '72')
+                self.assertEqual(argv[argv.index('--resume_checkpoint') + 1], str(checkpoint))
+            subprocess.run(['bash', '-n', str(repo / 'comparison/training/scripts/prefetch_omnidfa.sh')], check=True)
 
 
 if __name__ == '__main__':

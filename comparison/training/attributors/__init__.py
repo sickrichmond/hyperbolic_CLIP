@@ -28,6 +28,7 @@ _ATTRIBUTOR_MODULES = [
     "attributor_lida",
     "attributor_defake",
     "attributor_pose",
+    "attributor_omnidfa",
 ]
 for _m in _ATTRIBUTOR_MODULES:
     try:

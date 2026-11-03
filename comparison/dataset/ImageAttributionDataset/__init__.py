@@ -32,6 +32,7 @@ _DATASET_MODULES = [
     "dataset_lida",
     "dataset_defake",
     "dataset_pose",
+    "dataset_omnidfa",
 ]
 for _m in _DATASET_MODULES:
     try:

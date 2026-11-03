@@ -1,0 +1,14 @@
+model_name: omnidfa
+pretrained: true
+manualSeed: 42
+optimizer:
+  type: adamw
+  adamw:
+    lr: 0.00002
+    weight_decay: 0.01
+lr_scheduler: omnidfa
+warmup_epochs: 2
+start_epoch: 1
+nEpochs: 20
+precision: bfloat16
+metric_scoring: balanced_accuracy

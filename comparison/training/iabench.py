@@ -115,7 +115,7 @@ def prepare_iabench_test(root, split_manifest, checkpoint):
         raise ValueError("IABench manifest must contain exactly one real class, first")
     method = checkpoint.get('model_name')
     if method not in ('resnet50', 'dct', 'hifi_net', 'defl', 'dna', 'repmix', 'patch', 'ucf',
-                      'lida', 'defake', 'pose'):
+                      'lida', 'defake', 'pose', 'omnidfa'):
         raise ValueError(f"Unsupported IABench baseline: {method!r}")
     expected = {
         'dataset': 'iabench', 'class_names': names, 'num_classes': len(names),
@@ -130,6 +130,9 @@ def prepare_iabench_test(root, split_manifest, checkpoint):
         expected['hierarchy_mapping'] = hifi_label_mapping(names, dataset='iabench')
         expected['hierarchy_sizes'] = [2, 4, 7, len(names)]
     validate_checkpoint_metadata(checkpoint, expected)
+    if method == 'omnidfa':
+        from comparison.training.omnidfa import validate_omnidfa_checkpoint
+        validate_omnidfa_checkpoint(checkpoint)
     config = checkpoint.get('training_config')
     if not isinstance(config, dict):
         raise ValueError("IABench checkpoint requires its saved training_config")

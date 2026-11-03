@@ -52,7 +52,7 @@ def create_test_logger(config, args, use_semantic_split=False):
 
 def choose_metric(config):
     metric = config.get('metric_scoring', 'auc')
-    if metric not in ['auc', 'acc', 'ap']:
+    if metric not in ['auc', 'acc', 'ap', 'balanced_accuracy']:
         raise NotImplementedError(f"Metric {metric} not implemented")
     return metric
 
@@ -78,6 +78,10 @@ def main(argv=None):
             raise ValueError("--split_manifest is supported only for IABench")
         with open(args.config, 'r') as f:
             config = yaml.safe_load(f)
+        if config['model_name'] == 'omnidfa':
+            from comparison.training.omnidfa import prepare_omnidfa_iab_test
+            checkpoint = torch.load(args.resume_checkpoint, map_location='cpu', weights_only=False)
+            config = prepare_omnidfa_iab_test(checkpoint, args)
 
     config['log_dir'] = args.log_dir
 
@@ -90,7 +94,10 @@ def main(argv=None):
     logger, log_dir = create_test_logger(config, args, use_semantic_split=args.use_semantic_split)
 
     model_class = ATTRIBUTOR[config['model_name']]
-    model = model_class(config)
+    model_config = dict(config)
+    if config['model_name'] == 'omnidfa':
+        model_config['pretrained'] = False
+    model = model_class(model_config)
 
     metric_scoring = choose_metric(config)
     trainer = Trainer(config, model, None, None, logger, metric_scoring, log_dir=log_dir, test_mode=True)
@@ -108,6 +115,13 @@ def main(argv=None):
         clip_preprocess = model.semantic_extractor.clip_preprocess if config['model_name'] == 'defl' else None
     else:
         trainer.load_checkpoint(args.resume_checkpoint)
+
+    if config['model_name'] == 'omnidfa':
+        if test_source is None:
+            provenance = {key: checkpoint[key] for key in ('model_name', 'dataset', 'dataset_digest', 'class_names')}
+        provenance.update({key: config[key] for key in ('attribution_protocol', 'prototype_source', 'preprocessing')})
+        provenance.update(train_augment=True, aug_policy=config['augmentation_policy'])
+        provenance['checkpoint'] = os.path.abspath(args.resume_checkpoint)
 
     degraded_levels = list(range(args.level_start, args.level_end)) 
 
@@ -145,12 +159,17 @@ def main(argv=None):
                 num_workers=args.num_workers,
             )
 
+        if config['model_name'] == 'omnidfa' and test_source is None:
+            from comparison.training.omnidfa import membership_digest
+            if membership_digest(test_loader.dataset.dataset) != checkpoint['dataset_digest']:
+                raise ValueError('IAB OmniDFA dataset membership does not match its checkpoint')
+
         test_metrics = trainer.test(test_loader)
 
         result_txt_path = os.path.join(log_dir, f"test_results_degraded_{degraded}.txt")
         with open(result_txt_path, 'w') as f:
             f.write(f"Test metrics for degraded={degraded} ({LEVEL_LABELS[degraded]}) ({datetime.datetime.now()}):\n")
-            if test_source is not None:
+            if test_source is not None or config['model_name'] == 'omnidfa':
                 for key, value in provenance.items():
                     f.write(f"{key}: {json.dumps(value) if key == 'class_names' else value}\n")
             for metric_name, value in test_metrics.items():

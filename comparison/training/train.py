@@ -58,6 +58,9 @@ def create_training_logger(config, args, use_semantic_split=False):
     if args.dataset == "iabench":
         log_dir = (os.path.dirname(os.path.abspath(args.resume_checkpoint)) if args.resume_checkpoint else
                    os.path.join(base_folder, "iabench", config["model_name"], task_str + "_" + now))
+    if config['model_name'] == 'omnidfa':
+        log_dir = (os.path.dirname(os.path.abspath(args.resume_checkpoint)) if args.resume_checkpoint else
+                   log_dir + '_' + datetime.datetime.now().strftime('%f'))
     os.makedirs(log_dir, exist_ok=True)  
     logger = create_logger(os.path.join(log_dir, 'training.log'))  
     logger.info(f"Training logs saved to {log_dir}")  
@@ -70,12 +73,18 @@ def choose_optimizer(model, config):
         optimizer = torch.optim.Adam(model.parameters(), lr=config['optimizer'][opt_name]['lr'])  
     elif opt_name == 'sgd':  
         optimizer = torch.optim.SGD(model.parameters(), lr=config['optimizer'][opt_name]['lr'], momentum=0.9)  
+    elif opt_name == 'adamw':
+        optimizer = torch.optim.AdamW(model.parameters(), **config['optimizer'][opt_name])
     else:  
         raise NotImplementedError(f"Optimizer {opt_name} not supported")  
     return optimizer  
 
 
 def choose_scheduler(config, optimizer):  
+    if config.get('lr_scheduler') == 'omnidfa':
+        from comparison.training.trainer.omnidfa_trainer import omnidfa_scheduler
+        return omnidfa_scheduler(optimizer, config['steps_per_epoch'], config['omnidfa_num_epochs'],
+                                 config.get('warmup_epochs', 2))
     if config.get('lr_scheduler', None) == 'step':  
         return torch.optim.lr_scheduler.StepLR(optimizer, step_size=config['lr_step'], gamma=config['lr_gamma'])  
     elif config.get('lr_scheduler', None) == 'cosine':  
@@ -86,7 +95,7 @@ def choose_scheduler(config, optimizer):
 
 def choose_metric(config):  
     metric = config.get('metric_scoring', 'auc')  
-    if metric not in ['auc', 'acc', 'ap']:  
+    if metric not in ['auc', 'acc', 'ap', 'balanced_accuracy']:
         raise NotImplementedError(f"Metric {metric} not implemented")  
     return metric  
 
@@ -101,6 +110,14 @@ def main(argv=None):
     # config['save_feat'] = args.save_feat  
     # config['task_target'] = args.task_target  
     config['log_dir'] = args.log_dir
+    if config['model_name'] == 'omnidfa':
+        from comparison.training.omnidfa import configure_omnidfa
+        if args.pretrained_path or args.train_augment:
+            raise ValueError('OmniDFA already applies its paper augmentation; use complete --resume_checkpoint files')
+        config.update(use_semantic_split=args.use_semantic_split, task_id=args.task_id,
+                      num_images_per_semantic_per_class=args.num_images_per_semantic_per_class)
+        configure_omnidfa(config, args.dataset, args.batch_size,
+                          args.n_epoch if args.n_epoch is not None else config['nEpochs'])
     if args.pretrained_path:
         config['pretrained_path'] = args.pretrained_path
     if args.train_augment:
@@ -116,7 +133,7 @@ def main(argv=None):
             raise ValueError("IABench has no semantic split; use its shared manifest")
         train_source, val_source = prepare_iabench(
             args.root_dir, args.split_manifest, config, args.batch_size)
-        if args.resume_checkpoint:
+        if args.resume_checkpoint and config['model_name'] != 'omnidfa':
             checkpoint = torch.load(args.resume_checkpoint, map_location='cpu', weights_only=False)
             validate_checkpoint_metadata(checkpoint, config['checkpoint_metadata'])
             del checkpoint
@@ -144,7 +161,8 @@ def main(argv=None):
         model_config = dict(config)
         if args.resume_checkpoint and model_name == 'dna':
             model_config['load_param'] = False
-        model = ATTRIBUTOR[model_name](model_config)
+        if model_name != 'omnidfa':
+            model = ATTRIBUTOR[model_name](model_config)
         preprocess = model.semantic_extractor.clip_preprocess if model_name == 'defl' else None
         train_loader, val_loader = get_iabench_dataloaders(
             train_source, val_source, config, args.batch_size, args.num_workers, preprocess)
@@ -181,8 +199,24 @@ def main(argv=None):
     if test_loader is not None:
         logger.info(f"test_loader samples: {len(test_loader)}")
 
+    support_loader = None
+    if model_name == 'omnidfa':
+        from comparison.training.omnidfa import prepare_omnidfa_loaders, validate_omnidfa_checkpoint
+        from comparison.training.iabench import validate_checkpoint_metadata
+        train_loader, support_loader = prepare_omnidfa_loaders(train_loader, config, args.batch_size)
+        if args.resume_checkpoint:
+            checkpoint = torch.load(args.resume_checkpoint, map_location='cpu', weights_only=False)
+            validate_omnidfa_checkpoint(checkpoint)
+            validate_checkpoint_metadata(checkpoint, config['checkpoint_metadata'])
+            del checkpoint
+        logger.info(f'OmniDFA closed-set training: {len(train_loader)} steps/epoch, '
+                    f'global batch={args.batch_size}, fake:real=8:1; '
+                    f'clean support counts={config["checkpoint_metadata"]["support_counts"]}')
     if model is None:
-        model = ATTRIBUTOR[config['model_name']](config)
+        model_config = dict(config)
+        if model_name == 'omnidfa' and args.resume_checkpoint:
+            model_config['pretrained'] = False
+        model = ATTRIBUTOR[config['model_name']](model_config)
     logger.info(model.parameters())
     optimizer = choose_optimizer(model, config)  
     scheduler = choose_scheduler(config, optimizer)  
@@ -192,7 +226,13 @@ def main(argv=None):
     if model_name == 'pose':
         from comparison.training.trainer.pose_trainer import POSETrainer
         trainer_class = POSETrainer
-    trainer = trainer_class(config, model, optimizer, scheduler, logger, metric_scoring, time_now=now, log_dir=log_dir)
+    trainer_options = {}
+    if model_name == 'omnidfa':
+        from comparison.training.trainer.omnidfa_trainer import OmniDFATrainer
+        trainer_class = OmniDFATrainer
+        trainer_options['support_loader'] = support_loader
+    trainer = trainer_class(config, model, optimizer, scheduler, logger, metric_scoring,
+                            time_now=now, log_dir=log_dir, **trainer_options)
 
     # resume training 
     start_epoch = config.get('start_epoch', 1)  
@@ -226,7 +266,7 @@ def main(argv=None):
                 logger.info(f"Validation metric improved, saving best checkpoint at epoch {epoch}")  
                 trainer.save_checkpoint(filename="ckpt_best.pth", best_metrics={'val_metric': best_val_metric, 'best_epoch': best_epoch}, epoch=epoch)
 
-        if args.dataset == 'iabench':
+        if args.dataset == 'iabench' or model_name == 'omnidfa':
             trainer.save_checkpoint(filename='ckpt_last.pth',
                                     best_metrics={'val_metric': best_val_metric, 'best_epoch': best_epoch}, epoch=epoch)
         elif epoch % save_freq == 0 or epoch == n_epochs:
@@ -240,6 +280,8 @@ def main(argv=None):
         writer.close()  
 
     if args.do_test and args.dataset == 'iab':
+        if model_name == 'omnidfa':
+            trainer.load_checkpoint(os.path.join(log_dir, 'ckpt_best.pth'))
         degraded_levels = list(range(7))  
 
         for degraded in degraded_levels:  
