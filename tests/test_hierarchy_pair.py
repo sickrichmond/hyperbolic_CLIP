@@ -126,6 +126,64 @@ class HierarchyPairTests(unittest.TestCase):
             pair.plot_pair(saved, result, Path(tmp))
             self.assertTrue((Path(tmp) / 'family_recovery.png').is_file())
 
+    def test_saved_distance_zoom_preserves_original_bins_without_smoothing(self):
+        import matplotlib.axes
+        import numpy as np
+        models = torch.tensor([[.99, 70.], [1., 70.], [1.01, 70.], [50., 70.],
+                               [1., 70.], [1.02, 70.], [50., 70.], [60., 70.]], dtype=torch.float64)
+        families = torch.ones(8, 4, dtype=torch.float64)
+        mask = torch.tensor([True] * 4 + [False] * 4)
+        mapping = torch.tensor([3, 3])
+        provenance = dict(experiment_digest='synthetic', seen_generator='seen', unseen_generator='unseen',
+                          family_names=['real', 'gan', 'autoregressive', 'diffusion'], target_family='diffusion')
+        saved = dict(provenance, model_anchor_names=['seen', 'other'], model_distances=models,
+                     family_distances=families, is_seen=mask, model_anchor_family_indices=mapping)
+        result = dict(provenance, **pair.pair_statistics(models, families, mask, mapping, 0, 3))
+        masses, histograms = [], []
+        original_hist = matplotlib.axes.Axes.hist
+        def histogram(ax, *args, **kwargs):
+            heights, edges, patches = original_hist(ax, *args, **kwargs)
+            masses.append(float(np.sum(heights * np.diff(edges))))
+            histograms.append((heights, edges))
+            return heights, edges, patches
+        with tempfile.TemporaryDirectory() as tmp:
+            source, output = Path(tmp) / 'source', Path(tmp) / 'zoom'
+            source.mkdir()
+            tensor_path, json_path = source / 'pair_distances.pt', source / 'pair_results.json'
+            torch.save(saved, tensor_path)
+            json_path.write_text(json.dumps(result))
+            before = tensor_path.read_bytes(), json_path.read_bytes()
+            with patch.object(pair, 'load_model', side_effect=AssertionError('model loaded')), \
+                    patch.object(pair, 'ExperimentData', side_effect=AssertionError('images loaded')), \
+                    patch.object(matplotlib.axes.Axes, 'hist', histogram), \
+                    patch('scipy.stats.gaussian_kde', side_effect=AssertionError('smoothing was applied')), redirect_stdout(io.StringIO()):
+                pair.main(['--replot', str(source), '--output_dir', str(output), '--distance_xlim', '.98', '1.03'])
+            self.assertAlmostEqual(masses[0], 1.)
+            self.assertAlmostEqual(masses[1], 1.)
+            original_bins = np.linspace(models[:, 0].min().item(), models[:, 0].max().item(), 41)
+            for _, edges in histograms:
+                np.testing.assert_array_equal(edges, original_bins)
+            width = original_bins[1] - original_bins[0]
+            self.assertAlmostEqual(histograms[0][0][0], 3 / (4 * width))
+            self.assertAlmostEqual(histograms[1][0][0], 2 / (4 * width))
+            self.assertEqual(before, (tensor_path.read_bytes(), json_path.read_bytes()))
+            view = json.loads((output / 'zoom_view.json').read_text())
+            self.assertEqual(view['ordering_probability'], result['ordering_probability'])
+            self.assertEqual(view['smoothing'], 'none')
+            self.assertEqual(view['histogram_bins'], 'original_full_range_40')
+            for extension in ('png', 'pdf'):
+                self.assertGreater((output / f'distance_to_seen_anchor_zoom.{extension}').stat().st_size, 1000)
+            self.assertFalse((output / 'family_recovery.png').exists())
+            with self.assertRaisesRegex(ValueError, 'fresh replot'):
+                pair.replot_distance(source, output, (.98, 1.03))
+            for limits in ((1., 0.), (-1., 1.), (0., float('nan'))):
+                with self.assertRaisesRegex(ValueError, 'Distance limits'):
+                    pair.replot_distance(source, Path(tmp) / 'invalid', limits)
+            damaged = dict(result, ordering_probability=0.)
+            json_path.write_text(json.dumps(damaged))
+            with self.assertRaisesRegex(ValueError, 'reproduce'):
+                pair.replot_distance(source, Path(tmp) / 'invalid', (.98, 1.03))
+
     def test_slurm_defaults_overrides_and_argument_validation(self):
         script = Path(pair.__file__).resolve().parents[2] / 'slurm/slurm_plot_hierarchy_pair.sh'
         subprocess.run(['bash', '-n', str(script)], check=True)

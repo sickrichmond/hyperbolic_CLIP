@@ -1,5 +1,7 @@
 """Plot seen-anchor distances and paired family recovery on frozen clean test rows."""
 import argparse
+import json
+import math
 from pathlib import Path
 import textwrap
 
@@ -66,7 +68,7 @@ def pair_statistics(model_distances, family_distances, is_seen, model_families, 
     )
 
 
-def plot_pair(saved, result, output):
+def plot_distance(saved, result, output, xlim=None):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -78,6 +80,9 @@ def plot_pair(saved, result, output):
     distances = saved['model_distances'][:, reference].numpy()
     mask = saved['is_seen'].numpy()
     green, orange = '#167c73', '#c75b3d'
+    if xlim is not None and (len(xlim) != 2 or not all(math.isfinite(v) for v in xlim)
+                             or not 0 <= xlim[0] < xlim[1]):
+        raise ValueError('Distance limits must be finite with 0 <= minimum < maximum')
     low, high = float(distances.min()), float(distances.max())
     if low == high:
         low, high = max(0., low - .05), high + .05
@@ -87,7 +92,7 @@ def plot_pair(saved, result, output):
                                        (distances[~mask], unseen_name, orange, 'held out')):
         ax.hist(values, bins=bins, density=True, color=color, alpha=.25,
                 label=textwrap.fill(f'{name} ({status}; n={len(values)})', 45))
-        if len(values) > 1 and np.ptp(values) > 0:
+        if xlim is None and len(values) > 1 and np.ptp(values) > 0:
             ax.plot(grid, gaussian_kde(values)(grid), color=color, linewidth=2)
     ax.set(title=textwrap.fill(f'How close are test images to the {seen_name} anchor?', 85),
            xlabel='Geodesic distance to the seen-generator anchor', ylabel='Density')
@@ -95,11 +100,30 @@ def plot_pair(saved, result, output):
             transform=ax.transAxes, ha='right', va='top', fontsize=10)
     ax.legend(loc='upper left', fontsize=9)
     ax.spines[['top', 'right']].set_visible(False)
-    fig.tight_layout()
+    stem = 'distance_to_seen_anchor'
+    if xlim is not None:
+        ax.set_xlim(*xlim)
+        ax.ticklabel_format(axis='x', style='plain', useOffset=False)
+        ax.set_ylim(0, ax.get_ylim()[1] * 1.25)
+        visible = (distances >= xlim[0]) & (distances <= xlim[1])
+        note = ('Histogram only: no smoothing; original bins and full-cohort normalization retained.\n'
+                f'Original bin width: {bins[1] - bins[0]:.6f}; displayed window width: {xlim[1] - xlim[0]:.6f}.\n'
+                f'Outside view: seen {int((mask & ~visible).sum())}/{int(mask.sum())}; '
+                f'held out {int((~mask & ~visible).sum())}/{int((~mask).sum())}.')
+        fig.text(.5, .015, note, ha='center', va='bottom', fontsize=9)
+        stem += '_zoom'
+    fig.tight_layout(rect=(0, .11 if xlim is not None else 0, 1, 1))
     for extension in ('png', 'pdf'):
-        fig.savefig(output / f'distance_to_seen_anchor.{extension}', dpi=300)
+        fig.savefig(output / f'{stem}.{extension}', dpi=300)
     plt.close(fig)
 
+
+def plot_pair(saved, result, output):
+    plot_distance(saved, result, output)
+    import matplotlib.pyplot as plt
+
+    green, orange = '#167c73', '#c75b3d'
+    seen_name, unseen_name = (result[key].split('@')[-1] for key in ('seen_generator', 'unseen_generator'))
     labels = dict(real='Real', gan='GAN', autoregressive='Autoregressive', diffusion='Diffusion')
     target = result['target_family']
     other_colors = iter(('#6b7280', '#527eb1', '#9270ad'))
@@ -211,18 +235,56 @@ def evaluate_pair(data, checkpoint, output_dir, seen=DEFAULT_SEEN, unseen=DEFAUL
     return result
 
 
+def replot_distance(results_dir, output_dir, xlim):
+    results_dir, output = Path(results_dir), Path(output_dir)
+    saved = torch.load(results_dir / 'pair_distances.pt', map_location='cpu', weights_only=True)
+    result = json.loads((results_dir / 'pair_results.json').read_text())
+    for key in ('experiment_digest', 'seen_generator', 'unseen_generator', 'family_names', 'target_family'):
+        if saved.get(key) != result.get(key):
+            raise ValueError(f'Saved distances and results disagree on {key}')
+    statistics = pair_statistics(
+        saved['model_distances'], saved['family_distances'], saved['is_seen'],
+        saved['model_anchor_family_indices'], saved['model_anchor_names'].index(result['seen_generator']),
+        result['family_names'].index(result['target_family']))
+    if any(result.get(key) != value for key, value in statistics.items()):
+        raise ValueError('Saved distances do not reproduce the saved statistics')
+    if output.exists() and any(output.iterdir()):
+        raise ValueError(f'Use a fresh replot output directory: {output}')
+    if len(xlim) != 2 or not all(math.isfinite(v) for v in xlim) or not 0 <= xlim[0] < xlim[1]:
+        raise ValueError('Distance limits must be finite with 0 <= minimum < maximum')
+    output.mkdir(parents=True, exist_ok=True)
+    plot_distance(saved, result, output, xlim=xlim)
+    write_json(output / 'zoom_view.json', dict(
+        source_results=str(results_dir.resolve()), distance_limits=list(xlim),
+        ordering_probability=result['ordering_probability'], histogram_normalization='full_cohort',
+        histogram_bins='original_full_range_40', smoothing='none', experiment_digest=result['experiment_digest']))
+    print(f'Zoomed distance plot (no model or images loaded): {output.resolve()}')
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('seen', nargs='?', default=DEFAULT_SEEN, help='Exact trained generator name')
     parser.add_argument('unseen', nargs='?', default=DEFAULT_UNSEEN, help='Exact scored held-out generator name')
-    parser.add_argument('--checkpoint', required=True)
-    parser.add_argument('--experiment', required=True)
+    parser.add_argument('--checkpoint')
+    parser.add_argument('--experiment')
     parser.add_argument('--output_dir', required=True)
+    parser.add_argument('--replot', help='Directory containing saved pair_distances.pt and pair_results.json')
+    parser.add_argument('--distance_xlim', nargs=2, type=float, metavar=('MIN', 'MAX'),
+                        help='Zoom limits for --replot; full-data statistics remain unchanged')
     parser.add_argument('--iabench_root')
     parser.add_argument('--iab_root')
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--num_workers', type=int, default=8)
     args = parser.parse_args(argv)
+    if args.replot:
+        if args.distance_xlim is None:
+            parser.error('--replot requires --distance_xlim MIN MAX')
+        replot_distance(args.replot, args.output_dir, args.distance_xlim)
+        return
+    if args.distance_xlim is not None:
+        parser.error('--distance_xlim requires --replot')
+    if not args.checkpoint or not args.experiment:
+        parser.error('Inference requires --checkpoint and --experiment')
     data = ExperimentData(args.experiment, args.iabench_root, args.iab_root)
     evaluate_pair(data, args.checkpoint, args.output_dir, args.seen, args.unseen, args.batch_size, args.num_workers)
 
