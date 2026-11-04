@@ -46,7 +46,8 @@ def collect(directory):
             expected = dict(lambda_anchor=weight, geodesic_margin=z, target_norm=tau,
                             num_epochs=30, train_augment=True, aug_policy="omnidfa",
                             anchor_init="random", hierarchy="none", lambda_norm=0.5,
-                            norm_mode="floor", anchor_penalty="geodesic", anchor_reduction="mean")
+                            norm_mode="floor", norm_space="hyperbolic_depth",
+                            anchor_penalty="geodesic", anchor_reduction="mean")
             for key, value in expected.items():
                 if checkpoint.get(key) != value:
                     raise ValueError(f"Checkpoint {key}: expected {value!r}, got {checkpoint.get(key)!r}")

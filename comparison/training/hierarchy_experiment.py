@@ -34,13 +34,13 @@ def ours_args(data, output, workers):
     from training.attribution_args import parse_args
     epochs, batch = RECIPES['ours']
     settings = dict(
-        dataset_path=data.roots['iabench'], output=output / f'ours_anchor0p5_z2_ep{epochs}.pt',
+        dataset_path=data.roots['iabench'], output=output / f'ours_anchor0p5_z4_tau2_ep{epochs}.pt',
         diag_plot_dir=output / 'diagnostics', clip_name='openai/clip-vit-large-patch14',
         hierarchy='increfa', anchor_init='random', anchor_init_norm=2, family_init_norm=1.2,
         family_depth_margin=.5, lambda_family=1, lambda_family_depth=.5,
         lora_target=r'vision_model\.encoder\.layers\.[0-9]+\.self_attn\.(q_proj|v_proj)',
         lora_r=16, lora_alpha=32, hyperbolic_dim=128, curv=1, min_radius=.5, margin=.3,
-        lambda_neg=1, lambda_norm=.5, target_norm=4, lambda_anchor=.5, geodesic_margin=2,
+        lambda_neg=1, lambda_norm=.5, target_norm=2, lambda_anchor=.5, geodesic_margin=4,
         init_depth=3, batch_size=batch, num_epochs=epochs, lr=3e-4, weight_decay=.01,
         optimizer='adamw', lr_schedule='cosine', num_workers=workers, seed=42, log_every=10,
     )
@@ -175,9 +175,18 @@ def load_model(data, checkpoint, device):
     from models.attribution_clip import AttributionCLIP
     from comparison.training.test_hypclip import load_anchors
     for key, value in dict(hierarchy='increfa', anchor_penalty='geodesic',
-                           anchor_scope='families', lambda_anchor=.5, target_norm=4, geodesic_margin=2).items():
+                           anchor_scope='families', lambda_anchor=.5).items():
         if ckpt.get(key) != value:
             raise ValueError(f'Incompatible hierarchy checkpoint {key}')
+    # Keep the previous spatial-norm recipe evaluable alongside new depth-based runs.
+    if ckpt.get('norm_space', 'lorentz_spatial') == 'lorentz_spatial':
+        expected_target, expected_margin = 4, 2
+    elif ckpt['norm_space'] == 'hyperbolic_depth':
+        expected_target, expected_margin = 2, 4
+    else:
+        raise ValueError('Incompatible hierarchy checkpoint norm_space')
+    if ckpt.get('target_norm') != expected_target or ckpt.get('geodesic_margin') != expected_margin:
+        raise ValueError('Incompatible hierarchy checkpoint target_norm or geodesic_margin')
     # Both reductions have the same inference rule; keep older runs evaluable.
     if ckpt.get('anchor_reduction') not in ('mean', 'max'):
         raise ValueError('Incompatible hierarchy checkpoint anchor_reduction')

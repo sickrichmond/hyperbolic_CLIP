@@ -4,15 +4,15 @@
 # manifest shared by clean and augmented training. Validation stays clean.
 # AUGMENT=1 enables corruption (default) or omnidfa via AUG_POLICY.
 # Augmented checkpoint suffixes name the policy: _corruption / _omnidfa.
-# Geodesic anchor separation: LAMBDA_ANCHOR=0.5, TARGET_NORM=4 by default.
-# GEODESIC_MARGIN sets z independently; defaults to tau for classes or tau/2 for families.
+# Defaults: LAMBDA_ANCHOR=0.5, radial-depth TARGET_NORM=2, GEODESIC_MARGIN=4.
+# GEODESIC_MARGIN sets z independently for classes and families.
 # Checkpoint names include anchor weight, z, tau and total NUM_EPOCHS (default 30).
 # CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
 # The trainer rejects concurrent writers and existing augmentation/hierarchy conflicts.
 # Submit: sbatch slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1 slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_iabench.sh
-#         sbatch --export=ALL,TARGET_NORM=4 slurm/slurm_train_iabench.sh
+#         sbatch --export=ALL,TARGET_NORM=2,GEODESIC_MARGIN=4 slurm/slurm_train_iabench.sh
 # Timing: PROFILE_STEPS=100 sbatch slurm/slurm_train_iabench.sh
 
 #SBATCH --account=EUHPC_D35_189
@@ -50,13 +50,8 @@ AUGMENT="${AUGMENT:-0}"
 AUG_POLICY="${AUG_POLICY:-corruption}"
 HIERARCHY="${HIERARCHY:-none}"
 LAMBDA_ANCHOR="${LAMBDA_ANCHOR:-0.5}"
-TARGET_NORM="${TARGET_NORM:-4}"
-if [ "$HIERARCHY" = increfa ]; then
-    DEFAULT_GEODESIC_MARGIN=$(awk -v target="$TARGET_NORM" 'BEGIN { printf "%.17g", target / 2 }')
-else
-    DEFAULT_GEODESIC_MARGIN="$TARGET_NORM"
-fi
-GEODESIC_MARGIN="${GEODESIC_MARGIN:-$DEFAULT_GEODESIC_MARGIN}"
+TARGET_NORM="${TARGET_NORM:-2}"
+GEODESIC_MARGIN="${GEODESIC_MARGIN:-4}"
 
 if [[ ! "$NUM_EPOCHS" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: NUM_EPOCHS must be a positive integer (got: $NUM_EPOCHS)" >&2

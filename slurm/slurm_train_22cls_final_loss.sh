@@ -6,9 +6,9 @@
 #
 # Submit: sbatch slurm/slurm_train_22cls_final_loss.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_22cls_final_loss.sh
-#         sbatch --export=ALL,LAMBDA_ANCHOR=0.5,TARGET_NORM=4 slurm/slurm_train_22cls_final_loss.sh
-# Defaults: OPTIMIZER=adamw, LAMBDA_ANCHOR=0.5, TARGET_NORM=4, ANCHOR_INIT=random.
-# GEODESIC_MARGIN sets z independently; it defaults to TARGET_NORM (tau).
+#         sbatch --export=ALL,LAMBDA_ANCHOR=0.5,TARGET_NORM=2,GEODESIC_MARGIN=4 slurm/slurm_train_22cls_final_loss.sh
+# Defaults: OPTIMIZER=adamw, LAMBDA_ANCHOR=0.5, radial-depth TARGET_NORM=2, ANCHOR_INIT=random.
+# GEODESIC_MARGIN sets z independently; it defaults to 4.
 # Checkpoint names include total NUM_EPOCHS (default 30), not the selected best epoch.
 # CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
 # The trainer rejects concurrent writers and existing augmentation/hierarchy conflicts.
@@ -50,8 +50,8 @@ AUGMENT=${AUGMENT:-0}
 AUG_POLICY=${AUG_POLICY:-corruption}
 OPTIMIZER=${OPTIMIZER:-adamw}
 LAMBDA_ANCHOR=${LAMBDA_ANCHOR:-0.5}
-TARGET_NORM=${TARGET_NORM:-4}
-GEODESIC_MARGIN=${GEODESIC_MARGIN:-$TARGET_NORM}
+TARGET_NORM=${TARGET_NORM:-2}
+GEODESIC_MARGIN=${GEODESIC_MARGIN:-4}
 ANCHOR_INIT=${ANCHOR_INIT:-random}
 NUM_EPOCHS=${NUM_EPOCHS:-30}
 

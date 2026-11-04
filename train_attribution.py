@@ -3,7 +3,7 @@
 Supports text and free class anchors, image-only training, validation-based
 checkpoint selection, and Poincare diagnostics. The pairwise geodesic anchor
 penalty defaults to weight 0.2; --lambda_anchor 0 disables it. Its independent
-geodesic margin z defaults to target_norm, or target_norm/2 for hierarchy families.
+geodesic margin z defaults to 4; the radial-depth target tau independently defaults to 2.
 """
 from pathlib import Path
 from time import perf_counter
@@ -458,6 +458,7 @@ def _run_training(args, datasets, checkpoint_metadata, plot_each_epoch, family_g
                     "momentum":        args.momentum,
                     "lr":              args.lr,
                     "norm_mode":       args.norm_mode,
+                    "norm_space":      "hyperbolic_depth",
                     "target_norm":     args.target_norm,
                     "lambda_norm":     args.lambda_norm,
                     "lambda_anchor":   args.lambda_anchor,

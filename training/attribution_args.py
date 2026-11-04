@@ -85,11 +85,11 @@ def parse_args(argv=None, dataset="iab"):
                    help="Training augmentation policy: corruption (JPEG/blur/downsample) or "
                         "omnidfa (JPEG/resize/hflip/RandAugment/blur).")
     p.add_argument("--lambda_norm",    type=float, default=0.0,
-                   help="Weight of the spatial anchor-norm regularizer (0 disables).")
-    p.add_argument("--target_norm",    type=float, default=0.0,
-                   help="Target Lorentz spatial-coordinate norm, not tangent-space norm.")
+                   help="Weight of the hyperbolic radial-depth regularizer (0 disables).")
+    p.add_argument("--target_norm",    type=float, default=2.0,
+                   help="Target hyperbolic distance from the origin (tau; default: 2).")
     p.add_argument("--norm_mode", choices=["floor", "bilateral"], default="floor",
-                   help="Penalize norms below the target (floor) or deviations on "
+                   help="Penalize depths below the target (floor) or deviations on "
                         "both sides (bilateral).")
     p.add_argument("--neg_samples",    type=int,   default=0,
                    help="Random negatives retained per sample (0 uses all); full pairwise "
@@ -99,9 +99,9 @@ def parse_args(argv=None, dataset="iab"):
                    help="Weight of mean geodesic-distance hinge over unique anchor pairs "
                         "(families in hierarchy mode; default: 0.2; 0 disables). "
                         "--lambda_cosine is a legacy spelling for this new penalty.")
-    p.add_argument("--geodesic_margin", type=float, default=None,
-                   help="Independent anchor geodesic-distance threshold z. If omitted, "
-                        "defaults to --target_norm/2 in hierarchy mode, --target_norm otherwise.")
+    p.add_argument("--geodesic_margin", type=float, default=4.0,
+                   help="Anchor geodesic-distance threshold z (default: 4), independent "
+                        "of --target_norm in both ordinary and hierarchy modes.")
     p.add_argument("--batch_size",     type=int,   default=256)
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
@@ -160,9 +160,6 @@ def parse_args(argv=None, dataset="iab"):
 
 def validate_args(args, family_groups=None):
     """Validate mode combinations before loading data or model weights."""
-    expected_margin = args.target_norm / (2 if args.hierarchy != "none" else 1)
-    if args.geodesic_margin is None:
-        args.geodesic_margin = expected_margin
     if not all(math.isfinite(value) and value >= 0 for value in
                (args.lambda_anchor, args.target_norm, args.geodesic_margin)):
         raise ValueError("Anchor weight, norm target and geodesic margin must be finite and non-negative")

@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from geometry.lorentz import half_aperture, oxy_angle, pairwise_dist
+from geometry.lorentz import half_aperture, oxy_angle, pairwise_dist, elementwise_dist
 
 def _pairwise_xi(apex: torch.Tensor, point: torch.Tensor, curv: float) -> torch.Tensor:
     """Pairwise oxy_angle: result[a, p] = oxy_angle(apex[a], point[p]).
@@ -47,22 +47,22 @@ class EntailmentConeLoss(nn.Module):
         lambda_neg: float = 1.0,
         lambda_norm: float = 0.0,
         lambda_anchor: float = 0.0,
-        target_norm: float = 0.0,
-        geodesic_margin: float | None = None,
+        target_norm: float = 2.0,
+        geodesic_margin: float = 4.0,
         norm_mode: str = "floor",
         neg_samples: int = 0,
         lambda_family: float = 0.0,
         lambda_family_depth: float = 0.0,
         family_depth_margin: float = 0.5,
     ):
-        """Configure hinges, spatial anchor-norm and pairwise distance penalties.
+        """Configure hinges, hyperbolic radial-depth and pairwise distance penalties.
 
         neg_samples=0 uses all wrong classes; otherwise subsample per image.
         The norm penalty is enabled when both lambda_norm and target_norm are positive.
         Positive lambda_anchor separates families when family inputs are provided,
         otherwise classes. This constructor defaults to zero; the CLI defaults to 0.2.
-        An explicit geodesic_margin is independent of target_norm. If omitted,
-        the threshold is target_norm for classes, or target_norm/2 for families.
+        geodesic_margin defaults to 4 independently of target_norm (default 2)
+        for both class and family separation.
         Family losses use all classes each call; the relative depth loss is tangent-based.
         """
         super().__init__()
@@ -71,7 +71,7 @@ class EntailmentConeLoss(nn.Module):
         if not math.isfinite(curv) or curv <= 0:
             raise ValueError("curv must be positive and finite")
         if not all(math.isfinite(v) and v >= 0 for v in
-                   (lambda_anchor, target_norm, target_norm if geodesic_margin is None else geodesic_margin)):
+                   (lambda_anchor, target_norm, geodesic_margin)):
             raise ValueError("Anchor weight, norm target and geodesic margin must be finite and non-negative")
         if not all(math.isfinite(v) and v >= 0 for v in
                    (lambda_family, lambda_family_depth, family_depth_margin)):
@@ -121,8 +121,6 @@ class EntailmentConeLoss(nn.Module):
                     family_of.device != device or
                     bool(((family_of < 0) | (family_of >= len(x_fam))).any())):
                 raise ValueError("family_of must contain one valid family index per class on the image device")
-        geodesic_margin = (self.geodesic_margin if self.geodesic_margin is not None else
-                           self.target_norm / (2 if x_fam is not None else 1))
         psi_anc = half_aperture(x_anc, curv=self.curv, min_radius=self.min_radius)
         xi = _pairwise_xi(x_anc, x_img, curv=self.curv).T
         xi_pos = xi.gather(1, labels.unsqueeze(1)).squeeze(1)
@@ -136,10 +134,10 @@ class EntailmentConeLoss(nn.Module):
                  if neg_mask.any() else xi.new_zeros(()))
         L_img_in_class = L_pos + self.lambda_neg * L_neg
 
-        anc_norms = x_anc.norm(dim=-1)
+        anc_depths = elementwise_dist(x_anc, torch.zeros_like(x_anc), curv=self.curv, eps=1e-5)
         L_norm = xi.new_zeros(())
         if self.lambda_norm > 0 and self.target_norm > 0:
-            deviation = self.target_norm - anc_norms
+            deviation = self.target_norm - anc_depths
             if self.norm_mode == "floor":
                 deviation = deviation.clamp_min(0)
             L_norm = deviation.square().mean()
@@ -155,10 +153,9 @@ class EntailmentConeLoss(nn.Module):
                             .clamp_min(0)[wrong_family].mean()
                             if wrong_family.any() else xi.new_zeros(()))
             L_family = L_family_pos + self.lambda_neg * L_family_neg
-            # Invert the radial exp_map0 formula; the old norm term stays spatial.
-            class_depth = torch.asinh(math.sqrt(self.curv) * anc_norms) / math.sqrt(self.curv)
-            family_depth = torch.asinh(math.sqrt(self.curv) * x_fam.norm(dim=-1)) / math.sqrt(self.curv)
-            depth_gap = class_depth - family_depth[family_of]
+
+            family_depth = elementwise_dist(x_fam, torch.zeros_like(x_fam), curv=self.curv, eps=1e-5)
+            depth_gap = anc_depths - family_depth[family_of]
             L_family_depth = (self.family_depth_margin - depth_gap).clamp_min(0).square().mean()
 
         anchors = x_anc if x_fam is None else x_fam
@@ -169,7 +166,7 @@ class EntailmentConeLoss(nn.Module):
             distances = pairwise_dist(anchors, anchors, curv=self.curv, eps=1e-5)
             iu = torch.triu_indices(anchor_count, anchor_count, offset=1, device=device)
             distances = distances[iu[0], iu[1]]
-            L_anchor = (geodesic_margin - distances).clamp_min(0).mean()
+            L_anchor = (self.geodesic_margin - distances).clamp_min(0).mean()
 
         loss = (L_img_in_class + self.lambda_norm * L_norm + self.lambda_anchor * L_anchor
                 + self.lambda_family * L_family + self.lambda_family_depth * L_family_depth)
@@ -200,7 +197,7 @@ class EntailmentConeLoss(nn.Module):
                 "sep_overlap": ((angles < psi_anc[iu[0]] + psi_anc[iu[1]]).float().mean() 
                                 if K > 1 else x_anc.new_zeros(())),
                 "mean_xi_img_anc": xi_pos.mean(),
-                "mean_anc_norm": anc_norms.mean(),
+                "mean_anc_norm": x_anc.norm(dim=-1).mean(),
             }
             if x_fam is not None:
                 directions_fam = F.normalize(x_fam, dim=-1)
@@ -210,7 +207,7 @@ class EntailmentConeLoss(nn.Module):
                 xi_img_family = _pairwise_xi(x_fam, x_img, curv=self.curv).T
                 image_parent = family_of[labels]
                 image_parent_xi = xi_img_family.gather(1, image_parent[:, None]).squeeze(1)
-                image_depth = torch.asinh(math.sqrt(self.curv) * x_img.norm(dim=-1)) / math.sqrt(self.curv)
+                image_depth = elementwise_dist(x_img, torch.zeros_like(x_img), curv=self.curv, eps=1e-5)
                 stats.update({
                     "loss_family": L_family.detach(),
                     "loss_family_pos": L_family_pos.detach(),
@@ -223,12 +220,12 @@ class EntailmentConeLoss(nn.Module):
                     "inside_img_family": (image_parent_xi <= psi_fam[image_parent]).float().mean(),
                     "family_depth_min": family_depth.min(),
                     "family_depth_mean": family_depth.mean(),
-                    "class_depth_mean": class_depth.mean(),
+                    "class_depth_mean": anc_depths.mean(),
                     "image_depth_mean": image_depth.mean(),
                     "family_depth_gap_min": depth_gap.min(),
                     "family_depth_gap_mean": depth_gap.mean(),
                     "family_depth_violations": (depth_gap < self.family_depth_margin).float().mean(),
-                    "image_class_depth_violations": (image_depth <= class_depth[labels]).float().mean(),
+                    "image_class_depth_violations": (image_depth <= anc_depths[labels]).float().mean(),
                     "family_psi_min_deg": torch.rad2deg(psi_fam.min()),
                     "family_psi_max_deg": torch.rad2deg(psi_fam.max()),
                     "mean_fam_cos_sim": cos_fam.mean(),

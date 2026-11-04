@@ -129,7 +129,8 @@ class IABAnchorSweepTests(unittest.TestCase):
             checkpoint = dict(lambda_anchor=weight, geodesic_margin=z, target_norm=tau,
                               num_epochs=30, train_augment=True, aug_policy="omnidfa",
                               anchor_init="random", hierarchy="none", lambda_norm=.5,
-                              norm_mode="floor", anchor_penalty="geodesic", anchor_reduction="mean",
+                              norm_mode="floor", norm_space="hyperbolic_depth",
+                              anchor_penalty="geodesic", anchor_reduction="mean",
                               epoch=4, val_balanced=.9 - index / 100)
             torch.save(checkpoint, folder / "attribution_22cls_fixture.pt")
             for level in (0, 4, 6):
@@ -171,6 +172,10 @@ class IABAnchorSweepTests(unittest.TestCase):
                 "acc: .5\nacc: .6\nbalanced_accuracy: .5\n")
             (root / "task_07").rename(root / "removed_task")
             (root / "task_08/status.txt").unlink()
+            path = root / "task_09/attribution_22cls_fixture.pt"
+            ckpt = torch.load(path, weights_only=False)
+            ckpt.pop("norm_space")
+            torch.save(ckpt, path)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(main(["--dir", tmp]), 1)
@@ -178,9 +183,10 @@ class IABAnchorSweepTests(unittest.TestCase):
             self.assertEqual(rows[0]["status"], "failed")
             self.assertEqual(rows[1]["status"], "incomplete")
             self.assertEqual(rows[7]["status"], "missing")
-            self.assertTrue(all(rows[i]["status"] == "invalid" for i in (2, 3, 4, 5, 6, 8)))
-            self.assertTrue(all(rows[i]["error"] for i in range(9)))
-            self.assertIn("Incomplete sweep: 9/18", output.getvalue())
+            self.assertTrue(all(rows[i]["status"] == "invalid" for i in (2, 3, 4, 5, 6, 8, 9)))
+            self.assertTrue(all(rows[i]["error"] for i in range(10)))
+            self.assertIn("norm_space", rows[9]["error"])
+            self.assertIn("Incomplete sweep: 10/18", output.getvalue())
             self.assertNotIn("Best clean validation configuration", output.getvalue())
 
 

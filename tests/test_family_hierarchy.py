@@ -19,7 +19,7 @@ class FamilyHierarchyTests(unittest.TestCase):
         classes = exp_map0(torch.tensor([[4., 0.], [4., .1], [4., -.1]], dtype=torch.float64))
         images = exp_map0(torch.tensor([[5., 0.]], dtype=torch.float64))
         base, _ = EntailmentConeLoss()(images, classes, torch.tensor([0]))
-        loss, stats = EntailmentConeLoss(lambda_anchor=.5, target_norm=2)(
+        loss, stats = EntailmentConeLoss(lambda_anchor=.5, geodesic_margin=1)(
             images, classes, torch.tensor([0]), x_fam=exp_map0(tangent), family_of=torch.arange(3))
         # z=1; only the closest family pair (distance .2) violates the margin.
         self.assertTrue(torch.allclose(stats['loss_anchor'], tangent.new_tensor(.8 / 3)))
@@ -49,9 +49,9 @@ class FamilyHierarchyTests(unittest.TestCase):
         self.assertEqual((args.family_init_norm, args.family_depth_margin,
                           args.lambda_family, args.lambda_family_depth), (1.2, 0.5, 1, 0.5))
         for target in ("4", "2.5"):
-            tied = parse_args(base + ["--target_norm", target], dataset="iabench")
-            validate_args(tied)
-            self.assertEqual(tied.geodesic_margin, float(target) / 2)
+            independent_default = parse_args(base + ["--target_norm", target], dataset="iabench")
+            validate_args(independent_default)
+            self.assertEqual(independent_default.geodesic_margin, 4.)
         matching = parse_args(base + ["--target_norm", "4", "--geodesic_margin", "2"], dataset="iabench")
         validate_args(matching)
         independent = parse_args(base + ["--target_norm", "4", "--geodesic_margin", "3"], dataset="iabench")
@@ -83,7 +83,7 @@ class FamilyHierarchyTests(unittest.TestCase):
                 xa, xf = exp_map0(classes, curv), exp_map0(families, curv)
                 mapping, labels = torch.tensor([0, 1, 0]), torch.tensor([0, 2])
                 loss_fn = EntailmentConeLoss(curv=curv, min_radius=.1, margin=.3,
-                    lambda_neg=.7, lambda_anchor=.2, target_norm=3, lambda_family=1.3,
+                    lambda_neg=.7, lambda_anchor=.2, geodesic_margin=1.5, lambda_family=1.3,
                     lambda_family_depth=.4, family_depth_margin=.5)
                 loss, stats = loss_fn(images, xa, labels, x_fam=xf, family_of=mapping)
                 baseline, _ = EntailmentConeLoss(curv=curv, min_radius=.1,
@@ -106,7 +106,7 @@ class FamilyHierarchyTests(unittest.TestCase):
                     self.assertTrue(torch.allclose(actual, reference, atol=1e-8))
                 self.assertTrue(all(not v.requires_grad for v in stats.values()))
 
-    def test_anchor_margin_follows_scope(self):
+    def test_anchor_margin_is_independent_of_scope(self):
         for curv in (.5, 1., 2.):
             with self.subTest(curv=curv):
                 xa = exp_map0(torch.tensor([[2., 0.], [0., 2.]], dtype=torch.float64), curv)
@@ -115,7 +115,7 @@ class FamilyHierarchyTests(unittest.TestCase):
                 labels = torch.arange(2)
                 criterion = EntailmentConeLoss(curv=curv, lambda_anchor=1, target_norm=4)
                 for inputs, margin, points in (({}, 4., xa),
-                        ({"x_fam": xf, "family_of": labels}, 2., xf)):
+                        ({"x_fam": xf, "family_of": labels}, 4., xf)):
                     _, stats = criterion(images, xa, labels, **inputs)
                     expected = (margin - elementwise_dist(points[:1], points[1:], curv,
                                                           eps=1e-5)).clamp_min(0).mean()

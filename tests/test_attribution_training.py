@@ -155,11 +155,11 @@ class AttributionTrainingTests(unittest.TestCase):
         base = ["--dataset_path", "x", "--captions_dir", "y"]
         args = parse_args(base + ["--no_captions"])
         validate_args(args)
-        self.assertEqual((args.lambda_anchor, args.geodesic_margin), (.2, 0.))
+        self.assertEqual((args.lambda_anchor, args.target_norm, args.geodesic_margin), (.2, 2., 4.))
         for target in ("2.5", "4"):
-            tied = parse_args(base + ["--target_norm", target])
-            validate_args(tied)
-            self.assertEqual(tied.geodesic_margin, float(target))
+            independent_default = parse_args(base + ["--target_norm", target])
+            validate_args(independent_default)
+            self.assertEqual(independent_default.geodesic_margin, 4.)
         matching = parse_args(base + ["--target_norm", "4", "--geodesic_margin", "4"])
         validate_args(matching)
         independent = parse_args(base + ["--target_norm", "4", "--geodesic_margin", "3"])
@@ -233,7 +233,8 @@ class AttributionTrainingTests(unittest.TestCase):
                 self.assertEqual(checkpoint["anchor_scope"], "classes")
                 self.assertEqual(checkpoint["lambda_anchor"], .5 if "--lambda_anchor" in options else .2)
                 self.assertEqual(checkpoint["geodesic_margin"],
-                                 3 if "--geodesic_margin" in options else checkpoint["target_norm"])
+                                 3 if "--geodesic_margin" in options else 4.)
+                self.assertEqual(checkpoint["norm_space"], "hyperbolic_depth")
                 self.assertEqual(checkpoint["anchor_reduction"], "mean")
                 self.assertEqual(checkpoint["lambda_cosine"], 0.)
                 for key in ("anchor_sin_psi", "fixed_psi", "lambda_ce", "ce_tau",

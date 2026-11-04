@@ -211,7 +211,9 @@ class HierarchyExperimentTests(unittest.TestCase):
 
     def test_selected_recipes(self):
         args = experiment.ours_args(self.data, Path('/tmp/unused'), 0)
-        self.assertEqual((args.num_epochs, args.batch_size, args.lambda_anchor, args.geodesic_margin), (30, 256, .5, 2))
+        self.assertEqual((args.num_epochs, args.batch_size, args.lambda_anchor,
+                          args.target_norm, args.geodesic_margin), (30, 256, .5, 2, 4))
+        self.assertEqual(Path(args.output).name, 'ours_anchor0p5_z4_tau2_ep30.pt')
         self.assertEqual(experiment.METHODS, ('ours',))
         self.assertEqual(set(experiment.RECIPES), {'ours'})
         self.assertFalse(args.train_augment)
@@ -278,12 +280,22 @@ class HierarchyExperimentTests(unittest.TestCase):
             self.assertEqual(ckpt['family_names'], list(FAMILY_GROUPS))
             self.assertEqual(ckpt['experiment_digest'], self.data.digest)
             self.assertEqual(ckpt['anchor_reduction'], 'mean')
+            self.assertEqual(ckpt['norm_space'], 'hyperbolic_depth')
             stack.enter_context(patch('models.attribution_clip.AttributionCLIP.from_checkpoint', return_value=TinyModel()))
             loaded = experiment.load_model(self.data, checkpoint, 'cpu')
             self.assertFalse(loaded[1].training)
             with patch.object(experiment.torch, 'load', return_value=dict(ckpt, anchor_reduction='max')):
                 legacy = experiment.load_model(self.data, checkpoint, 'cpu')
             self.assertFalse(legacy[1].training)
+            old_recipe = dict(ckpt, target_norm=4, geodesic_margin=2)
+            old_recipe.pop('norm_space')
+            with patch.object(experiment.torch, 'load', return_value=old_recipe):
+                self.assertFalse(experiment.load_model(self.data, checkpoint, 'cpu')[1].training)
+            for damaged, message in ((dict(ckpt, geodesic_margin=2), 'target_norm or geodesic_margin'),
+                                     (dict(ckpt, norm_space='invalid'), 'norm_space')):
+                with patch.object(experiment.torch, 'load', return_value=damaged):
+                    with self.assertRaisesRegex(ValueError, message):
+                        experiment.load_model(self.data, checkpoint, 'cpu')
             reads.clear()
             def read_testing(key):
                 self.assertIn(key, self.data.descriptor['splits']['test'])

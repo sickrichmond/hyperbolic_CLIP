@@ -14,6 +14,23 @@ from training.attribution_args import parse_args, validate_args
 
 
 class IABenchSlurmTests(unittest.TestCase):
+    def test_cli_depth_and_separation_defaults_are_independent(self):
+        for dataset, hierarchy in (("iab", "none"), ("iabench", "none"), ("iabench", "increfa")):
+            base = ["--dataset_path", "unused", "--hierarchy", hierarchy, "--anchor_init", "random"]
+            if dataset == "iab":
+                base += ["--captions_dir", "unused"]
+            args = parse_args(base, dataset=dataset)
+            validate_args(args)
+            self.assertEqual((args.target_norm, args.geodesic_margin), (2., 4.))
+            for target in ("0", "2.5", "6"):
+                args = parse_args(base + ["--target_norm", target], dataset=dataset)
+                validate_args(args)
+                self.assertEqual((args.target_norm, args.geodesic_margin), (float(target), 4.))
+            for margin in ("0", "3"):
+                args = parse_args(base + ["--geodesic_margin", margin], dataset=dataset)
+                validate_args(args)
+                self.assertEqual((args.target_norm, args.geodesic_margin), (2., float(margin)))
+
     def test_training_modes_and_test_evaluation(self):
         repo = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory(prefix="iabench slurm ") as directory:
@@ -24,7 +41,7 @@ class IABenchSlurmTests(unittest.TestCase):
             (base / "hyperbolic_CLIP_riccardo").mkdir()
             checkpoints = base / "checkpoints"
             checkpoints.mkdir()
-            checkpoint = checkpoints / "attribution_iabench_random_anchor0p5_z4_tau4_ep30_corruption_vitl14.pt"
+            checkpoint = checkpoints / "attribution_iabench_random_anchor0p5_z4_tau2_ep30_corruption_vitl14.pt"
             manifest = checkpoints / "attribution_iabench_random_vitl14.splits.json"
             checkpoint.touch()
             manifest.touch()
@@ -84,17 +101,16 @@ exec bash "$1"
                     self.assertIn("--geodesic_margin", command["argv"])
                     self.assertNotIn("--lambda_cosine", command["argv"])
                     self.assertEqual(args.lambda_anchor, float(settings.get("LAMBDA_ANCHOR", .5)))
-                    self.assertEqual(args.target_norm, float(settings.get("TARGET_NORM", 4)))
+                    self.assertEqual(args.target_norm, float(settings.get("TARGET_NORM", 2)))
                     self.assertEqual(args.geodesic_margin,
-                                     float(settings.get("GEODESIC_MARGIN",
-                                         args.target_norm / (2 if args.hierarchy != "none" else 1))))
+                                     float(settings.get("GEODESIC_MARGIN", 4)))
                     self.assertEqual(args.num_epochs, int(settings.get("NUM_EPOCHS", 30)))
                     self.assertEqual(args.train_augment, settings.get("AUGMENT") == "1")
                     self.assertEqual(args.hierarchy, settings.get("HIERARCHY", "none"))
                     self.assertEqual(args.aug_policy, policy)
                     weight_tag = settings.get("LAMBDA_ANCHOR", "0.5").replace(".", "p")
                     margin_tag = format(args.geodesic_margin, ".17g").replace(".", "p")
-                    target_tag = settings.get("TARGET_NORM", "4").replace(".", "p")
+                    target_tag = settings.get("TARGET_NORM", "2").replace(".", "p")
                     self.assertEqual(args.output, settings.get("CKPT", str(checkpoints /
                         f"attribution_iabench_random_anchor{weight_tag}_z{margin_tag}_tau{target_tag}_ep{args.num_epochs}{suffix}_vitl14.pt")))
                     self.assertEqual(args.split_manifest, str(manifest))
@@ -197,8 +213,8 @@ exec bash "$1"
                     self.assertEqual(args.train_augment, settings.get("AUGMENT") == "1")
                     self.assertEqual(args.aug_policy, settings.get("AUG_POLICY", "corruption"))
                     weight = settings.get("LAMBDA_ANCHOR", "0.5").replace(".", "p")
-                    target = settings.get("TARGET_NORM", "4").replace(".", "p")
-                    margin = settings.get("GEODESIC_MARGIN", settings.get("TARGET_NORM", "4")).replace(".", "p")
+                    target = settings.get("TARGET_NORM", "2").replace(".", "p")
+                    margin = settings.get("GEODESIC_MARGIN", "4").replace(".", "p")
                     if "CKPT" in settings:
                         self.assertEqual(args.output, settings["CKPT"])
                     else:
