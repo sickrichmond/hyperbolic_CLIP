@@ -41,6 +41,7 @@ if stage == "train":
 
 class IABAnchorSweepTests(unittest.TestCase):
     def test_all_array_tasks_and_failure_propagation(self):
+        self.assertEqual({tau for _, _, tau in CONFIGS}, {1.5, 2, 2.5})
         with tempfile.TemporaryDirectory(prefix="iab sweep ") as tmp:
             root = Path(tmp)
             base = root / "hyp_fine_tuning"
@@ -81,7 +82,8 @@ class IABAnchorSweepTests(unittest.TestCase):
                     self.assertNotIn("dalle3", args.generators)
                     folder = base / f"checkpoints/sweep/iab_omnidfa_100/task_{index:02d}"
                     self.assertEqual(Path(args.output).parent, folder)
-                    self.assertIn(f"_z{z}_tau{tau}_", Path(args.output).name)
+                    tau_tag = str(tau).replace(".", "p")
+                    self.assertIn(f"_z{z}_tau{tau_tag}_", Path(args.output).name)
                     self.assertEqual(args.diag_plot_dir, str(folder / "diagnostics"))
                     self.assertEqual(args.split_manifest, str(base / "split_manifest_22cls.json"))
                     self.assertEqual((folder / "status.txt").read_text().strip(), "complete")
