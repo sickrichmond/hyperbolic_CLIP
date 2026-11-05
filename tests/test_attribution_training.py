@@ -155,19 +155,10 @@ class AttributionTrainingTests(unittest.TestCase):
         base = ["--dataset_path", "x", "--captions_dir", "y"]
         args = parse_args(base + ["--no_captions"])
         validate_args(args)
-        self.assertEqual((args.lambda_anchor, args.target_norm, args.geodesic_margin), (.2, 2., 4.))
-        for target in ("2.5", "4"):
-            independent_default = parse_args(base + ["--target_norm", target])
-            validate_args(independent_default)
-            self.assertEqual(independent_default.geodesic_margin, 4.)
-        matching = parse_args(base + ["--target_norm", "4", "--geodesic_margin", "4"])
-        validate_args(matching)
-        independent = parse_args(base + ["--target_norm", "4", "--geodesic_margin", "3"])
-        validate_args(independent)
-        self.assertEqual((independent.target_norm, independent.geodesic_margin), (4, 3))
+        self.assertEqual((args.lambda_anchor, args.target_norm), (.2, 2.))
         legacy = parse_args(base + ["--lambda_cosine", "0.5"])
         self.assertEqual(legacy.lambda_anchor, .5)
-        for flag in ("--lambda_anchor", "--target_norm", "--geodesic_margin"):
+        for flag in ("--lambda_anchor", "--target_norm"):
             for value in ("-1", "nan", "inf"):
                 with self.subTest(flag=flag, value=value), self.assertRaisesRegex(
                         ValueError, "finite and non-negative"):
@@ -176,7 +167,7 @@ class AttributionTrainingTests(unittest.TestCase):
                                (["--profile_steps", "10"], "requires --diag_plot_dir")):
             with self.assertRaisesRegex(ValueError, error):
                 validate_args(parse_args(base + options))
-        for flag in ("--lambda_cap_in_class", "--lambda_img_in_cap",
+        for flag in ("--geodesic_margin", "--lambda_cap_in_class", "--lambda_img_in_cap",
                      "--lambda_axis", "--lambda_hinge", "--pos_mode",
                      "--theta_max",
                      "--loss", "--lambda_ce", "--ce_tau_init", "--lambda_sep",
@@ -214,7 +205,7 @@ class AttributionTrainingTests(unittest.TestCase):
               "--lambda_anchor", ".5", "--target_norm", "2.5"], False),
             (["--anchor_init", "image_centroid", "--anchor_norm_range", "1", "2"], False),
             (["--anchor_init", "random", "--require_caption"], True),
-            (["--anchor_init", "random", "--target_norm", "6", "--geodesic_margin", "3",
+            (["--anchor_init", "random", "--target_norm", "2.5",
               "--lambda_anchor", ".5", "--lambda_norm", ".5", "--train_augment",
               "--aug_policy", "omnidfa"], True),
         ]
@@ -232,8 +223,7 @@ class AttributionTrainingTests(unittest.TestCase):
                 self.assertEqual(checkpoint["anchor_penalty"], "geodesic")
                 self.assertEqual(checkpoint["anchor_scope"], "classes")
                 self.assertEqual(checkpoint["lambda_anchor"], .5 if "--lambda_anchor" in options else .2)
-                self.assertEqual(checkpoint["geodesic_margin"],
-                                 3 if "--geodesic_margin" in options else 4.)
+                self.assertEqual(checkpoint["geodesic_margin"], 2 * checkpoint["target_norm"])
                 self.assertEqual(checkpoint["norm_space"], "hyperbolic_depth")
                 self.assertEqual(checkpoint["anchor_reduction"], "mean")
                 self.assertEqual(checkpoint["lambda_cosine"], 0.)

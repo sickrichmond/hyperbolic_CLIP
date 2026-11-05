@@ -41,7 +41,7 @@ if stage == "train":
 
 class IABAnchorSweepTests(unittest.TestCase):
     def test_all_array_tasks_and_failure_propagation(self):
-        self.assertEqual({tau for _, _, tau in CONFIGS}, {1.5, 2, 2.5})
+        self.assertEqual(CONFIGS, ((.5, 3, 1.5), (.5, 4, 2), (.5, 5, 2.5)))
         with tempfile.TemporaryDirectory(prefix="iab sweep ") as tmp:
             root = Path(tmp)
             base = root / "hyp_fine_tuning"
@@ -69,8 +69,8 @@ class IABAnchorSweepTests(unittest.TestCase):
                     self.assertEqual(len(calls), 4)
                     args = parse_args(calls[0]["argv"][1:])
                     validate_args(args)
-                    self.assertEqual((args.lambda_anchor, args.geodesic_margin, args.target_norm),
-                                     (weight, z, tau))
+                    self.assertEqual((args.lambda_anchor, args.target_norm), (weight, tau))
+                    self.assertNotIn("--geodesic_margin", calls[0]["argv"])
                     self.assertEqual((args.num_epochs, args.lambda_neg, args.lambda_norm, args.norm_mode),
                                      (30, 1, .5, "floor"))
                     self.assertEqual((args.batch_size, args.seed, args.optimizer, args.lr, args.lr_schedule),
@@ -83,7 +83,7 @@ class IABAnchorSweepTests(unittest.TestCase):
                     folder = base / f"checkpoints/sweep/iab_omnidfa_100/task_{index:02d}"
                     self.assertEqual(Path(args.output).parent, folder)
                     tau_tag = str(tau).replace(".", "p")
-                    self.assertIn(f"_z{z}_tau{tau_tag}_", Path(args.output).name)
+                    self.assertIn(f"_z{z:g}_tau{tau_tag}_", Path(args.output).name)
                     self.assertEqual(args.diag_plot_dir, str(folder / "diagnostics"))
                     self.assertEqual(args.split_manifest, str(base / "split_manifest_22cls.json"))
                     self.assertEqual((folder / "status.txt").read_text().strip(), "complete")
@@ -99,7 +99,7 @@ class IABAnchorSweepTests(unittest.TestCase):
                         self.assertEqual(flags["--log_dir"], str(folder / "evaluation"))
                     self.assertTrue(all(call["gpu"] == "4,5" and call["excluded"] == "dalle3"
                                         for call in calls))
-            self.assertEqual(len(outputs), 18)
+            self.assertEqual(len(outputs), 3)
             # A second submission has its own outputs, even for the same configuration.
             for job, failure, count in (("200", "train", 1), ("300", "4", 3)):
                 capture.unlink()
@@ -117,7 +117,7 @@ class IABAnchorSweepTests(unittest.TestCase):
             self.assertFalse(capture.exists())
             folder = base / "checkpoints/sweep/iab_omnidfa_100/task_00"
             self.assertEqual((folder / "status.txt").read_text().strip(), "complete")
-            for task in ("-1", "18", "oops", "01"):
+            for task in ("-1", "3", "oops", "01"):
                 invalid = subprocess.run(["bash", "-c", SHELL, "_", str(SCRIPT)],
                     env=dict(env, SLURM_ARRAY_TASK_ID=task), capture_output=True, text=True)
                 self.assertEqual(invalid.returncode, 2)
@@ -149,8 +149,8 @@ class IABAnchorSweepTests(unittest.TestCase):
                 self.assertEqual(main(["--dir", tmp]), 0)
             with (root / "summary.csv").open() as stream:
                 rows = list(csv.DictReader(stream))
-            self.assertEqual(len(rows), 18)
-            self.assertEqual([int(row["task"]) for row in rows], list(range(18)))
+            self.assertEqual(len(rows), 3)
+            self.assertEqual([int(row["task"]) for row in rows], list(range(3)))
             self.assertTrue(all(row["status"] == "complete" for row in rows))
             self.assertEqual(float(rows[0]["clean_acc"]), 0)
             self.assertEqual(float(rows[0]["blur5_balanced_accuracy"]), .01)
@@ -162,34 +162,31 @@ class IABAnchorSweepTests(unittest.TestCase):
             root = Path(tmp)
             self.make_results(root)
             (root / "task_00/status.txt").write_text("failed (exit 7)")
-            (root / "task_01/status.txt").write_text("running")
-            (root / "task_02/evaluation/test_results_degraded_4.txt").unlink()
-            (root / "task_03/evaluation/test_results_degraded_6.txt").write_text("acc: nan\n")
-            path = root / "task_04/attribution_22cls_fixture.pt"
-            ckpt = torch.load(path, weights_only=False)
-            ckpt["geodesic_margin"] = 99
-            torch.save(ckpt, path)
-            (root / "task_05/attribution_22cls_fixture.pt").write_text("broken checkpoint")
-            (root / "task_06/evaluation/test_results_degraded_0.txt").write_text(
+            (root / "task_01").rename(root / "removed_task")
+            (root / "task_02/evaluation/test_results_degraded_0.txt").write_text(
                 "acc: .5\nacc: .6\nbalanced_accuracy: .5\n")
-            (root / "task_07").rename(root / "removed_task")
-            (root / "task_08/status.txt").unlink()
-            path = root / "task_09/attribution_22cls_fixture.pt"
-            ckpt = torch.load(path, weights_only=False)
-            ckpt.pop("norm_space")
-            torch.save(ckpt, path)
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 self.assertEqual(main(["--dir", tmp]), 1)
             rows = {row["task"]: row for row in collect(root)}
             self.assertEqual(rows[0]["status"], "failed")
-            self.assertEqual(rows[1]["status"], "incomplete")
-            self.assertEqual(rows[7]["status"], "missing")
-            self.assertTrue(all(rows[i]["status"] == "invalid" for i in (2, 3, 4, 5, 6, 8, 9)))
-            self.assertTrue(all(rows[i]["error"] for i in range(10)))
-            self.assertIn("norm_space", rows[9]["error"])
-            self.assertIn("Incomplete sweep: 10/18", output.getvalue())
+            self.assertEqual(rows[1]["status"], "missing")
+            self.assertEqual(rows[2]["status"], "invalid")
+            self.assertTrue(all(row["error"] for row in rows.values()))
+            self.assertIn("Incomplete sweep: 3/3", output.getvalue())
             self.assertNotIn("Best clean validation configuration", output.getvalue())
+
+    def test_rejects_checkpoints_from_older_grids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.make_results(root)
+            for index, (key, value) in enumerate((
+                    ("target_norm", 2), ("norm_space", "lorentz_spatial"), ("geodesic_margin", 4))):
+                path = root / f"task_{index:02d}/attribution_22cls_fixture.pt"
+                checkpoint = torch.load(path, weights_only=False)
+                torch.save(dict(checkpoint, **{key: value}), path)
+            rows = collect(root)
+            self.assertTrue(all(row["status"] == "invalid" for row in rows))
 
 
 if __name__ == "__main__":

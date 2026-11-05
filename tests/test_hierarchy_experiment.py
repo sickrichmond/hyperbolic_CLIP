@@ -212,7 +212,7 @@ class HierarchyExperimentTests(unittest.TestCase):
     def test_selected_recipes(self):
         args = experiment.ours_args(self.data, Path('/tmp/unused'), 0)
         self.assertEqual((args.num_epochs, args.batch_size, args.lambda_anchor,
-                          args.target_norm, args.geodesic_margin), (30, 256, .5, 2, 4))
+                          args.target_norm), (30, 256, .5, 2))
         self.assertEqual(Path(args.output).name, 'ours_anchor0p5_z4_tau2_ep30.pt')
         self.assertEqual(experiment.METHODS, ('ours',))
         self.assertEqual(set(experiment.RECIPES), {'ours'})

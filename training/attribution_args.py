@@ -87,7 +87,8 @@ def parse_args(argv=None, dataset="iab"):
     p.add_argument("--lambda_norm",    type=float, default=0.0,
                    help="Weight of the hyperbolic radial-depth regularizer (0 disables).")
     p.add_argument("--target_norm",    type=float, default=2.0,
-                   help="Target hyperbolic distance from the origin (tau; default: 2).")
+                   help="Target hyperbolic depth tau (default: 2). The geodesic margin "
+                        "is twice tau, except on IABench with IncreFA, where it equals tau.")
     p.add_argument("--norm_mode", choices=["floor", "bilateral"], default="floor",
                    help="Penalize depths below the target (floor) or deviations on "
                         "both sides (bilateral).")
@@ -99,9 +100,6 @@ def parse_args(argv=None, dataset="iab"):
                    help="Weight of mean geodesic-distance hinge over unique anchor pairs "
                         "(families in hierarchy mode; default: 0.2; 0 disables). "
                         "--lambda_cosine is a legacy spelling for this new penalty.")
-    p.add_argument("--geodesic_margin", type=float, default=4.0,
-                   help="Anchor geodesic-distance threshold z (default: 4), independent "
-                        "of --target_norm in both ordinary and hierarchy modes.")
     p.add_argument("--batch_size",     type=int,   default=256)
     p.add_argument("--num_epochs",     type=int,   default=10)
     p.add_argument("--lr",             type=float, default=5e-5)
@@ -160,9 +158,11 @@ def parse_args(argv=None, dataset="iab"):
 
 def validate_args(args, family_groups=None):
     """Validate mode combinations before loading data or model weights."""
+    iabench_hierarchy = args.dataset == "iabench" and args.hierarchy == "increfa"
+    geodesic_margin = args.target_norm if iabench_hierarchy else 2 * args.target_norm
     if not all(math.isfinite(value) and value >= 0 for value in
-               (args.lambda_anchor, args.target_norm, args.geodesic_margin)):
-        raise ValueError("Anchor weight, norm target and geodesic margin must be finite and non-negative")
+               (args.lambda_anchor, args.target_norm, geodesic_margin)):
+        raise ValueError("Anchor weight, norm target and derived geodesic margin must be finite and non-negative")
     if args.hierarchy != "none":
         if args.dataset != "iabench" and not (args.dataset == "hybrid" and family_groups is not None):
             raise ValueError("--hierarchy increfa is supported only for IABench")
@@ -171,7 +171,7 @@ def validate_args(args, family_groups=None):
         settings = (args.curv, args.min_radius, args.family_init_norm,
                     args.family_depth_margin, args.lambda_family, args.lambda_family_depth,
                     args.anchor_init_norm, args.init_depth, args.fixed_image_radius,
-                    args.margin, args.lambda_neg, args.lambda_anchor, args.geodesic_margin,
+                    args.margin, args.lambda_neg, args.lambda_anchor,
                     args.lambda_norm, args.target_norm)
         if not all(math.isfinite(value) and value >= 0 for value in settings) or args.curv == 0:
             raise ValueError("Hierarchy settings must be finite and non-negative, with positive curvature")

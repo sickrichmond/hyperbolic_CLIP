@@ -2,8 +2,8 @@
 
 Supports text and free class anchors, image-only training, validation-based
 checkpoint selection, and Poincare diagnostics. The pairwise geodesic anchor
-penalty defaults to weight 0.2; --lambda_anchor 0 disables it. Its independent
-geodesic margin z defaults to 4; the radial-depth target tau independently defaults to 2.
+penalty defaults to weight 0.2 and --lambda_anchor 0 disables it. Its geodesic
+margin z is twice the radial-depth target tau, or tau for IABench IncreFA.
 """
 from pathlib import Path
 from time import perf_counter
@@ -155,11 +155,12 @@ def _run_training(args, datasets, checkpoint_metadata, plot_each_epoch, family_g
         curv=args.curv, min_radius=args.min_radius,
         margin=args.margin, lambda_neg=args.lambda_neg,
         lambda_norm=args.lambda_norm, target_norm=args.target_norm,
-        lambda_anchor=args.lambda_anchor, geodesic_margin=args.geodesic_margin,
+        lambda_anchor=args.lambda_anchor,
         norm_mode=args.norm_mode, neg_samples=args.neg_samples,
         lambda_family=args.lambda_family if args.hierarchy != "none" else 0.0,
         lambda_family_depth=args.lambda_family_depth if args.hierarchy != "none" else 0.0,
         family_depth_margin=args.family_depth_margin,
+        iabench_hierarchy=args.dataset == "iabench" and args.hierarchy == "increfa",
     ).to(device)
 
     # Geometric tensors use their own LR and no weight decay.
@@ -462,7 +463,7 @@ def _run_training(args, datasets, checkpoint_metadata, plot_each_epoch, family_g
                     "target_norm":     args.target_norm,
                     "lambda_norm":     args.lambda_norm,
                     "lambda_anchor":   args.lambda_anchor,
-                    "geodesic_margin": args.geodesic_margin,
+                    "geodesic_margin": cone_loss.geodesic_margin,
                     "anchor_penalty":  "geodesic",
                     "anchor_reduction": "mean",
                     "anchor_scope":    "families" if args.hierarchy != "none" else "classes",

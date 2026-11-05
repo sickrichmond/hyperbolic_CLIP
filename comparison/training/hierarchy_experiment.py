@@ -40,7 +40,7 @@ def ours_args(data, output, workers):
         family_depth_margin=.5, lambda_family=1, lambda_family_depth=.5,
         lora_target=r'vision_model\.encoder\.layers\.[0-9]+\.self_attn\.(q_proj|v_proj)',
         lora_r=16, lora_alpha=32, hyperbolic_dim=128, curv=1, min_radius=.5, margin=.3,
-        lambda_neg=1, lambda_norm=.5, target_norm=2, lambda_anchor=.5, geodesic_margin=4,
+        lambda_neg=1, lambda_norm=.5, target_norm=2, lambda_anchor=.5,
         init_depth=3, batch_size=batch, num_epochs=epochs, lr=3e-4, weight_decay=.01,
         optimizer='adamw', lr_schedule='cosine', num_workers=workers, seed=42, log_every=10,
     )

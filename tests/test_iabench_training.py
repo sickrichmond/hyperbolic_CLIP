@@ -229,7 +229,7 @@ class IABenchIntegrationTests(unittest.TestCase):
                         self.assertEqual(ckpt["hierarchy"], "increfa")
                         self.assertEqual(ckpt["cosine_scope"], "families")
                         self.assertEqual(ckpt["anchor_scope"], "families")
-                        self.assertEqual((ckpt["target_norm"], ckpt["geodesic_margin"]), (2., 4.))
+                        self.assertEqual((ckpt["target_norm"], ckpt["geodesic_margin"]), (2., 2.))
                         self.assertEqual(ckpt["norm_space"], "hyperbolic_depth")
                         self.assertEqual(ckpt["family_names"], ["real", "autoregressive", "diffusion"])
                         self.assertEqual(ckpt["family_of"], [0, 2, 1])

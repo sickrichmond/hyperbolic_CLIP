@@ -2,6 +2,8 @@
 
 Run: python -m tests.test_iabench_slurm
 """
+from contextlib import redirect_stderr
+import io
 import json
 import os
 from pathlib import Path
@@ -14,22 +16,20 @@ from training.attribution_args import parse_args, validate_args
 
 
 class IABenchSlurmTests(unittest.TestCase):
-    def test_cli_depth_and_separation_defaults_are_independent(self):
+    def test_cli_accepts_depth_and_rejects_explicit_margin(self):
         for dataset, hierarchy in (("iab", "none"), ("iabench", "none"), ("iabench", "increfa")):
             base = ["--dataset_path", "unused", "--hierarchy", hierarchy, "--anchor_init", "random"]
             if dataset == "iab":
                 base += ["--captions_dir", "unused"]
             args = parse_args(base, dataset=dataset)
             validate_args(args)
-            self.assertEqual((args.target_norm, args.geodesic_margin), (2., 4.))
+            self.assertEqual(args.target_norm, 2.)
             for target in ("0", "2.5", "6"):
                 args = parse_args(base + ["--target_norm", target], dataset=dataset)
                 validate_args(args)
-                self.assertEqual((args.target_norm, args.geodesic_margin), (float(target), 4.))
-            for margin in ("0", "3"):
-                args = parse_args(base + ["--geodesic_margin", margin], dataset=dataset)
-                validate_args(args)
-                self.assertEqual((args.target_norm, args.geodesic_margin), (2., float(margin)))
+                self.assertEqual(args.target_norm, float(target))
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                parse_args(base + ["--geodesic_margin", "3"], dataset=dataset)
 
     def test_training_modes_and_test_evaluation(self):
         repo = Path(__file__).resolve().parents[1]
@@ -79,8 +79,8 @@ exec bash "$1"
                      "_corruption_hierarchy_increfa", "corruption"),
                     ({"HIERARCHY": "increfa", "TARGET_NORM": "2.1234567"},
                      "_hierarchy_increfa", "corruption"),
-                    ({"TARGET_NORM": "6", "GEODESIC_MARGIN": "3"}, "", "corruption"),
-                    ({"HIERARCHY": "increfa", "TARGET_NORM": "4", "GEODESIC_MARGIN": "3"},
+                    ({"TARGET_NORM": "6"}, "", "corruption"),
+                    ({"HIERARCHY": "increfa", "TARGET_NORM": "4"},
                      "_hierarchy_increfa", "corruption"),
                     ({"CKPT": str(checkpoints / "mean checkpoint.pt"),
                       "HIERARCHY": "increfa", "AUGMENT": "1"},
@@ -98,18 +98,17 @@ exec bash "$1"
                     args = parse_args(command["argv"][1:], dataset="iabench")
                     validate_args(args)
                     self.assertIn("--lambda_anchor", command["argv"])
-                    self.assertIn("--geodesic_margin", command["argv"])
+                    self.assertNotIn("--geodesic_margin", command["argv"])
                     self.assertNotIn("--lambda_cosine", command["argv"])
                     self.assertEqual(args.lambda_anchor, float(settings.get("LAMBDA_ANCHOR", .5)))
                     self.assertEqual(args.target_norm, float(settings.get("TARGET_NORM", 2)))
-                    self.assertEqual(args.geodesic_margin,
-                                     float(settings.get("GEODESIC_MARGIN", 4)))
                     self.assertEqual(args.num_epochs, int(settings.get("NUM_EPOCHS", 30)))
                     self.assertEqual(args.train_augment, settings.get("AUGMENT") == "1")
                     self.assertEqual(args.hierarchy, settings.get("HIERARCHY", "none"))
                     self.assertEqual(args.aug_policy, policy)
                     weight_tag = settings.get("LAMBDA_ANCHOR", "0.5").replace(".", "p")
-                    margin_tag = format(args.geodesic_margin, ".17g").replace(".", "p")
+                    margin = args.target_norm if args.hierarchy == "increfa" else 2 * args.target_norm
+                    margin_tag = format(margin, ".17g").replace(".", "p")
                     target_tag = settings.get("TARGET_NORM", "2").replace(".", "p")
                     self.assertEqual(args.output, settings.get("CKPT", str(checkpoints /
                         f"attribution_iabench_random_anchor{weight_tag}_z{margin_tag}_tau{target_tag}_ep{args.num_epochs}{suffix}_vitl14.pt")))
@@ -121,13 +120,11 @@ exec bash "$1"
                     self.assertIn(f"Dataset: {args.dataset_path}", completed.stdout)
                     margin_line = next(line for line in completed.stdout.splitlines()
                                        if line.startswith("Geodesic anchor separation:"))
-                    self.assertEqual(float(margin_line.split("geodesic_margin=")[1]),
-                                     args.geodesic_margin)
+                    self.assertEqual(float(margin_line.split("geodesic_margin=")[1]), margin)
                     self.assertEqual((args.val_frac, args.test_frac, args.seed), (0.1, 0.1, 42))
                     self.assertEqual(command["gpu"], "4")
             for settings in ({"AUGMENT": "2"}, {"AUG_POLICY": "unknown"},
-                             {"HIERARCHY": "unknown"}, {"GEODESIC_MARGIN": "-1"},
-                             {"GEODESIC_MARGIN": "nan"}, {"LAMBDA_ANCHOR": "-1"},
+                             {"HIERARCHY": "unknown"}, {"LAMBDA_ANCHOR": "-1"},
                              {"LAMBDA_ANCHOR": "oops"}, {"TARGET_NORM": "-1"},
                              {"TARGET_NORM": "nan"}, {"NUM_EPOCHS": "0"},
                              {"NUM_EPOCHS": "-1"}, {"NUM_EPOCHS": "2.5"}):
@@ -197,7 +194,7 @@ exec bash "$1"
             for settings, suffix in (({}, ""), ({"AUGMENT": "1"}, "_corruption"),
                     ({"AUGMENT": "1", "AUG_POLICY": "omnidfa"}, "_omnidfa"),
                     ({"LAMBDA_ANCHOR": "0.2", "TARGET_NORM": "3", "NUM_EPOCHS": "20"}, ""),
-                    ({"TARGET_NORM": "6", "GEODESIC_MARGIN": "3"}, ""),
+                    ({"TARGET_NORM": "2.5", "GEODESIC_MARGIN": "3"}, ""),
                     ({"CKPT": str(base / "mean checkpoint.pt")}, ""),
                     ({"CKPT": str(base / "mean aug checkpoint.pt"), "AUGMENT": "1"}, "_corruption"),
                     ({"CKPT": str(base / "mean omni checkpoint.pt"), "AUGMENT": "1",
@@ -214,7 +211,7 @@ exec bash "$1"
                     self.assertEqual(args.aug_policy, settings.get("AUG_POLICY", "corruption"))
                     weight = settings.get("LAMBDA_ANCHOR", "0.5").replace(".", "p")
                     target = settings.get("TARGET_NORM", "2").replace(".", "p")
-                    margin = settings.get("GEODESIC_MARGIN", "4").replace(".", "p")
+                    margin = format(2 * args.target_norm, ".17g").replace(".", "p")
                     if "CKPT" in settings:
                         self.assertEqual(args.output, settings["CKPT"])
                     else:

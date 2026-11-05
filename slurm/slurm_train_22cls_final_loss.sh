@@ -6,9 +6,9 @@
 #
 # Submit: sbatch slurm/slurm_train_22cls_final_loss.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_22cls_final_loss.sh
-#         sbatch --export=ALL,LAMBDA_ANCHOR=0.5,TARGET_NORM=2,GEODESIC_MARGIN=4 slurm/slurm_train_22cls_final_loss.sh
+#         sbatch --export=ALL,LAMBDA_ANCHOR=0.5,TARGET_NORM=2 slurm/slurm_train_22cls_final_loss.sh
 # Defaults: OPTIMIZER=adamw, LAMBDA_ANCHOR=0.5, radial-depth TARGET_NORM=2, ANCHOR_INIT=random.
-# GEODESIC_MARGIN sets z independently; it defaults to 4.
+# The trainer derives z as twice TARGET_NORM.
 # Checkpoint names include total NUM_EPOCHS (default 30), not the selected best epoch.
 # CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
 # The trainer rejects concurrent writers and existing augmentation/hierarchy conflicts.
@@ -51,7 +51,6 @@ AUG_POLICY=${AUG_POLICY:-corruption}
 OPTIMIZER=${OPTIMIZER:-adamw}
 LAMBDA_ANCHOR=${LAMBDA_ANCHOR:-0.5}
 TARGET_NORM=${TARGET_NORM:-2}
-GEODESIC_MARGIN=${GEODESIC_MARGIN:-4}
 ANCHOR_INIT=${ANCHOR_INIT:-random}
 NUM_EPOCHS=${NUM_EPOCHS:-30}
 
@@ -68,7 +67,7 @@ case "$ANCHOR_INIT" in
     text|image_centroid|text_free|random) ;;
     *) echo "ERROR: ANCHOR_INIT must be text, image_centroid, text_free, or random (got: $ANCHOR_INIT)" >&2; exit 2 ;;
 esac
-for name in LAMBDA_ANCHOR TARGET_NORM GEODESIC_MARGIN; do
+for name in LAMBDA_ANCHOR TARGET_NORM; do
     if [[ ! "${!name}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
         echo "ERROR: $name must be a non-negative number (got: ${!name})" >&2
         exit 2
@@ -76,7 +75,8 @@ for name in LAMBDA_ANCHOR TARGET_NORM GEODESIC_MARGIN; do
 done
 
 LAMBDA_TAG=${LAMBDA_ANCHOR//./p}
-MARGIN_TAG=${GEODESIC_MARGIN//./p}
+Z=$(LC_ALL=C awk -v tau="$TARGET_NORM" 'BEGIN { printf "%.17g", 2 * tau }')
+MARGIN_TAG=${Z//./p}
 TARGET_TAG=${TARGET_NORM//./p}
 RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_tau${TARGET_TAG}_${ANCHOR_INIT}_${OPTIMIZER}_ep${NUM_EPOCHS}"
 if [ "$AUGMENT" = 1 ]; then
@@ -91,7 +91,7 @@ else
     CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_vitl14.pt}
 fi
 
-echo "Training with optimizer=$OPTIMIZER, lambda_anchor=$LAMBDA_ANCHOR, target_norm=$TARGET_NORM, geodesic_margin=$GEODESIC_MARGIN, anchor_init=$ANCHOR_INIT"
+echo "Training with optimizer=$OPTIMIZER, lambda_anchor=$LAMBDA_ANCHOR, target_norm=$TARGET_NORM, geodesic_margin=$Z, anchor_init=$ANCHOR_INIT"
 echo "Training with AUGMENT=$AUGMENT, AUG_POLICY=$AUG_POLICY → $CKPT"
 
 mkdir -p "$OUT"
@@ -125,7 +125,6 @@ python train_attribution.py \
     --norm_mode       floor \
     --target_norm     "$TARGET_NORM" \
     --lambda_anchor   "$LAMBDA_ANCHOR" \
-    --geodesic_margin "$GEODESIC_MARGIN" \
     --no_captions \
     $AUG_FLAG \
     --batch_size      256 \

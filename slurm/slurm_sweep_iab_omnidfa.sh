@@ -1,5 +1,5 @@
 #!/bin/bash
-# IAB: 18 independent (lambda_anchor, z, tau) runs, then clean/JPEG30/BLUR5 tests.
+# IAB: three depth targets with z=2*tau, then clean/JPEG30/BLUR5 tests.
 # Submit: sbatch slurm/slurm_sweep_iab_omnidfa.sh
 # Results: $WORK/hyp_fine_tuning/checkpoints/sweep/iab_omnidfa_ARRAY_JOB_ID
 # Collect: python -m comparison.training.scripts.collect_iab_anchor_sweep --dir RESULTS
@@ -13,15 +13,15 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --gpus-per-node=2
 #SBATCH --time=3-00:00:00
-#SBATCH --array=0-17%4
+#SBATCH --array=0-2
 #SBATCH --output=%x_%A_%a.out
 #SBATCH --error=%x_%A_%a.err
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=richitrebbia@gmail.com
 
 set -euo pipefail
-if [[ ! "${SLURM_ARRAY_TASK_ID:-}" =~ ^([0-9]|1[0-7])$ ]]; then
-    echo "ERROR: SLURM_ARRAY_TASK_ID must be between 0 and 17" >&2
+if [[ ! "${SLURM_ARRAY_TASK_ID:-}" =~ ^[0-2]$ ]]; then
+    echo "ERROR: SLURM_ARRAY_TASK_ID must be between 0 and 2" >&2
     exit 2
 fi
 
@@ -37,12 +37,9 @@ trap 'exit 143' TERM
 trap 'exit 130' INT
 echo running > "$TASK_DIR/status.txt"
 
-WEIGHTS=(0.2 0.5)
-MARGINS=(2 3 4)
 TARGETS=(1.5 2 2.5)
-LAMBDA_ANCHOR=${WEIGHTS[SLURM_ARRAY_TASK_ID / 9]}
-GEODESIC_MARGIN=${MARGINS[SLURM_ARRAY_TASK_ID / 3 % 3]}
-TARGET_NORM=${TARGETS[SLURM_ARRAY_TASK_ID % 3]}
+LAMBDA_ANCHOR=0.5
+TARGET_NORM=${TARGETS[SLURM_ARRAY_TASK_ID]}
 AUGMENT=1
 AUG_POLICY=omnidfa
 ANCHOR_INIT=random
@@ -52,7 +49,7 @@ OUT="$TASK_DIR"
 DIAG_PLOT_DIR="$TASK_DIR/diagnostics"
 # An inherited CKPT would let different array tasks overwrite the same model.
 unset CKPT
-echo "$TASK_NAME: lambda_anchor=$LAMBDA_ANCHOR z=$GEODESIC_MARGIN tau=$TARGET_NORM"
+echo "$TASK_NAME: lambda_anchor=$LAMBDA_ANCHOR tau=$TARGET_NORM"
 source "$REPO/slurm/slurm_train_22cls_final_loss.sh" > "$TASK_DIR/train.log" 2>&1
 
 for level in 0 4 6; do

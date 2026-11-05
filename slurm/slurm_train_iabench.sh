@@ -4,15 +4,15 @@
 # manifest shared by clean and augmented training. Validation stays clean.
 # AUGMENT=1 enables corruption (default) or omnidfa via AUG_POLICY.
 # Augmented checkpoint suffixes name the policy: _corruption / _omnidfa.
-# Defaults: LAMBDA_ANCHOR=0.5, radial-depth TARGET_NORM=2, GEODESIC_MARGIN=4.
-# GEODESIC_MARGIN sets z independently for classes and families.
+# Defaults: LAMBDA_ANCHOR=0.5, radial-depth TARGET_NORM=2.
+# The trainer uses z=2*tau for classes and z=tau for IABench IncreFA families.
 # Checkpoint names include anchor weight, z, tau and total NUM_EPOCHS (default 30).
 # CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
 # The trainer rejects concurrent writers and existing augmentation/hierarchy conflicts.
 # Submit: sbatch slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1 slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_iabench.sh
-#         sbatch --export=ALL,TARGET_NORM=2,GEODESIC_MARGIN=4 slurm/slurm_train_iabench.sh
+#         sbatch --export=ALL,TARGET_NORM=2 slurm/slurm_train_iabench.sh
 # Timing: PROFILE_STEPS=100 sbatch slurm/slurm_train_iabench.sh
 
 #SBATCH --account=EUHPC_D35_189
@@ -51,13 +51,12 @@ AUG_POLICY="${AUG_POLICY:-corruption}"
 HIERARCHY="${HIERARCHY:-none}"
 LAMBDA_ANCHOR="${LAMBDA_ANCHOR:-0.5}"
 TARGET_NORM="${TARGET_NORM:-2}"
-GEODESIC_MARGIN="${GEODESIC_MARGIN:-4}"
 
 if [[ ! "$NUM_EPOCHS" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: NUM_EPOCHS must be a positive integer (got: $NUM_EPOCHS)" >&2
     exit 2
 fi
-for name in LAMBDA_ANCHOR TARGET_NORM GEODESIC_MARGIN; do
+for name in LAMBDA_ANCHOR TARGET_NORM; do
     if [[ ! "${!name}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
         echo "ERROR: $name must be a non-negative number (got: ${!name})" >&2
         exit 2
@@ -90,7 +89,9 @@ if [ "$AUGMENT" = 1 ]; then
     AUG_SUFFIX="_${AUG_POLICY}"
 fi
 LAMBDA_TAG=${LAMBDA_ANCHOR//./p}
-MARGIN_TAG=${GEODESIC_MARGIN//./p}
+Z=$(LC_ALL=C awk -v tau="$TARGET_NORM" -v hierarchy="$HIERARCHY" \
+    'BEGIN { printf "%.17g", (hierarchy == "increfa" ? tau : 2 * tau) }')
+MARGIN_TAG=${Z//./p}
 TARGET_TAG=${TARGET_NORM//./p}
 RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_tau${TARGET_TAG}_ep${NUM_EPOCHS}"
 CKPT="${CKPT:-$OUT/attribution_iabench_random_${RUN_TAG}${AUG_SUFFIX}${HIERARCHY_SUFFIX}_vitl14.pt}"
@@ -101,7 +102,7 @@ cd "$REPO"
 echo "Slurm GPUs: ${CUDA_VISIBLE_DEVICES:-unset}"
 echo "Dataset: $DATA | Manifest: $SPLIT_MANIFEST"
 echo "Training with AUGMENT=$AUGMENT, AUG_POLICY=$AUG_POLICY, HIERARCHY=$HIERARCHY → $CKPT"
-echo "Geodesic anchor separation: lambda_anchor=$LAMBDA_ANCHOR, geodesic_margin=$GEODESIC_MARGIN"
+echo "Geodesic anchor separation: lambda_anchor=$LAMBDA_ANCHOR, geodesic_margin=$Z"
 
 python train_iabench.py \
     --dataset_path "$DATA" \
@@ -120,7 +121,6 @@ python train_iabench.py \
     --lambda_norm 0.5 \
     --target_norm "$TARGET_NORM" \
     --lambda_anchor "$LAMBDA_ANCHOR" \
-    --geodesic_margin "$GEODESIC_MARGIN" \
     --init_depth 3.0 \
     --batch_size 256 \
     --num_epochs "$NUM_EPOCHS" \

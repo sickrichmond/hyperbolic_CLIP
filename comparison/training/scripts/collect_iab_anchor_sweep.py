@@ -1,13 +1,12 @@
-"""Collect the fixed 18-run IAB OmniDFA sweep; rank by clean validation only."""
+"""Collect the IAB OmniDFA depth sweep and rank by clean validation accuracy."""
 import argparse
 import csv
-from itertools import product
 import math
 from pathlib import Path
 
 
 CONDITIONS = {0: "clean", 4: "jpeg30", 6: "blur5"}
-CONFIGS = tuple(product((0.2, 0.5), (2, 3, 4), (1.5, 2, 2.5)))
+CONFIGS = tuple((0.5, 2 * tau, tau) for tau in (1.5, 2, 2.5))
 FIELDS = ("task", "z", "tau", "lambda_anchor", "epoch", "checkpoint", "val_balanced",
           *(f"{name}_{metric}" for name in CONDITIONS.values()
             for metric in ("acc", "balanced_accuracy")), "status", "error")
@@ -101,7 +100,7 @@ def main(argv=None):
             print(f"     {row['error']}")
     incomplete = sum(row["status"] != "complete" for row in rows)
     if incomplete:
-        print(f"Incomplete sweep: {incomplete}/18 runs missing, failed or invalid; no winner declared.")
+        print(f"Incomplete sweep: {incomplete}/{len(CONFIGS)} runs missing, failed or invalid.")
     else:
         print(f"Best clean validation configuration: task {rows[0]['task']} "
               f"(z={rows[0]['z']}, tau={rows[0]['tau']}, lambda_anchor={rows[0]['lambda_anchor']})")
