@@ -1,5 +1,5 @@
 #!/bin/bash
-# IAB: three depth targets with z=2*tau, then clean/JPEG30/BLUR5 tests.
+# IAB: three depth targets with z=tau, then clean/JPEG30/BLUR5 tests.
 # Submit: sbatch slurm/slurm_sweep_iab_omnidfa.sh
 # Results: $WORK/hyp_fine_tuning/checkpoints/sweep/iab_omnidfa_ARRAY_JOB_ID
 # Collect: python -m comparison.training.scripts.collect_iab_anchor_sweep --dir RESULTS
@@ -38,6 +38,7 @@ trap 'exit 130' INT
 echo running > "$TASK_DIR/status.txt"
 
 TARGETS=(1.5 2 2.5)
+LAMBDA_NORM=0.5
 LAMBDA_ANCHOR=0.5
 TARGET_NORM=${TARGETS[SLURM_ARRAY_TASK_ID]}
 AUGMENT=1

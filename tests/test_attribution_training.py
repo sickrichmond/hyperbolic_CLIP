@@ -155,10 +155,11 @@ class AttributionTrainingTests(unittest.TestCase):
         base = ["--dataset_path", "x", "--captions_dir", "y"]
         args = parse_args(base + ["--no_captions"])
         validate_args(args)
-        self.assertEqual((args.lambda_anchor, args.target_norm), (.2, 2.))
+        self.assertEqual((args.lambda_anchor, args.lambda_norm, args.target_norm, args.num_epochs),
+                         (1., 1., 1., 20))
         legacy = parse_args(base + ["--lambda_cosine", "0.5"])
         self.assertEqual(legacy.lambda_anchor, .5)
-        for flag in ("--lambda_anchor", "--target_norm"):
+        for flag in ("--lambda_anchor", "--lambda_norm", "--target_norm"):
             for value in ("-1", "nan", "inf"):
                 with self.subTest(flag=flag, value=value), self.assertRaisesRegex(
                         ValueError, "finite and non-negative"):
@@ -222,8 +223,9 @@ class AttributionTrainingTests(unittest.TestCase):
                 self.assertEqual(checkpoint["num_epochs"], 2)
                 self.assertEqual(checkpoint["anchor_penalty"], "geodesic")
                 self.assertEqual(checkpoint["anchor_scope"], "classes")
-                self.assertEqual(checkpoint["lambda_anchor"], .5 if "--lambda_anchor" in options else .2)
-                self.assertEqual(checkpoint["geodesic_margin"], 2 * checkpoint["target_norm"])
+                self.assertEqual(checkpoint["lambda_anchor"], .5 if "--lambda_anchor" in options else 1.)
+                self.assertEqual(checkpoint["lambda_norm"], .5 if "--lambda_norm" in options else 1.)
+                self.assertEqual(checkpoint["geodesic_margin"], checkpoint["target_norm"])
                 self.assertEqual(checkpoint["norm_space"], "hyperbolic_depth")
                 self.assertEqual(checkpoint["anchor_reduction"], "mean")
                 self.assertEqual(checkpoint["lambda_cosine"], 0.)

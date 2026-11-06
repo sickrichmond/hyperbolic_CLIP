@@ -47,22 +47,21 @@ class EntailmentConeLoss(nn.Module):
         lambda_neg: float = 1.0,
         lambda_norm: float = 0.0,
         lambda_anchor: float = 0.0,
-        target_norm: float = 2.0,
+        target_norm: float = 1.0,
         norm_mode: str = "floor",
         neg_samples: int = 0,
         lambda_family: float = 0.0,
         lambda_family_depth: float = 0.0,
         family_depth_margin: float = 0.5,
         *,
-        iabench_hierarchy: bool = False,
+        anchor_margin_scale: float = 1.0,
     ):
         """Configure hinges, hyperbolic radial-depth and pairwise distance penalties.
 
         neg_samples=0 uses all wrong classes; otherwise subsample per image.
         The norm penalty is enabled when both lambda_norm and target_norm are positive.
         Positive lambda_anchor separates families when family inputs are provided,
-        otherwise classes. This constructor defaults to zero; the CLI defaults to 0.2.
-        The geodesic margin is twice target_norm, or target_norm for IABench hierarchy.
+        otherwise classes. The geodesic margin is target_norm times anchor_margin_scale.
         Family losses use all classes each call; the relative depth loss is tangent-based.
         """
         super().__init__()
@@ -70,10 +69,11 @@ class EntailmentConeLoss(nn.Module):
             raise ValueError("norm_mode must be 'floor' or 'bilateral'")
         if not math.isfinite(curv) or curv <= 0:
             raise ValueError("curv must be positive and finite")
-        geodesic_margin = target_norm if iabench_hierarchy else 2 * target_norm
+        geodesic_margin = target_norm * anchor_margin_scale
         if not all(math.isfinite(v) and v >= 0 for v in
-                   (lambda_anchor, target_norm, geodesic_margin)):
-            raise ValueError("Anchor weight, norm target and geodesic margin must be finite and non-negative")
+                   (lambda_anchor, lambda_norm, target_norm, anchor_margin_scale, geodesic_margin)):
+            raise ValueError("Anchor weight, norm weight, norm target, margin scale and geodesic "
+                             "margin must be finite and non-negative")
         if not all(math.isfinite(v) and v >= 0 for v in
                    (lambda_family, lambda_family_depth, family_depth_margin)):
             raise ValueError("Family weights and depth margin must be finite and non-negative")

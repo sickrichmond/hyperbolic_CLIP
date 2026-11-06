@@ -19,11 +19,11 @@ class FamilyHierarchyTests(unittest.TestCase):
         classes = exp_map0(torch.tensor([[4., 0.], [4., .1], [4., -.1]], dtype=torch.float64))
         images = exp_map0(torch.tensor([[5., 0.]], dtype=torch.float64))
         base, _ = EntailmentConeLoss()(images, classes, torch.tensor([0]))
-        loss, stats = EntailmentConeLoss(lambda_anchor=.5, target_norm=1, iabench_hierarchy=True)(
+        loss, stats = EntailmentConeLoss(lambda_anchor=.5, target_norm=1, anchor_margin_scale=.5)(
             images, classes, torch.tensor([0]), x_fam=exp_map0(tangent), family_of=torch.arange(3))
-        # z=1; only the closest family pair (distance .2) violates the margin.
-        self.assertTrue(torch.allclose(stats['loss_anchor'], tangent.new_tensor(.8 / 3)))
-        self.assertTrue(torch.allclose(loss - base, tangent.new_tensor(.4 / 3)))
+        # z=.5; only the closest family pair (distance .2) violates the margin.
+        self.assertTrue(torch.allclose(stats['loss_anchor'], tangent.new_tensor(.3 / 3)))
+        self.assertTrue(torch.allclose(loss - base, tangent.new_tensor(.15 / 3)))
         grad, = torch.autograd.grad(loss - base, tangent)
         self.assertTrue(torch.allclose(grad, tangent.new_tensor([[.5 / 3, 0.], [-.5 / 3, 0.], [0., 0.]])))
 
@@ -75,7 +75,7 @@ class FamilyHierarchyTests(unittest.TestCase):
                 mapping, labels = torch.tensor([0, 1, 0]), torch.tensor([0, 2])
                 loss_fn = EntailmentConeLoss(curv=curv, min_radius=.1, margin=.3,
                     lambda_neg=.7, lambda_anchor=.2, target_norm=1.5, lambda_family=1.3,
-                    iabench_hierarchy=True,
+                    anchor_margin_scale=.5,
                     lambda_family_depth=.4, family_depth_margin=.5)
                 loss, stats = loss_fn(images, xa, labels, x_fam=xf, family_of=mapping)
                 baseline, _ = EntailmentConeLoss(curv=curv, min_radius=.1,
@@ -86,7 +86,7 @@ class FamilyHierarchyTests(unittest.TestCase):
                 wrong = torch.arange(2)[None, :] != mapping[:, None]
                 negative = (psi[None, :] + .3 - xi).clamp_min(0)[wrong].mean()
                 depth = (.5 + families.norm(dim=-1)[mapping] - classes.norm(dim=-1)).clamp_min(0).square().mean()
-                anchor = (1.5 - elementwise_dist(xf[:1], xf[1:], curv, eps=1e-5)).clamp_min(0).mean()
+                anchor = (.75 - elementwise_dist(xf[:1], xf[1:], curv, eps=1e-5)).clamp_min(0).mean()
                 expected = baseline + 1.3 * (positive + .7 * negative) + .4 * depth + .2 * anchor
                 self.assertTrue(torch.allclose(loss, expected))
                 self.assertTrue(torch.allclose(stats["loss_family_depth"], depth))
@@ -98,7 +98,7 @@ class FamilyHierarchyTests(unittest.TestCase):
                     self.assertTrue(torch.allclose(actual, reference, atol=1e-8))
                 self.assertTrue(all(not v.requires_grad for v in stats.values()))
 
-    def test_anchor_margin_uses_tau_only_for_iabench_hierarchy(self):
+    def test_anchor_margin_scales_with_tau(self):
         for curv in (.5, 1., 2.):
             with self.subTest(curv=curv):
                 xa = exp_map0(torch.tensor([[2., 0.], [0., 2.]], dtype=torch.float64), curv)
@@ -106,11 +106,11 @@ class FamilyHierarchyTests(unittest.TestCase):
                 images = exp_map0(torch.tensor([[3., 0.], [0., 3.]], dtype=torch.float64), curv)
                 labels = torch.arange(2)
                 families = {"x_fam": xf, "family_of": labels}
-                for inputs, iabench_hierarchy, margin, points in (
-                        ({}, False, 5., xa), (families, False, 5., xf),
-                        (families, True, 2.5, xf)):
+                for inputs, scale, margin, points in (
+                        ({}, 1., 2.5, xa), (families, 2., 5., xf),
+                        (families, .5, 1.25, xf)):
                     criterion = EntailmentConeLoss(curv=curv, lambda_anchor=1, target_norm=2.5,
-                                                   iabench_hierarchy=iabench_hierarchy)
+                                                   anchor_margin_scale=scale)
                     _, stats = criterion(images, xa, labels, **inputs)
                     expected = (margin - elementwise_dist(points[:1], points[1:], curv,
                                                           eps=1e-5)).clamp_min(0).mean()

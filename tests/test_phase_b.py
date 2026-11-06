@@ -89,7 +89,7 @@ def test_geodesic_anchor_hinge():
         labels = torch.tensor([0])
         baseline, _ = EntailmentConeLoss(curv=curv)(images, anchors, labels)
         loss, stats = EntailmentConeLoss(curv=curv, lambda_anchor=.6,
-                                        target_norm=.5)(images, anchors, labels)
+                                        target_norm=1.)(images, anchors, labels)
         assert torch.allclose(stats["loss_anchor"], tangent.new_tensor(.5 / 3))
         assert torch.allclose(loss - baseline, tangent.new_tensor(.1))
         gradient, = torch.autograd.grad(loss - baseline, tangent)
@@ -102,15 +102,15 @@ def test_geodesic_anchor_hinge():
             target_norm=.5)(images, anchors[:1], labels)
         assert single["loss_anchor"] == 0
     defaults = EntailmentConeLoss()
-    assert (defaults.target_norm, defaults.geodesic_margin) == (2., 4.)
+    assert (defaults.target_norm, defaults.geodesic_margin) == (1., 1.)
     distances = tangent.new_tensor([.5, 2., 1.5])
-    for target, margin in ((1.5, 3.), (2., 4.), (2.5, 5.)):
+    for target in (1.5, 2., 2.5):
         _, stats = EntailmentConeLoss(curv=curv, target_norm=target,
             lambda_anchor=1, lambda_norm=1)(images, anchors, labels)
-        assert torch.allclose(stats["loss_anchor"], (margin - distances).clamp_min(0).mean())
+        assert torch.allclose(stats["loss_anchor"], (target - distances).clamp_min(0).mean())
         assert torch.allclose(stats["loss_norm"],
                               (target - tangent.norm(dim=-1)).clamp_min(0).square().mean())
-    for option in ("lambda_anchor", "target_norm"):
+    for option in ("lambda_anchor", "lambda_norm", "target_norm"):
         for value in (-1., float("nan"), float("inf")):
             try:
                 EntailmentConeLoss(**{option: value})

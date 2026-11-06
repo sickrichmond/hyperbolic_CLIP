@@ -2,8 +2,8 @@
 
 Supports text and free class anchors, image-only training, validation-based
 checkpoint selection, and Poincare diagnostics. The pairwise geodesic anchor
-penalty defaults to weight 0.2 and --lambda_anchor 0 disables it. Its geodesic
-margin z is twice the radial-depth target tau, or tau for IABench IncreFA.
+penalty uses the radial-depth target tau as its margin, or tau/2 for IABench
+IncreFA. The hybrid holdout uses twice tau. --lambda_anchor 0 disables it.
 """
 from pathlib import Path
 from time import perf_counter
@@ -20,7 +20,7 @@ from data.iab_clip_dataset import IABCLIPDataset
 from geometry.lorentz import exp_map0
 from models.attribution_clip import AttributionCLIP
 from losses.attribution_loss import EntailmentConeLoss
-from training.attribution_args import parse_args, validate_args
+from training.attribution_args import anchor_margin_scale, parse_args, validate_args
 from training.anchors import AnchorState, build_anchors, make_balanced_sampler, calibrate_image_depth
 from training.attribution_diagnostics import (
     run_validation, report_epoch, report_validation, collect_plot_embeddings,
@@ -160,7 +160,7 @@ def _run_training(args, datasets, checkpoint_metadata, plot_each_epoch, family_g
         lambda_family=args.lambda_family if args.hierarchy != "none" else 0.0,
         lambda_family_depth=args.lambda_family_depth if args.hierarchy != "none" else 0.0,
         family_depth_margin=args.family_depth_margin,
-        iabench_hierarchy=args.dataset == "iabench" and args.hierarchy == "increfa",
+        anchor_margin_scale=anchor_margin_scale(args),
     ).to(device)
 
     # Geometric tensors use their own LR and no weight decay.

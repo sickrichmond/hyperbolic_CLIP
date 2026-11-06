@@ -12,24 +12,29 @@ import sys
 import tempfile
 import unittest
 
-from training.attribution_args import parse_args, validate_args
+from training.attribution_args import anchor_margin_scale, parse_args, validate_args
 
 
 class IABenchSlurmTests(unittest.TestCase):
     def test_cli_accepts_depth_and_rejects_explicit_margin(self):
-        for dataset, hierarchy in (("iab", "none"), ("iabench", "none"), ("iabench", "increfa")):
+        for dataset, hierarchy, scale in (("iab", "none", 1.), ("iabench", "none", 1.),
+                                          ("iabench", "increfa", .5)):
             base = ["--dataset_path", "unused", "--hierarchy", hierarchy, "--anchor_init", "random"]
             if dataset == "iab":
                 base += ["--captions_dir", "unused"]
             args = parse_args(base, dataset=dataset)
             validate_args(args)
-            self.assertEqual(args.target_norm, 2.)
+            self.assertEqual((args.target_norm, args.lambda_norm, args.lambda_anchor, args.num_epochs),
+                             (1., 1., 1., 20))
+            self.assertEqual(anchor_margin_scale(args), scale)
             for target in ("0", "2.5", "6"):
                 args = parse_args(base + ["--target_norm", target], dataset=dataset)
                 validate_args(args)
                 self.assertEqual(args.target_norm, float(target))
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 parse_args(base + ["--geodesic_margin", "3"], dataset=dataset)
+        hybrid = parse_args(["--dataset_path", "unused"], dataset="hybrid")
+        self.assertEqual(hybrid.target_norm * anchor_margin_scale(hybrid), 4.)
 
     def test_training_modes_and_test_evaluation(self):
         repo = Path(__file__).resolve().parents[1]
@@ -100,16 +105,17 @@ exec bash "$1"
                     self.assertIn("--lambda_anchor", command["argv"])
                     self.assertNotIn("--geodesic_margin", command["argv"])
                     self.assertNotIn("--lambda_cosine", command["argv"])
-                    self.assertEqual(args.lambda_anchor, float(settings.get("LAMBDA_ANCHOR", .5)))
-                    self.assertEqual(args.target_norm, float(settings.get("TARGET_NORM", 2)))
-                    self.assertEqual(args.num_epochs, int(settings.get("NUM_EPOCHS", 30)))
+                    self.assertEqual(args.lambda_anchor, float(settings.get("LAMBDA_ANCHOR", 1)))
+                    self.assertEqual(args.target_norm, float(settings.get("TARGET_NORM", 1)))
+                    self.assertEqual(args.lambda_norm, 1.)
+                    self.assertEqual(args.num_epochs, int(settings.get("NUM_EPOCHS", 20)))
                     self.assertEqual(args.train_augment, settings.get("AUGMENT") == "1")
                     self.assertEqual(args.hierarchy, settings.get("HIERARCHY", "none"))
                     self.assertEqual(args.aug_policy, policy)
-                    weight_tag = settings.get("LAMBDA_ANCHOR", "0.5").replace(".", "p")
-                    margin = args.target_norm if args.hierarchy == "increfa" else 2 * args.target_norm
+                    weight_tag = settings.get("LAMBDA_ANCHOR", "1").replace(".", "p")
+                    margin = args.target_norm / 2 if args.hierarchy == "increfa" else args.target_norm
                     margin_tag = format(margin, ".17g").replace(".", "p")
-                    target_tag = settings.get("TARGET_NORM", "2").replace(".", "p")
+                    target_tag = settings.get("TARGET_NORM", "1").replace(".", "p")
                     self.assertEqual(args.output, settings.get("CKPT", str(checkpoints /
                         f"attribution_iabench_random_anchor{weight_tag}_z{margin_tag}_tau{target_tag}_ep{args.num_epochs}{suffix}_vitl14.pt")))
                     self.assertEqual(args.split_manifest, str(manifest))
@@ -189,11 +195,12 @@ exec bash "$1"
             env = dict(os.environ, WORK=str(root), FAST=str(root / "fast"), SLURM_JOB_ID="123",
                        SLURM_TEST_PYTHON=sys.executable, SLURM_TEST_CAPTURE=str(capture))
             for key in ("CKPT", "AUGMENT", "AUG_POLICY", "OPTIMIZER", "ANCHOR_INIT",
-                        "LAMBDA_ANCHOR", "GEODESIC_MARGIN", "TARGET_NORM", "NUM_EPOCHS"):
+                        "LAMBDA_NORM", "LAMBDA_ANCHOR", "GEODESIC_MARGIN", "TARGET_NORM", "NUM_EPOCHS"):
                 env.pop(key, None)
             for settings, suffix in (({}, ""), ({"AUGMENT": "1"}, "_corruption"),
                     ({"AUGMENT": "1", "AUG_POLICY": "omnidfa"}, "_omnidfa"),
-                    ({"LAMBDA_ANCHOR": "0.2", "TARGET_NORM": "3", "NUM_EPOCHS": "20"}, ""),
+                    ({"LAMBDA_ANCHOR": "0.2", "TARGET_NORM": "3", "NUM_EPOCHS": "30"}, ""),
+                    ({"LAMBDA_NORM": "0.5"}, "_norm0p5"),
                     ({"TARGET_NORM": "2.5", "GEODESIC_MARGIN": "3"}, ""),
                     ({"CKPT": str(base / "mean checkpoint.pt")}, ""),
                     ({"CKPT": str(base / "mean aug checkpoint.pt"), "AUGMENT": "1"}, "_corruption"),
@@ -206,12 +213,15 @@ exec bash "$1"
                     self.assertEqual(argv[0], "train_attribution.py")
                     args = parse_args(argv[1:])
                     validate_args(args)
-                    self.assertEqual(args.num_epochs, int(settings.get("NUM_EPOCHS", 30)))
+                    self.assertEqual(args.num_epochs, int(settings.get("NUM_EPOCHS", 20)))
+                    self.assertEqual(args.lambda_norm, float(settings.get("LAMBDA_NORM", 1)))
+                    self.assertEqual(args.lambda_anchor, float(settings.get("LAMBDA_ANCHOR", 1)))
+                    self.assertEqual(args.target_norm, float(settings.get("TARGET_NORM", 1)))
                     self.assertEqual(args.train_augment, settings.get("AUGMENT") == "1")
                     self.assertEqual(args.aug_policy, settings.get("AUG_POLICY", "corruption"))
-                    weight = settings.get("LAMBDA_ANCHOR", "0.5").replace(".", "p")
-                    target = settings.get("TARGET_NORM", "2").replace(".", "p")
-                    margin = format(2 * args.target_norm, ".17g").replace(".", "p")
+                    weight = settings.get("LAMBDA_ANCHOR", "1").replace(".", "p")
+                    target = settings.get("TARGET_NORM", "1").replace(".", "p")
+                    margin = format(args.target_norm, ".17g").replace(".", "p")
                     if "CKPT" in settings:
                         self.assertEqual(args.output, settings["CKPT"])
                     else:

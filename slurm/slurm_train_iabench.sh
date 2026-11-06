@@ -4,14 +4,15 @@
 # manifest shared by clean and augmented training. Validation stays clean.
 # AUGMENT=1 enables corruption (default) or omnidfa via AUG_POLICY.
 # Augmented checkpoint suffixes name the policy: _corruption / _omnidfa.
-# Defaults: LAMBDA_ANCHOR=0.5, radial-depth TARGET_NORM=2.
-# The trainer uses z=2*tau for classes and z=tau for IABench IncreFA families.
-# Checkpoint names include anchor weight, z, tau and total NUM_EPOCHS (default 30).
+# Defaults: lambda_norm=1, LAMBDA_ANCHOR=1, radial-depth TARGET_NORM=1.
+# The trainer uses z=tau for classes and z=tau/2 for IABench IncreFA families.
+# Checkpoint names include anchor weight, z, tau and total NUM_EPOCHS (default 20).
 # CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
 # The trainer rejects concurrent writers and existing augmentation/hierarchy conflicts.
 # Submit: sbatch slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1 slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_iabench.sh
+#         sbatch --export=ALL,HIERARCHY=increfa slurm/slurm_train_iabench.sh
 #         sbatch --export=ALL,TARGET_NORM=2 slurm/slurm_train_iabench.sh
 # Timing: PROFILE_STEPS=100 sbatch slurm/slurm_train_iabench.sh
 
@@ -45,12 +46,12 @@ OUT="$WORK/hyp_fine_tuning/checkpoints"
 SPLIT_MANIFEST="${SPLIT_MANIFEST:-$OUT/attribution_iabench_random_vitl14.splits.json}"
 PROFILE_STEPS="${PROFILE_STEPS:-0}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
-NUM_EPOCHS="${NUM_EPOCHS:-30}"
+NUM_EPOCHS="${NUM_EPOCHS:-20}"
 AUGMENT="${AUGMENT:-0}"
 AUG_POLICY="${AUG_POLICY:-corruption}"
 HIERARCHY="${HIERARCHY:-none}"
-LAMBDA_ANCHOR="${LAMBDA_ANCHOR:-0.5}"
-TARGET_NORM="${TARGET_NORM:-2}"
+LAMBDA_ANCHOR="${LAMBDA_ANCHOR:-1}"
+TARGET_NORM="${TARGET_NORM:-1}"
 
 if [[ ! "$NUM_EPOCHS" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: NUM_EPOCHS must be a positive integer (got: $NUM_EPOCHS)" >&2
@@ -90,7 +91,7 @@ if [ "$AUGMENT" = 1 ]; then
 fi
 LAMBDA_TAG=${LAMBDA_ANCHOR//./p}
 Z=$(LC_ALL=C awk -v tau="$TARGET_NORM" -v hierarchy="$HIERARCHY" \
-    'BEGIN { printf "%.17g", (hierarchy == "increfa" ? tau : 2 * tau) }')
+    'BEGIN { printf "%.17g", (hierarchy == "increfa" ? tau / 2 : tau) }')
 MARGIN_TAG=${Z//./p}
 TARGET_TAG=${TARGET_NORM//./p}
 RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_tau${TARGET_TAG}_ep${NUM_EPOCHS}"
@@ -118,7 +119,7 @@ python train_iabench.py \
     --min_radius 0.5 \
     --margin 0.3 \
     --lambda_neg 1.0 \
-    --lambda_norm 0.5 \
+    --lambda_norm 1 \
     --target_norm "$TARGET_NORM" \
     --lambda_anchor "$LAMBDA_ANCHOR" \
     --init_depth 3.0 \

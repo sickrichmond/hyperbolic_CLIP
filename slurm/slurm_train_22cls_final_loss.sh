@@ -6,10 +6,9 @@
 #
 # Submit: sbatch slurm/slurm_train_22cls_final_loss.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_22cls_final_loss.sh
-#         sbatch --export=ALL,LAMBDA_ANCHOR=0.5,TARGET_NORM=2 slurm/slurm_train_22cls_final_loss.sh
-# Defaults: OPTIMIZER=adamw, LAMBDA_ANCHOR=0.5, radial-depth TARGET_NORM=2, ANCHOR_INIT=random.
-# The trainer derives z as twice TARGET_NORM.
-# Checkpoint names include total NUM_EPOCHS (default 30), not the selected best epoch.
+# Defaults: OPTIMIZER=adamw, ANCHOR_INIT=random, LAMBDA_NORM=1, LAMBDA_ANCHOR=1.
+# The trainer derives z from radial-depth TARGET_NORM (default 1).
+# Checkpoint names include the NUM_EPOCHS budget (default 20).
 # CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
 # The trainer rejects concurrent writers and existing augmentation/hierarchy conflicts.
 
@@ -49,10 +48,11 @@ DIAG_PLOT_DIR=${DIAG_PLOT_DIR:-$WORK/hyp_fine_tuning/viz/final_loss_${SLURM_JOB_
 AUGMENT=${AUGMENT:-0}
 AUG_POLICY=${AUG_POLICY:-corruption}
 OPTIMIZER=${OPTIMIZER:-adamw}
-LAMBDA_ANCHOR=${LAMBDA_ANCHOR:-0.5}
-TARGET_NORM=${TARGET_NORM:-2}
+LAMBDA_NORM=${LAMBDA_NORM:-1}
+LAMBDA_ANCHOR=${LAMBDA_ANCHOR:-1}
+TARGET_NORM=${TARGET_NORM:-1}
 ANCHOR_INIT=${ANCHOR_INIT:-random}
-NUM_EPOCHS=${NUM_EPOCHS:-30}
+NUM_EPOCHS=${NUM_EPOCHS:-20}
 
 if [[ ! "$NUM_EPOCHS" =~ ^[1-9][0-9]*$ ]]; then
     echo "ERROR: NUM_EPOCHS must be a positive integer (got: $NUM_EPOCHS)" >&2
@@ -67,7 +67,7 @@ case "$ANCHOR_INIT" in
     text|image_centroid|text_free|random) ;;
     *) echo "ERROR: ANCHOR_INIT must be text, image_centroid, text_free, or random (got: $ANCHOR_INIT)" >&2; exit 2 ;;
 esac
-for name in LAMBDA_ANCHOR TARGET_NORM; do
+for name in LAMBDA_NORM LAMBDA_ANCHOR TARGET_NORM; do
     if [[ ! "${!name}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
         echo "ERROR: $name must be a non-negative number (got: ${!name})" >&2
         exit 2
@@ -75,10 +75,13 @@ for name in LAMBDA_ANCHOR TARGET_NORM; do
 done
 
 LAMBDA_TAG=${LAMBDA_ANCHOR//./p}
-Z=$(LC_ALL=C awk -v tau="$TARGET_NORM" 'BEGIN { printf "%.17g", 2 * tau }')
+Z=$(LC_ALL=C awk -v tau="$TARGET_NORM" 'BEGIN { printf "%.17g", tau }')
 MARGIN_TAG=${Z//./p}
 TARGET_TAG=${TARGET_NORM//./p}
 RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_tau${TARGET_TAG}_${ANCHOR_INIT}_${OPTIMIZER}_ep${NUM_EPOCHS}"
+if [ "$LAMBDA_NORM" != 1 ]; then
+    RUN_TAG="${RUN_TAG}_norm${LAMBDA_NORM//./p}"
+fi
 if [ "$AUGMENT" = 1 ]; then
     AUG_FLAG="--train_augment --aug_policy $AUG_POLICY"
     if [ "$AUG_POLICY" = omnidfa ]; then
@@ -91,7 +94,7 @@ else
     CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_vitl14.pt}
 fi
 
-echo "Training with optimizer=$OPTIMIZER, lambda_anchor=$LAMBDA_ANCHOR, target_norm=$TARGET_NORM, geodesic_margin=$Z, anchor_init=$ANCHOR_INIT"
+echo "Training with optimizer=$OPTIMIZER, lambda_norm=$LAMBDA_NORM, lambda_anchor=$LAMBDA_ANCHOR, target_norm=$TARGET_NORM, geodesic_margin=$Z, anchor_init=$ANCHOR_INIT"
 echo "Training with AUGMENT=$AUGMENT, AUG_POLICY=$AUG_POLICY → $CKPT"
 
 mkdir -p "$OUT"
@@ -121,7 +124,7 @@ python train_attribution.py \
     --min_radius      0.5 \
     --margin          0.3 \
     --lambda_neg      1.0 \
-    --lambda_norm     0.5 \
+    --lambda_norm     "$LAMBDA_NORM" \
     --norm_mode       floor \
     --target_norm     "$TARGET_NORM" \
     --lambda_anchor   "$LAMBDA_ANCHOR" \

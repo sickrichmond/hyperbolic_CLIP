@@ -41,7 +41,7 @@ if stage == "train":
 
 class IABAnchorSweepTests(unittest.TestCase):
     def test_all_array_tasks_and_failure_propagation(self):
-        self.assertEqual(CONFIGS, ((.5, 3, 1.5), (.5, 4, 2), (.5, 5, 2.5)))
+        self.assertEqual(CONFIGS, ((.5, 1.5, 1.5), (.5, 2, 2), (.5, 2.5, 2.5)))
         with tempfile.TemporaryDirectory(prefix="iab sweep ") as tmp:
             root = Path(tmp)
             base = root / "hyp_fine_tuning"
@@ -56,7 +56,8 @@ class IABAnchorSweepTests(unittest.TestCase):
                        SWEEP_TEST_PYTHON=sys.executable, SWEEP_TEST_STUB=str(stub),
                        SWEEP_TEST_CAPTURE=str(capture), CKPT="must-not-be-used.pt",
                        NUM_EPOCHS="1", AUGMENT="0", AUG_POLICY="corruption", OPTIMIZER="sgd",
-                       ANCHOR_INIT="text", LAMBDA_ANCHOR="99", TARGET_NORM="99", GEODESIC_MARGIN="99")
+                       ANCHOR_INIT="text", LAMBDA_NORM="99", LAMBDA_ANCHOR="99", TARGET_NORM="99",
+                       GEODESIC_MARGIN="99")
             for key in ("DATA", "CAPS", "OUT", "MANIFEST", "DIAG_PLOT_DIR", "SWEEP_TEST_FAIL"):
                 env.pop(key, None)
             outputs = set()
@@ -83,7 +84,8 @@ class IABAnchorSweepTests(unittest.TestCase):
                     folder = base / f"checkpoints/sweep/iab_omnidfa_100/task_{index:02d}"
                     self.assertEqual(Path(args.output).parent, folder)
                     tau_tag = str(tau).replace(".", "p")
-                    self.assertIn(f"_z{z:g}_tau{tau_tag}_", Path(args.output).name)
+                    z_tag = format(z, "g").replace(".", "p")
+                    self.assertIn(f"_z{z_tag}_tau{tau_tag}_", Path(args.output).name)
                     self.assertEqual(args.diag_plot_dir, str(folder / "diagnostics"))
                     self.assertEqual(args.split_manifest, str(base / "split_manifest_22cls.json"))
                     self.assertEqual((folder / "status.txt").read_text().strip(), "complete")

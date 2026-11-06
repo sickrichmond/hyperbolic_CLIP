@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 CONDITIONS = {0: "clean", 4: "jpeg30", 6: "blur5"}
-CONFIGS = tuple((0.5, 2 * tau, tau) for tau in (1.5, 2, 2.5))
+CONFIGS = tuple((0.5, tau, tau) for tau in (1.5, 2, 2.5))
 FIELDS = ("task", "z", "tau", "lambda_anchor", "epoch", "checkpoint", "val_balanced",
           *(f"{name}_{metric}" for name in CONDITIONS.values()
             for metric in ("acc", "balanced_accuracy")), "status", "error")

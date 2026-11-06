@@ -190,7 +190,6 @@ class IABenchIntegrationTests(unittest.TestCase):
                 if mode == "hierarchy":
                     args.hierarchy = "increfa"
                     args.min_radius = .5
-                    args.target_norm = 2.
                 validation = trainer.run_validation
                 frames = []
 
@@ -225,11 +224,13 @@ class IABenchIntegrationTests(unittest.TestCase):
                     self.assertEqual(ckpt["anchor_texts"][0], "A real image")
                     self.assertEqual(ckpt["split_manifest_digest"], manifest_digest(manifest))
                     self.assertEqual(ckpt["loss"], "cone")
+                    self.assertEqual((ckpt["lambda_norm"], ckpt["lambda_anchor"]), (1., 1.))
+                    self.assertEqual(ckpt["target_norm"], 1.)
+                    self.assertEqual(ckpt["geodesic_margin"], .5 if mode == "hierarchy" else 1.)
                     if mode == "hierarchy":
                         self.assertEqual(ckpt["hierarchy"], "increfa")
                         self.assertEqual(ckpt["cosine_scope"], "families")
                         self.assertEqual(ckpt["anchor_scope"], "families")
-                        self.assertEqual((ckpt["target_norm"], ckpt["geodesic_margin"]), (2., 2.))
                         self.assertEqual(ckpt["norm_space"], "hyperbolic_depth")
                         self.assertEqual(ckpt["family_names"], ["real", "autoregressive", "diffusion"])
                         self.assertEqual(ckpt["family_of"], [0, 2, 1])
