@@ -154,8 +154,7 @@ class HierarchyConfidenceTests(unittest.TestCase):
             protocol = root / 'protocol/experiment.json'
             protocol.parent.mkdir()
             protocol.touch()
-            ckpt = protocol.parent / 'runs/ours_62755694/ours_anchor0p5_z2_ep30.pt'
-            ckpt.parent.mkdir(parents=True)
+            ckpt = root / 'selected checkpoint.pt'
             ckpt.touch()
             capture = root / 'capture'
             env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ['PATH'], WORK=str(root),
@@ -164,6 +163,11 @@ class HierarchyConfidenceTests(unittest.TestCase):
                        IABENCH_DATA=str(root / 'bench root'), IAB_DATA=str(root / 'iab root'),
                        CONFIDENCE_CAPTURE=str(capture))
             env.pop('CKPT', None)
+            missing = subprocess.run(['bash', str(script)], env=env, capture_output=True)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn(b'Set CKPT', missing.stderr)
+            self.assertFalse(capture.exists())
+            env['CKPT'] = str(ckpt)
             subprocess.run(['bash', str(script)], env=env, check=True, capture_output=True)
             args = capture.read_text().splitlines()
             self.assertEqual(args[:2], ['-m', 'comparison.training.hierarchy_confidence'])
@@ -171,11 +175,6 @@ class HierarchyConfidenceTests(unittest.TestCase):
             self.assertEqual(args[args.index('--iabench_root') + 1], str(root / 'bench root'))
             self.assertEqual(args[args.index('--iab_root') + 1], str(root / 'iab root'))
             self.assertEqual(args[-1], '3')
-            override = root / 'other checkpoint.pt'
-            override.touch()
-            subprocess.run(['bash', str(script)], env=dict(env, CKPT=str(override)), check=True, capture_output=True)
-            args = capture.read_text().splitlines()
-            self.assertEqual(args[args.index('--checkpoint') + 1], str(override))
             invalid = subprocess.run(['bash', str(script), 'SD2'], env=env, capture_output=True)
             self.assertEqual(invalid.returncode, 2)
 

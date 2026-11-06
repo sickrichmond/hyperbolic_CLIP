@@ -1,5 +1,5 @@
 #!/bin/bash
-# sbatch slurm/slurm_plot_hierarchy_pair.sh [SEEN_GENERATOR [UNSEEN_GENERATOR]]
+# CKPT=/path/to/checkpoint.pt sbatch slurm/slurm_plot_hierarchy_pair.sh [SEEN_GENERATOR [UNSEEN_GENERATOR]]
 # Defaults: stabilityai@stable-diffusion-2 vs stabilityai@stable-diffusion-2-1.
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -16,11 +16,11 @@
 #SBATCH --mail-user=richitrebbia@gmail.com
 set -euo pipefail
 [[ $# -le 2 ]] || { echo "Expected at most two arguments: SEEN_GENERATOR UNSEEN_GENERATOR" >&2; exit 2; }
+: "${CKPT:?Set CKPT to the selected hierarchy training checkpoint.}"
 SEEN="${1:-stabilityai@stable-diffusion-2}"
 UNSEEN="${2:-stabilityai@stable-diffusion-2-1}"
 REPO="${REPO:-$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo}"
 EXPERIMENT="${EXPERIMENT:-$WORK/hyp_fine_tuning/experiments/hybrid_hierarchy_20seen_v1/experiment.json}"
-CKPT="${CKPT:-$(dirname "$EXPERIMENT")/runs/ours_62755694/ours_anchor0p5_z2_ep30.pt}"
 LOGDIR="${LOGDIR:-$WORK/outputs/hierarchy_pair_${SLURM_JOB_ID}}"
 [[ -f "$CKPT" && -f "$EXPERIMENT" ]] || { echo "Missing checkpoint or experiment: $CKPT | $EXPERIMENT" >&2; exit 1; }
 module load python/3.11.7

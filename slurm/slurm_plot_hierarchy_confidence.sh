@@ -14,10 +14,10 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=richitrebbia@gmail.com
 set -euo pipefail
-[[ $# -eq 0 ]] || { echo "This diagnostic evaluates all generators; use CKPT to override the checkpoint." >&2; exit 2; }
+[[ $# -eq 0 ]] || { echo "This diagnostic evaluates all generators; supply the checkpoint through CKPT." >&2; exit 2; }
+: "${CKPT:?Set CKPT to the selected hierarchy training checkpoint.}"
 REPO="${REPO:-$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo}"
 EXPERIMENT="${EXPERIMENT:-$WORK/hyp_fine_tuning/experiments/hybrid_hierarchy_20seen_v1/experiment.json}"
-CKPT="${CKPT:-$(dirname "$EXPERIMENT")/runs/ours_62755694/ours_anchor0p5_z2_ep30.pt}"
 LOGDIR="${LOGDIR:-$WORK/outputs/hierarchy_confidence_${SLURM_JOB_ID}}"
 [[ -f "$CKPT" && -f "$EXPERIMENT" ]] || { echo "Missing checkpoint or experiment: $CKPT | $EXPERIMENT" >&2; exit 1; }
 module load python/3.11.7

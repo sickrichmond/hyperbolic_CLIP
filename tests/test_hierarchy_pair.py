@@ -204,8 +204,7 @@ class HierarchyPairTests(unittest.TestCase):
             protocol = root / 'frozen protocol/experiment.json'
             protocol.parent.mkdir()
             protocol.touch()
-            checkpoint = protocol.parent / 'runs/ours_62755694/ours_anchor0p5_z2_ep30.pt'
-            checkpoint.parent.mkdir(parents=True)
+            checkpoint = root / 'selected checkpoint.pt'
             checkpoint.touch()
             capture = root / 'capture'
             env = dict(os.environ, PATH=str(binary) + os.pathsep + os.environ['PATH'], WORK=str(root),
@@ -213,6 +212,11 @@ class HierarchyPairTests(unittest.TestCase):
                        SLURM_JOB_ID='123', CUDA_VISIBLE_DEVICES='3', NUM_WORKERS='0', BATCH_SIZE='3',
                        IABENCH_DATA=str(root / 'bench root'), IAB_DATA=str(root / 'iab root'), PAIR_CAPTURE=str(capture))
             env.pop('CKPT', None)
+            missing = subprocess.run(['bash', str(script)], env=env, capture_output=True)
+            self.assertNotEqual(missing.returncode, 0)
+            self.assertIn(b'Set CKPT', missing.stderr)
+            self.assertFalse(capture.exists())
+            env['CKPT'] = str(checkpoint)
             for positional in ([], ['E4S'], ['stabilityai@stable-diffusion-xl-base-1.0', 'stabilityai@sdxl-turbo']):
                 subprocess.run(['bash', str(script), *positional], env=env, check=True, capture_output=True)
                 args = capture.read_text().splitlines()
@@ -224,11 +228,6 @@ class HierarchyPairTests(unittest.TestCase):
                 self.assertEqual(args[args.index('--iab_root') + 1], str(root / 'iab root'))
                 self.assertEqual(args[args.index('--output_dir') + 1], str(root / 'output folder'))
                 self.assertEqual(args[-1], '3')
-            override = root / 'custom checkpoint.pt'
-            override.touch()
-            subprocess.run(['bash', str(script)], env=dict(env, CKPT=str(override)), check=True, capture_output=True)
-            args = capture.read_text().splitlines()
-            self.assertEqual(args[args.index('--checkpoint') + 1], str(override))
             invalid = subprocess.run(['bash', str(script), 'one', 'two', 'three'], env=env, capture_output=True)
             self.assertEqual(invalid.returncode, 2)
 

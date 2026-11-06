@@ -249,6 +249,8 @@ class HierarchyExperimentTests(unittest.TestCase):
 
     def test_training_restore_and_all_levels(self):
         import train_attribution
+        from comparison.training.hierarchy_confidence import evaluate_confidence
+        from comparison.training.hierarchy_pair import evaluate_pair
         from geometry.lorentz import exp_map0, pairwise_dist, oxy_angle
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             stack.enter_context(redirect_stdout(io.StringIO()))
@@ -281,6 +283,8 @@ class HierarchyExperimentTests(unittest.TestCase):
             self.assertEqual(ckpt['experiment_digest'], self.data.digest)
             self.assertEqual(ckpt['anchor_reduction'], 'mean')
             self.assertEqual(ckpt['norm_space'], 'hyperbolic_depth')
+            self.assertEqual((ckpt['target_norm'], ckpt['geodesic_margin']), (2, 4))
+            self.assertEqual((ckpt['lambda_norm'], ckpt['lambda_anchor']), (.5, .5))
             stack.enter_context(patch('models.attribution_clip.AttributionCLIP.from_checkpoint', return_value=TinyModel()))
             loaded = experiment.load_model(self.data, checkpoint, 'cpu')
             self.assertFalse(loaded[1].training)
@@ -371,6 +375,12 @@ class HierarchyExperimentTests(unittest.TestCase):
             for name in EXPLORATORY:
                 self.assertIn(f'{name}: family assignments (no family accuracy target)', summary.getvalue())
             self.assertIn('most frequently nearest model:', summary.getvalue())
+            pair = evaluate_pair(self.data, checkpoint, Path(tmp) / 'pair', workers=0)
+            self.assertEqual(pair['checkpoint'], str(checkpoint))
+            self.assertEqual((pair['seen_samples'], pair['unseen_samples']), (1, 1))
+            confidence = evaluate_confidence(self.data, checkpoint, Path(tmp) / 'confidence', workers=0)
+            self.assertEqual(confidence['checkpoint'], str(checkpoint))
+            self.assertEqual((confidence['seen']['samples'], confidence['unseen']['samples']), (20, 12))
             with self.assertRaisesRegex(ValueError, 'Duplicate'):
                 experiment.summarize([output, output])
             # Existing geodesic-only files can expose overall accuracy without rerunning CLIP.
