@@ -18,23 +18,22 @@ from training.attribution_args import anchor_margin_scale, parse_args, validate_
 class IABenchSlurmTests(unittest.TestCase):
     def test_cli_accepts_depth_and_rejects_explicit_margin(self):
         for dataset, hierarchy, scale in (("iab", "none", 1.), ("iabench", "none", 1.),
-                                          ("iabench", "increfa", .5)):
+                                          ("iabench", "increfa", .5), ("hybrid", "increfa", .5)):
             base = ["--dataset_path", "unused", "--hierarchy", hierarchy, "--anchor_init", "random"]
             if dataset == "iab":
                 base += ["--captions_dir", "unused"]
             args = parse_args(base, dataset=dataset)
-            validate_args(args)
+            family_groups = {"real": ("real",), "diffusion": ("FLUX",)} if dataset == "hybrid" else None
+            validate_args(args, family_groups)
             self.assertEqual((args.target_norm, args.lambda_norm, args.lambda_anchor, args.num_epochs),
                              (1., 1., 1., 20))
             self.assertEqual(anchor_margin_scale(args), scale)
             for target in ("0", "2.5", "6"):
                 args = parse_args(base + ["--target_norm", target], dataset=dataset)
-                validate_args(args)
+                validate_args(args, family_groups)
                 self.assertEqual(args.target_norm, float(target))
             with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 parse_args(base + ["--geodesic_margin", "3"], dataset=dataset)
-        hybrid = parse_args(["--dataset_path", "unused"], dataset="hybrid")
-        self.assertEqual(hybrid.target_norm * anchor_margin_scale(hybrid), 4.)
 
     def test_training_modes_and_test_evaluation(self):
         repo = Path(__file__).resolve().parents[1]

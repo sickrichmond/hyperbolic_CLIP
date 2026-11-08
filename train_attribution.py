@@ -2,8 +2,8 @@
 
 Supports text and free class anchors, image-only training, validation-based
 checkpoint selection, and Poincare diagnostics. The pairwise geodesic anchor
-penalty uses the radial-depth target tau as its margin, or tau/2 for IABench
-IncreFA. The hybrid holdout uses twice tau. --lambda_anchor 0 disables it.
+penalty uses the radial-depth target tau as its margin, or tau/2 for IncreFA.
+--lambda_anchor 0 disables it.
 """
 from pathlib import Path
 from time import perf_counter

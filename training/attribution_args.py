@@ -9,7 +9,6 @@ def parse_args(argv=None, dataset="iab"):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.set_defaults(dataset=dataset)
-    hybrid = dataset == "hybrid"
     p.add_argument("--hierarchy", choices=["none", "increfa"], default="none",
                    help="Optional IABench class-to-family cone hierarchy.")
     p.add_argument("--family_init_norm", type=float, default=1.2,
@@ -85,14 +84,12 @@ def parse_args(argv=None, dataset="iab"):
     p.add_argument("--aug_policy", choices=["corruption", "omnidfa"], default="corruption",
                    help="Training augmentation policy: corruption (JPEG/blur/downsample) or "
                         "omnidfa (JPEG/resize/hflip/RandAugment/blur).")
-    p.add_argument("--lambda_norm",    type=float, default=0.0 if hybrid else 1.0,
+    p.add_argument("--lambda_norm",    type=float, default=1.0,
                    help="Weight of the hyperbolic radial-depth regularizer "
                         "(default: %(default)s; 0 disables).")
-    p.add_argument("--target_norm",    type=float, default=2.0 if hybrid else 1.0,
+    p.add_argument("--target_norm",    type=float, default=1.0,
                    help="Target hyperbolic depth tau (default: %(default)s). The geodesic "
-                        "margin is " + ("twice tau for the hybrid holdout."
-                                        if hybrid else
-                                        "tau, or tau/2 with IABench IncreFA."))
+                        "margin is tau, or tau/2 with IncreFA.")
     p.add_argument("--norm_mode", choices=["floor", "bilateral"], default="floor",
                    help="Penalize depths below the target (floor) or deviations on "
                         "both sides (bilateral).")
@@ -100,12 +97,12 @@ def parse_args(argv=None, dataset="iab"):
                    help="Random negatives retained per sample (0 uses all); full pairwise "
                         "scores are still computed.")
     p.add_argument("--lambda_anchor", "--lambda_cosine", dest="lambda_anchor",
-                   type=float, default=0.2 if hybrid else 1.0,
+                   type=float, default=1.0,
                    help="Weight of mean geodesic-distance hinge over unique anchor pairs "
                         "(families in hierarchy mode; default: %(default)s; 0 disables). "
                         "--lambda_cosine is a legacy spelling for this new penalty.")
     p.add_argument("--batch_size",     type=int,   default=256)
-    p.add_argument("--num_epochs",     type=int,   default=10 if hybrid else 20,
+    p.add_argument("--num_epochs",     type=int,   default=20,
                    help="Training epoch budget (default: %(default)s).")
     p.add_argument("--lr",             type=float, default=5e-5)
     p.add_argument("--weight_decay",   type=float, default=0.01)
@@ -162,9 +159,7 @@ def parse_args(argv=None, dataset="iab"):
 
 
 def anchor_margin_scale(args):
-    if args.dataset == "hybrid":
-        return 2.0
-    return 0.5 if args.dataset == "iabench" and args.hierarchy == "increfa" else 1.0
+    return 0.5 if args.hierarchy == "increfa" else 1.0
 
 
 def validate_args(args, family_groups=None):

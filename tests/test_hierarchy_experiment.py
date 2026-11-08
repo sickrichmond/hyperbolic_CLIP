@@ -209,13 +209,15 @@ class HierarchyExperimentTests(unittest.TestCase):
         self.assertEqual(probabilities.argmax(1).item(), 1)
         self.assertEqual((-angles).softmax(1).argmax(1).item(), 0)
 
-    def test_selected_recipes(self):
+    def test_selected_recipe(self):
+        from training.attribution_args import anchor_margin_scale
+
         args = experiment.ours_args(self.data, Path('/tmp/unused'), 0)
-        self.assertEqual((args.num_epochs, args.batch_size, args.lambda_anchor,
-                          args.target_norm), (30, 256, .5, 2))
-        self.assertEqual(Path(args.output).name, 'ours_anchor0p5_z4_tau2_ep30.pt')
+        self.assertEqual((args.num_epochs, args.batch_size, args.lambda_norm,
+                          args.lambda_anchor, args.target_norm), (20, 256, 1, 1, 1))
+        self.assertEqual(args.target_norm * anchor_margin_scale(args), .5)
+        self.assertEqual(Path(args.output).name, 'ours_anchor1_z0p5_tau1_ep20.pt')
         self.assertEqual(experiment.METHODS, ('ours',))
-        self.assertEqual(set(experiment.RECIPES), {'ours'})
         self.assertFalse(args.train_augment)
         self.assertEqual(args.generators, self.data.descriptor['seen_classes'])
 
@@ -257,11 +259,12 @@ class HierarchyExperimentTests(unittest.TestCase):
             stack.enter_context(redirect_stderr(io.StringIO()))
             stack.enter_context(patch('torch.cuda.is_available', return_value=False))
             stack.enter_context(patch('torch.cuda.device_count', return_value=0))
-            stack.enter_context(patch.dict(experiment.RECIPES, ours=(1, 128)))
             real_args = experiment.ours_args
-            def tiny_args(*args, **kwargs):
-                parsed = real_args(*args, **kwargs)
+            def tiny_args(data, output, workers):
+                parsed = real_args(data, output, workers)
                 parsed.hyperbolic_dim, parsed.init_depth = 4, 0
+                parsed.num_epochs, parsed.batch_size = 1, 128
+                parsed.output = str(output / 'tiny.pt')
                 return parsed
             stack.enter_context(patch.object(experiment, 'ours_args', side_effect=tiny_args))
             stack.enter_context(patch.object(train_attribution, 'AttributionCLIP', TinyModel))
@@ -283,18 +286,22 @@ class HierarchyExperimentTests(unittest.TestCase):
             self.assertEqual(ckpt['experiment_digest'], self.data.digest)
             self.assertEqual(ckpt['anchor_reduction'], 'mean')
             self.assertEqual(ckpt['norm_space'], 'hyperbolic_depth')
-            self.assertEqual((ckpt['target_norm'], ckpt['geodesic_margin']), (2, 4))
-            self.assertEqual((ckpt['lambda_norm'], ckpt['lambda_anchor']), (.5, .5))
+            self.assertEqual((ckpt['target_norm'], ckpt['geodesic_margin']), (1, .5))
+            self.assertEqual((ckpt['lambda_norm'], ckpt['lambda_anchor']), (1, 1))
+            self.assertEqual(ckpt['num_epochs'], 1)
+            self.assertEqual(json.loads((checkpoint.parent / 'run.json').read_text())['num_epochs'], 1)
             stack.enter_context(patch('models.attribution_clip.AttributionCLIP.from_checkpoint', return_value=TinyModel()))
             loaded = experiment.load_model(self.data, checkpoint, 'cpu')
             self.assertFalse(loaded[1].training)
             with patch.object(experiment.torch, 'load', return_value=dict(ckpt, anchor_reduction='max')):
                 legacy = experiment.load_model(self.data, checkpoint, 'cpu')
             self.assertFalse(legacy[1].training)
-            old_recipe = dict(ckpt, target_norm=4, geodesic_margin=2)
-            old_recipe.pop('norm_space')
-            with patch.object(experiment.torch, 'load', return_value=old_recipe):
-                self.assertFalse(experiment.load_model(self.data, checkpoint, 'cpu')[1].training)
+            previous_depth_recipe = dict(ckpt, lambda_anchor=.5, target_norm=2, geodesic_margin=4)
+            spatial_recipe = dict(previous_depth_recipe, target_norm=4, geodesic_margin=2)
+            spatial_recipe.pop('norm_space')
+            for old_recipe in (previous_depth_recipe, spatial_recipe):
+                with patch.object(experiment.torch, 'load', return_value=old_recipe):
+                    self.assertFalse(experiment.load_model(self.data, checkpoint, 'cpu')[1].training)
             for damaged, message in ((dict(ckpt, geodesic_margin=2), 'target_norm or geodesic_margin'),
                                      (dict(ckpt, norm_space='invalid'), 'norm_space')):
                 with patch.object(experiment.torch, 'load', return_value=damaged):

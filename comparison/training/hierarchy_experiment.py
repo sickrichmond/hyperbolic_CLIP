@@ -1,6 +1,7 @@
 """Prepare, train and evaluate the fixed 20/10/2 hybrid hierarchy experiment."""
 import argparse
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -15,7 +16,6 @@ from losses.attribution_loss import _pairwise_xi
 from training.families import increfa_mapping
 
 REPO = Path(__file__).resolve().parents[2]
-RECIPES = dict(ours=(30, 256))
 LABELS = dict(ours='ours (hierarchy)')
 FAMILY_READOUTS = dict(geodesic='softmax_inverse_geodesic_distance', cone='minimum_exterior_angle')
 
@@ -31,23 +31,25 @@ def checkpoint_metadata(data):
 
 
 def ours_args(data, output, workers):
-    from training.attribution_args import parse_args
-    epochs, batch = RECIPES['ours']
+    from training.attribution_args import anchor_margin_scale, parse_args
     settings = dict(
-        dataset_path=data.roots['iabench'], output=output / f'ours_anchor0p5_z4_tau2_ep{epochs}.pt',
+        dataset_path=data.roots['iabench'],
         diag_plot_dir=output / 'diagnostics', clip_name='openai/clip-vit-large-patch14',
         hierarchy='increfa', anchor_init='random', anchor_init_norm=2, family_init_norm=1.2,
         family_depth_margin=.5, lambda_family=1, lambda_family_depth=.5,
         lora_target=r'vision_model\.encoder\.layers\.[0-9]+\.self_attn\.(q_proj|v_proj)',
         lora_r=16, lora_alpha=32, hyperbolic_dim=128, curv=1, min_radius=.5, margin=.3,
-        lambda_neg=1, lambda_norm=.5, target_norm=2, lambda_anchor=.5,
-        init_depth=3, batch_size=batch, num_epochs=epochs, lr=3e-4, weight_decay=.01,
+        lambda_neg=1, init_depth=3, lr=3e-4, weight_decay=.01,
         optimizer='adamw', lr_schedule='cosine', num_workers=workers, seed=42, log_every=10,
     )
     argv = ['--generators', *data.descriptor['seen_classes']]
     for key, value in settings.items():
         argv.extend((f'--{key}', str(value)))
-    return parse_args(argv, dataset='hybrid')
+    args = parse_args(argv, dataset='hybrid')
+    margin = args.target_norm * anchor_margin_scale(args)
+    tag = f'anchor{args.lambda_anchor:g}_z{margin:g}_tau{args.target_norm:g}_ep{args.num_epochs}'.replace('.', 'p')
+    args.output = str(output / f'ours_{tag}.pt')
+    return args
 
 
 def train_experiment(data, method, output_dir, workers=8):
@@ -56,12 +58,13 @@ def train_experiment(data, method, output_dir, workers=8):
     output = Path(output_dir).resolve()
     if output.exists() and any(output.iterdir()):
         raise ValueError(f'Use a fresh training output directory: {output}')
+    args = ours_args(data, output, workers)
     output.mkdir(parents=True, exist_ok=True)
-    metadata = dict(checkpoint_metadata(data), model_name=method, num_epochs=RECIPES[method][0])
-    write_json(output / 'run.json', dict(method=method, experiment=str(data.path), roots=data.roots, **metadata))
+    metadata = dict(checkpoint_metadata(data), model_name=method)
+    write_json(output / 'run.json', dict(method=method, experiment=str(data.path), roots=data.roots,
+                                         num_epochs=args.num_epochs, **metadata))
     from transformers import CLIPImageProcessor
     from train_attribution import run_training
-    args = ours_args(data, output, workers)
     processor = CLIPImageProcessor.from_pretrained(args.clip_name)
     run_training(args, datasets=(data.view('train', processor), data.view('val', processor)),
                  checkpoint_metadata=metadata, plot_each_epoch=False,
@@ -174,18 +177,21 @@ def load_model(data, checkpoint, device):
     from geometry.lorentz import exp_map0
     from models.attribution_clip import AttributionCLIP
     from comparison.training.test_hypclip import load_anchors
-    for key, value in dict(hierarchy='increfa', anchor_penalty='geodesic',
-                           anchor_scope='families', lambda_anchor=.5).items():
+    for key, value in dict(hierarchy='increfa', anchor_penalty='geodesic', anchor_scope='families').items():
         if ckpt.get(key) != value:
             raise ValueError(f'Incompatible hierarchy checkpoint {key}')
-    # Keep the previous spatial-norm recipe evaluable alongside new depth-based runs.
-    if ckpt.get('norm_space', 'lorentz_spatial') == 'lorentz_spatial':
-        expected_target, expected_margin = 4, 2
-    elif ckpt['norm_space'] == 'hyperbolic_depth':
-        expected_target, expected_margin = 2, 4
-    else:
+    norm_space = ckpt.get('norm_space', 'lorentz_spatial')
+    if norm_space not in ('lorentz_spatial', 'hyperbolic_depth'):
         raise ValueError('Incompatible hierarchy checkpoint norm_space')
-    if ckpt.get('target_norm') != expected_target or ckpt.get('geodesic_margin') != expected_margin:
+    weight, target, margin = (ckpt.get(key) for key in ('lambda_anchor', 'target_norm', 'geodesic_margin'))
+    if not all(isinstance(value, (int, float)) and math.isfinite(value) and value >= 0
+               for value in (weight, target, margin)):
+        raise ValueError('Invalid hierarchy checkpoint lambda_anchor, target_norm or geodesic_margin')
+    # Both previous recipes saved anchors in the same coordinates used for inference.
+    legacy = (norm_space, weight, target, margin) in (
+        ('lorentz_spatial', .5, 4, 2), ('hyperbolic_depth', .5, 2, 4),
+    )
+    if not legacy and (norm_space != 'hyperbolic_depth' or margin != target / 2):
         raise ValueError('Incompatible hierarchy checkpoint target_norm or geodesic_margin')
     # Both reductions have the same inference rule; keep older runs evaluable.
     if ckpt.get('anchor_reduction') not in ('mean', 'max'):
