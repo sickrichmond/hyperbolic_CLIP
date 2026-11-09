@@ -110,14 +110,21 @@ def main(argv=None):
     # config['save_feat'] = args.save_feat  
     # config['task_target'] = args.task_target  
     config['log_dir'] = args.log_dir
+    omnidfa_resume = None
     if config['model_name'] == 'omnidfa':
-        from comparison.training.omnidfa import configure_omnidfa
+        from comparison.training.omnidfa import (
+            configure_omnidfa, omnidfa_report_provenance, prepare_omnidfa_train_loader,
+            validate_omnidfa_checkpoint,
+        )
         if args.pretrained_path or args.train_augment:
             raise ValueError('OmniDFA already applies its paper augmentation; use complete --resume_checkpoint files')
         config.update(use_semantic_split=args.use_semantic_split, task_id=args.task_id,
                       num_images_per_semantic_per_class=args.num_images_per_semantic_per_class)
         configure_omnidfa(config, args.dataset, args.batch_size,
                           args.n_epoch if args.n_epoch is not None else config['nEpochs'])
+        if args.resume_checkpoint:
+            omnidfa_resume = torch.load(args.resume_checkpoint, map_location='cpu', weights_only=False)
+            validate_omnidfa_checkpoint(omnidfa_resume, for_training=True)
     if args.pretrained_path:
         config['pretrained_path'] = args.pretrained_path
     if args.train_augment:
@@ -199,19 +206,15 @@ def main(argv=None):
     if test_loader is not None:
         logger.info(f"test_loader samples: {len(test_loader)}")
 
-    support_loader = None
     if model_name == 'omnidfa':
-        from comparison.training.omnidfa import prepare_omnidfa_loaders, validate_omnidfa_checkpoint
         from comparison.training.iabench import validate_checkpoint_metadata
-        train_loader, support_loader = prepare_omnidfa_loaders(train_loader, config, args.batch_size)
-        if args.resume_checkpoint:
-            checkpoint = torch.load(args.resume_checkpoint, map_location='cpu', weights_only=False)
-            validate_omnidfa_checkpoint(checkpoint)
-            validate_checkpoint_metadata(checkpoint, config['checkpoint_metadata'])
-            del checkpoint
-        logger.info(f'OmniDFA closed-set training: {len(train_loader)} steps/epoch, '
+        train_loader = prepare_omnidfa_train_loader(train_loader, config, args.batch_size)
+        if omnidfa_resume is not None:
+            validate_checkpoint_metadata(omnidfa_resume, config['checkpoint_metadata'])
+            del omnidfa_resume
+        logger.info(f'TwinNeXt + CE training: {len(train_loader)} steps/epoch, '
                     f'global batch={args.batch_size}, fake:real=8:1; '
-                    f'clean support counts={config["checkpoint_metadata"]["support_counts"]}')
+                    f'train counts={config["checkpoint_metadata"]["train_counts"]}')
     if model is None:
         model_config = dict(config)
         if model_name == 'omnidfa' and args.resume_checkpoint:
@@ -226,13 +229,11 @@ def main(argv=None):
     if model_name == 'pose':
         from comparison.training.trainer.pose_trainer import POSETrainer
         trainer_class = POSETrainer
-    trainer_options = {}
     if model_name == 'omnidfa':
         from comparison.training.trainer.omnidfa_trainer import OmniDFATrainer
         trainer_class = OmniDFATrainer
-        trainer_options['support_loader'] = support_loader
     trainer = trainer_class(config, model, optimizer, scheduler, logger, metric_scoring,
-                            time_now=now, log_dir=log_dir, **trainer_options)
+                            time_now=now, log_dir=log_dir)
 
     # resume training 
     start_epoch = config.get('start_epoch', 1)  
@@ -317,6 +318,9 @@ def main(argv=None):
             result_txt_path = os.path.join(log_dir, f"test_results_degraded_{degraded}.txt")  
             with open(result_txt_path, 'w') as f:  
                 f.write(f"Test metrics for degraded={degraded} ({datetime.datetime.now()}):\n")  
+                if model_name == 'omnidfa':
+                    for key, value in omnidfa_report_provenance(config).items():
+                        f.write(f"{key}: {value}\n")
                 for metric_name, value in test_metrics.items():  
                     if metric_name == "conf_matrix":  
                         f.write(f"{metric_name}:\n{value}\n")  

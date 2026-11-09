@@ -1,5 +1,5 @@
 #!/bin/bash
-# Closed-set OmniDFA; clean training prototypes and balanced validation selection.
+# IABench TwinNeXt + CE with clean balanced validation selection.
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod

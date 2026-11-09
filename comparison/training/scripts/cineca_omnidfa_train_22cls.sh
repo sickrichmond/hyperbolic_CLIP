@@ -1,5 +1,5 @@
 #!/bin/bash
-# Closed-set IAB OmniDFA, excluding dalle3; resume keeps the original run.
+# IAB TwinNeXt + CE, excluding dalle3. Resume keeps the original run.
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod

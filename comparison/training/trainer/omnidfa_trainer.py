@@ -1,4 +1,4 @@
-"""OmniDFA optimization and clean training-prototype collection."""
+"""TwinNeXt optimization with OmniDFA's stepwise learning-rate schedule."""
 import csv
 import math
 from pathlib import Path
@@ -27,13 +27,9 @@ def omnidfa_scheduler(optimizer, steps_per_epoch, epochs, warmup_epochs=2):
 
 
 class OmniDFATrainer(Trainer):
-    def __init__(self, *args, support_loader=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.support_loader = support_loader
-
     def _setup_model(self):
         self.model.to(self.device)
-        # All features are gathered with gradients before computing either loss.
+        # Gather logits with gradients before computing cross-entropy.
         if self.device.type == 'cuda' and torch.cuda.device_count() > 1:
             self.model = nn.DataParallel(self.model)
 
@@ -53,9 +49,10 @@ class OmniDFATrainer(Trainer):
     def load_checkpoint(self, path):
         from comparison.training.omnidfa import validate_omnidfa_checkpoint
         checkpoint = torch.load(path, map_location='cpu', weights_only=False)
-        validate_omnidfa_checkpoint(checkpoint)
-        if (checkpoint.get('scheduler_state_dict') or {}).get('last_epoch') != (
-                checkpoint['epoch'] * self.config['steps_per_epoch']):
+        validate_omnidfa_checkpoint(checkpoint, for_training=True)
+        epoch = checkpoint.get('epoch')
+        if type(epoch) is not int or (checkpoint.get('scheduler_state_dict') or {}).get('last_epoch') != (
+                epoch * self.config['steps_per_epoch']):
             raise ValueError('OmniDFA resume scheduler does not match the saved epoch')
         model = self.model
         self.model = self.attributor
@@ -95,30 +92,10 @@ class OmniDFATrainer(Trainer):
                 self.logger.info(f'OmniDFA epoch={epoch} step={step} '
                                  f'loss={losses["overall"].item():.6f} '
                                  f'lr={self.scheduler.get_last_lr()[0]:.8g}')
-        self.build_prototypes()
         if val_loader is None:
             return None, None
         metrics = self.evaluate(val_loader['test'])
         return metrics['balanced_accuracy'], metrics
-
-    @torch.no_grad()
-    def build_prototypes(self):
-        if self.support_loader is None:
-            raise ValueError('OmniDFA requires a clean training support loader')
-        self.set_eval()
-        model = self.attributor
-        sums = torch.zeros_like(model.prototypes)
-        counts = torch.zeros_like(model.prototype_counts)
-        for batch in tqdm(self.support_loader, desc='Clean training prototypes'):
-            batch = {key: value.to(self.device) if isinstance(value, torch.Tensor) else value
-                     for key, value in batch.items()}
-            features = self.model(batch)['features']
-            labels = batch['label'].long()
-            sums.index_add_(0, labels, features)
-            counts.index_add_(0, labels, torch.ones_like(labels))
-        if counts.tolist() != self.config['checkpoint_metadata']['support_counts']:
-            raise ValueError('OmniDFA support collection changed training membership')
-        model.set_prototypes(sums, counts)
 
     @torch.no_grad()
     def evaluate(self, val_loader):

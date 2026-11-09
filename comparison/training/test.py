@@ -117,10 +117,10 @@ def main(argv=None):
         trainer.load_checkpoint(args.resume_checkpoint)
 
     if config['model_name'] == 'omnidfa':
+        from comparison.training.omnidfa import omnidfa_report_provenance
         if test_source is None:
             provenance = {key: checkpoint[key] for key in ('model_name', 'dataset', 'dataset_digest', 'class_names')}
-        provenance.update({key: config[key] for key in ('attribution_protocol', 'prototype_source', 'preprocessing')})
-        provenance.update(train_augment=True, aug_policy=config['augmentation_policy'])
+        provenance.update(omnidfa_report_provenance(config))
         provenance['checkpoint'] = os.path.abspath(args.resume_checkpoint)
 
     degraded_levels = list(range(args.level_start, args.level_end)) 

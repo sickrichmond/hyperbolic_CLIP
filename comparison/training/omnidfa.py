@@ -1,5 +1,5 @@
 """Closed-set protocol, training membership and batch construction for OmniDFA."""
-from copy import copy, deepcopy
+from copy import deepcopy
 import hashlib
 import json
 import math
@@ -9,10 +9,11 @@ import torch
 from torch.utils.data import DataLoader, Sampler, Subset
 
 
+CROSS_ENTROPY_PROTOCOL = 'closed_set_cross_entropy_v1'
+PROTOTYPE_PROTOCOL = 'closed_set_train_prototypes_v1'
 PROTOCOL = {
     'upstream_commit': '35b9052e83e05436682095818693493f79da9458',
-    'attribution_protocol': 'closed_set_train_prototypes_v1',
-    'prototype_source': 'clean_train',
+    'attribution_protocol': CROSS_ENTROPY_PROTOCOL,
     'preprocessing': 'paper_augment_two_view_deterministic_eval_v1',
     'augmentation_policy': 'omnidfa_paper',
     'output_label_space': 'generators',
@@ -88,23 +89,19 @@ class OmniDFABatchSampler(Sampler):
             yield batch + [next(real) for _ in range(self.real_size)]
 
 
-def prepare_omnidfa_loaders(train_loader, config, batch_size):
+def prepare_omnidfa_train_loader(train_loader, config, batch_size):
     dataset = train_loader.dataset
     base, rows = dataset_rows(dataset)
     if base.mode != 'train' or (base.iabench_source is not None and base.iabench_source.split != 'train'):
-        raise ValueError('OmniDFA prototypes and optimization require training membership')
-    counts = torch.bincount(torch.tensor([row[1] for row in rows]), minlength=config['num_classes'])
+        raise ValueError('OmniDFA optimization requires training membership')
+    labels = [row[1] for row in rows]
+    counts = torch.bincount(torch.tensor(labels, dtype=torch.long), minlength=config['num_classes'])
     if len(counts) != config['num_classes'] or (counts == 0).any():
         raise ValueError('Every OmniDFA class must have training images')
-    sampler = OmniDFABatchSampler([row[1] for row in rows], config['real_class_index'],
+    sampler = OmniDFABatchSampler(labels, config['real_class_index'],
                                   batch_size, config.get('manualSeed', 42))
-    clean = copy(base)
-    clean.set_val()  # Change transforms only; retain exact training row membership.
-    clean_dataset = Subset(clean, list(dataset.indices)) if isinstance(dataset, Subset) else clean
-    common = dict(num_workers=train_loader.num_workers, collate_fn=train_loader.collate_fn,
-                  pin_memory=train_loader.pin_memory)
-    training = DataLoader(dataset, batch_sampler=sampler, **common)
-    support = DataLoader(clean_dataset, batch_size=batch_size, shuffle=False, drop_last=False, **common)
+    training = DataLoader(dataset, batch_sampler=sampler, num_workers=train_loader.num_workers,
+                          collate_fn=train_loader.collate_fn, pin_memory=train_loader.pin_memory)
     config['steps_per_epoch'] = len(training)
     metadata = deepcopy(config.get('checkpoint_metadata', {}))
     if config['dataset'] == 'iab':
@@ -113,22 +110,27 @@ def prepare_omnidfa_loaders(train_loader, config, batch_size):
                             'manualSeed', 'use_semantic_split', 'task_id', 'num_images_per_semantic_per_class')})
     metadata.update(PROTOCOL, model_name='omnidfa', class_names=config['class_names'],
                     num_classes=config['num_classes'], output_class_names=config['class_names'],
-                    batch_size=batch_size, support_digest=membership_digest(dataset),
-                    support_counts=counts.tolist())
+                    batch_size=batch_size, train_digest=membership_digest(dataset),
+                    train_counts=counts.tolist())
     metadata['training_config'] = {key: deepcopy(value) for key, value in config.items()
                                    if key not in ('checkpoint_metadata', 'log_dir', 'pretrained_path',
                                                   'nEpochs', 'start_epoch')}
     config['checkpoint_metadata'] = metadata
-    return training, support
+    return training
 
 
-def validate_omnidfa_checkpoint(checkpoint):
+def validate_omnidfa_checkpoint(checkpoint, *, for_training=False):
     expected = dict(PROTOCOL)
-    # Older training policies remain evaluable; resume still compares current metadata.
-    if (checkpoint.get('preprocessing') == 'upstream_train_deterministic_eval_v1'
-            and checkpoint.get('augmentation_policy') == 'omnidfa_upstream'):
-        expected.update(preprocessing='upstream_train_deterministic_eval_v1',
-                        augmentation_policy='omnidfa_upstream')
+    legacy = checkpoint.get('attribution_protocol') == PROTOTYPE_PROTOCOL
+    if legacy:
+        if for_training:
+            raise ValueError('OmniDFA prototype checkpoints are supported for evaluation only. '
+                             'Start a fresh TwinNeXt + CE run or resume a cross-entropy checkpoint.')
+        expected.update(attribution_protocol=PROTOTYPE_PROTOCOL, prototype_source='clean_train')
+        if (checkpoint.get('preprocessing') == 'upstream_train_deterministic_eval_v1'
+                and checkpoint.get('augmentation_policy') == 'omnidfa_upstream'):
+            expected.update(preprocessing='upstream_train_deterministic_eval_v1',
+                            augmentation_policy='omnidfa_upstream')
     for key, value in expected.items():
         if checkpoint.get(key) != value:
             raise ValueError(f'Incompatible OmniDFA checkpoint {key}')
@@ -142,22 +144,50 @@ def validate_omnidfa_checkpoint(checkpoint):
     real = [i for i, name in enumerate(names) if name.casefold() == 'real']
     if len(real) != 1 or config.get('real_class_index') != real[0]:
         raise ValueError('OmniDFA checkpoint real class mapping is incompatible')
-    for key in ('class_names', 'num_classes', 'model_name', 'dataset', *PROTOCOL):
+    for key in ('class_names', 'num_classes', 'model_name', 'dataset', *expected):
         if config.get(key) != checkpoint.get(key):
             raise ValueError(f'Incompatible OmniDFA training_config {key}')
     if checkpoint.get('num_classes') != len(names) or checkpoint.get('output_class_names') != names:
         raise ValueError('OmniDFA checkpoint output order is incompatible')
-    state = checkpoint.get('model_state_dict', {})
+    state = checkpoint.get('model_state_dict')
+    if not isinstance(state, dict):
+        raise ValueError('OmniDFA checkpoint requires model weights')
+    if legacy:
+        _validate_prototype_bank(checkpoint, state, len(names))
+    else:
+        for key, shape in (('backbone.mlp.fc2.weight', (len(names), 512)),
+                           ('backbone.mlp.fc2.bias', (len(names),))):
+            value = state.get(key)
+            if (not isinstance(value, torch.Tensor) or not value.is_floating_point()
+                    or value.shape != shape or not torch.isfinite(value).all()):
+                raise ValueError(f'Invalid OmniDFA classification head: {key}')
+        counts = checkpoint.get('train_counts')
+        if (not isinstance(counts, list) or len(counts) != len(names)
+                or any(type(count) is not int or count <= 0 for count in counts)
+                or not isinstance(checkpoint.get('train_digest'), str)):
+            raise ValueError('OmniDFA checkpoint requires training membership and class counts')
+    return deepcopy(config)
+
+
+def _validate_prototype_bank(checkpoint, state, num_classes):
     bank, counts = state.get('prototypes'), state.get('prototype_counts')
-    if (not isinstance(bank, torch.Tensor) or not bank.is_floating_point() or bank.shape != (len(names), 128)
+    if (not isinstance(bank, torch.Tensor) or not bank.is_floating_point() or bank.shape != (num_classes, 128)
             or not torch.isfinite(bank).all()
-            or not torch.allclose(bank.norm(dim=1), torch.ones(len(names)), atol=1e-4)
-            or not isinstance(counts, torch.Tensor) or counts.shape != (len(names),)
+            or not torch.allclose(bank.norm(dim=1), bank.new_ones(num_classes), atol=1e-4)
+            or not isinstance(counts, torch.Tensor) or counts.shape != (num_classes,)
             or counts.dtype != torch.long or (counts <= 0).any()
             or counts.tolist() != checkpoint.get('support_counts')
             or not isinstance(checkpoint.get('support_digest'), str)):
         raise ValueError('OmniDFA checkpoint requires a complete training prototype bank and membership')
-    return deepcopy(config)
+
+
+def omnidfa_report_provenance(config):
+    provenance = {key: config[key] for key in ('attribution_protocol', 'preprocessing')}
+    if config['attribution_protocol'] == PROTOTYPE_PROTOCOL:
+        provenance['prototype_source'] = config['prototype_source']
+    else:
+        provenance['method_label'] = 'TwinNeXt + CE'
+    return dict(provenance, train_augment=True, aug_policy=config['augmentation_policy'])
 
 
 def prepare_omnidfa_iab_test(checkpoint, args):
