@@ -1,6 +1,7 @@
 #!/bin/bash
 # CKPT=/path/to/checkpoint.pt sbatch slurm/slurm_plot_hierarchy_pair.sh [SEEN_GENERATOR [UNSEEN_GENERATOR]]
 # Defaults: stabilityai@stable-diffusion-2 vs stabilityai@stable-diffusion-2-1.
+# METRIC=exterior_angle selects minimum exterior angle (default: geodesic).
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
@@ -40,4 +41,5 @@ echo "Seen: $SEEN | Unseen: $UNSEEN | Checkpoint: $CKPT"
 echo "Clean frozen test rows | GPU: ${CUDA_VISIBLE_DEVICES:-unset} | Output: $LOGDIR"
 python -m comparison.training.hierarchy_pair "$SEEN" "$UNSEEN" \
   --checkpoint "$CKPT" --experiment "$EXPERIMENT" --output_dir "$LOGDIR" \
+  --metric "${METRIC:-geodesic}" \
   --batch_size "${BATCH_SIZE:-8}" --num_workers "${NUM_WORKERS:-8}" "${ROOT_FLAGS[@]}"

@@ -1,5 +1,6 @@
 #!/bin/bash
 # All seen and held-out generators, clean test rows; no retraining.
+# METRIC=exterior_angle selects reciprocal-angle softmax (default: geodesic).
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
@@ -36,4 +37,5 @@ cd "$REPO"
 echo "All seen/held-out clean test rows | Checkpoint: $CKPT | Output: $LOGDIR"
 python -m comparison.training.hierarchy_confidence \
   --checkpoint "$CKPT" --experiment "$EXPERIMENT" --output_dir "$LOGDIR" \
+  --metric "${METRIC:-geodesic}" \
   --batch_size "${BATCH_SIZE:-8}" --num_workers "${NUM_WORKERS:-8}" "${ROOT_FLAGS[@]}"

@@ -12,7 +12,7 @@ from unittest.mock import patch
 import torch
 
 from comparison.training import hierarchy_pair as pair
-from geometry.lorentz import exp_map0, pairwise_dist
+from geometry.lorentz import exp_map0, oxy_angle, pairwise_dist
 from tests import test_hierarchy_experiment as fixtures
 from tests.test_attribution_training import TinyModel
 from tests.test_iabench_training import PixelProcessor
@@ -110,6 +110,24 @@ class HierarchyPairTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'generator must'):
                     pair.evaluate_pair(self.data, 'checkpoint.pt', Path(tmp) / 'invalid', seen, unseen)
             self.assertEqual(load.call_count, 1)
+            reads.clear()
+            angle_output = Path(tmp) / 'angle'
+            angle_result = pair.evaluate_pair(self.data, 'checkpoint.pt', angle_output, batch_size=3,
+                                              workers=0, metric='exterior_angle')
+            self.assertEqual(reads, selected)
+            angles = torch.load(angle_output / 'pair_angles.pt', weights_only=True)
+            self.assertEqual(angles['metric'], 'exterior_angle')
+            self.assertEqual(angles['angle_unit'], 'radians')
+            for key, anchor_set in (('model_angles', anchors), ('family_angles', families)):
+                expected = torch.stack([oxy_angle(a.double().expand_as(images), images.double())
+                                        for a in anchor_set], dim=1)
+                torch.testing.assert_close(angles[key], expected)
+            heldout = angles['family_angles'][~angles['is_seen']].argmin(1)
+            self.assertEqual(angle_result['nearest_family_counts'], torch.bincount(heldout, minlength=4).tolist())
+            self.assertTrue((angle_output / 'angle_at_seen_anchor.png').is_file())
+            zoom = Path(tmp) / 'angle_zoom'
+            pair.main(['--replot', str(angle_output), '--output_dir', str(zoom), '--xlim', '0', '2'])
+            self.assertTrue((zoom / 'angle_at_seen_anchor_zoom.png').is_file())
 
     def test_histogram_kde_and_empty_paired_condition(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -217,6 +235,7 @@ class HierarchyPairTests(unittest.TestCase):
             self.assertIn(b'Set CKPT', missing.stderr)
             self.assertFalse(capture.exists())
             env['CKPT'] = str(checkpoint)
+            env.pop('METRIC', None)
             for positional in ([], ['E4S'], ['stabilityai@stable-diffusion-xl-base-1.0', 'stabilityai@sdxl-turbo']):
                 subprocess.run(['bash', str(script), *positional], env=env, check=True, capture_output=True)
                 args = capture.read_text().splitlines()
@@ -224,10 +243,14 @@ class HierarchyPairTests(unittest.TestCase):
                                            positional[0] if positional else pair.DEFAULT_SEEN,
                                            positional[1] if len(positional) > 1 else pair.DEFAULT_UNSEEN])
                 self.assertEqual(args[args.index('--checkpoint') + 1], str(checkpoint))
+                self.assertEqual(args[args.index('--metric') + 1], 'geodesic')
                 self.assertEqual(args[args.index('--iabench_root') + 1], str(root / 'bench root'))
                 self.assertEqual(args[args.index('--iab_root') + 1], str(root / 'iab root'))
                 self.assertEqual(args[args.index('--output_dir') + 1], str(root / 'output folder'))
                 self.assertEqual(args[-1], '3')
+            subprocess.run(['bash', str(script)], env=dict(env, METRIC='exterior_angle'), check=True, capture_output=True)
+            args = capture.read_text().splitlines()
+            self.assertEqual(args[args.index('--metric') + 1], 'exterior_angle')
             invalid = subprocess.run(['bash', str(script), 'one', 'two', 'three'], env=env, capture_output=True)
             self.assertEqual(invalid.returncode, 2)
 

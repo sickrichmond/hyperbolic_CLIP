@@ -18,6 +18,7 @@ from training.families import increfa_mapping
 REPO = Path(__file__).resolve().parents[2]
 LABELS = dict(ours='ours (hierarchy)')
 FAMILY_READOUTS = dict(geodesic='softmax_inverse_geodesic_distance', cone='minimum_exterior_angle')
+ANCHOR_METRICS = dict(geodesic='distances', exterior_angle='angles')
 
 
 def checkpoint_metadata(data):
@@ -72,12 +73,21 @@ def train_experiment(data, method, output_dir, workers=8):
     return Path(args.output)
 
 
-def family_probabilities(distances):
-    """Reciprocal geodesic-distance softmax; clamp coincident points to stay finite."""
-    if (distances.ndim != 2 or not distances.numel() or not torch.isfinite(distances).all()
-            or (distances < 0).any()):
-        raise ValueError('Invalid family geodesic distances')
-    return distances.double().clamp_min(1e-8).reciprocal().softmax(1)
+def anchor_measurements(images, anchors, curv, metric):
+    """Image-by-anchor matrix of geodesic distances or exterior angles in radians."""
+    if metric == 'geodesic':
+        return pairwise_dist(images.double(), anchors.double(), curv)
+    if metric == 'exterior_angle':
+        return _pairwise_xi(anchors.double(), images.double(), curv).T
+    raise ValueError(f'Unknown anchor metric: {metric!r}')
+
+
+def family_probabilities(measurements):
+    """Reciprocal softmax over nonnegative anchor measurements."""
+    if (measurements.ndim != 2 or not measurements.numel() or not torch.isfinite(measurements).all()
+            or (measurements < 0).any()):
+        raise ValueError('Invalid anchor measurements')
+    return measurements.double().clamp_min(1e-8).reciprocal().softmax(1)
 
 
 def prediction_metrics(family_scores, labels, data):

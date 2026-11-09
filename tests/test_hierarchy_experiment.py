@@ -162,7 +162,7 @@ class HierarchyExperimentTests(unittest.TestCase):
         for invalid in (torch.tensor([1., 2.]), torch.empty(0, 4),
                         torch.tensor([[float('nan'), 1.]]), torch.tensor([[float('inf'), 1.]]),
                         torch.tensor([[-1., 1.]])):
-            with self.assertRaisesRegex(ValueError, 'geodesic distances'):
+            with self.assertRaisesRegex(ValueError, 'anchor measurements'):
                 experiment.family_probabilities(invalid)
 
     def test_unseen_only_stratified_metrics(self):

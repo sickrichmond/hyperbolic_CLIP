@@ -6,32 +6,33 @@ from pathlib import Path
 import torch
 
 from checkpoint_io import atomic_torch_save
-from comparison.training.hierarchy_experiment import family_probabilities, load_model
+from comparison.training.hierarchy_experiment import (
+    ANCHOR_METRICS, anchor_measurements, family_probabilities, load_model,
+)
 from comparison.training.hierarchy_pair import ordering_probability
 from data.hierarchy_experiment import ExperimentData, write_json
-from geometry.lorentz import pairwise_dist
 
 
-def prediction_points(model_distances, family_distances, labels, descriptor):
+def prediction_points(model_values, family_values, labels, descriptor):
     names, models = descriptor['class_names'], descriptor['seen_classes']
     groups = descriptor['family_groups']
     if (labels.ndim != 1 or labels.dtype != torch.long or not len(labels)
             or labels.min() < 0 or labels.max() >= len(names)
-            or model_distances.shape != (len(labels), len(models))
-            or family_distances.shape != (len(labels), len(groups))):
-        raise ValueError('Invalid confidence distances or generator labels')
-    for distances in (model_distances, family_distances):
-        if not torch.isfinite(distances).all() or (distances < 0).any():
-            raise ValueError('Distances must be finite and nonnegative')
+            or model_values.shape != (len(labels), len(models))
+            or family_values.shape != (len(labels), len(groups))):
+        raise ValueError('Invalid anchor measurements or generator labels')
+    for values in (model_values, family_values):
+        if not torch.isfinite(values).all() or (values < 0).any():
+            raise ValueError('Anchor measurements must be finite and nonnegative')
     parent = {name: i for i, group in enumerate(groups.values()) for name in group}
     targets = torch.tensor([parent.get(name, -1) for name in names], dtype=torch.long)[labels]
     model_labels = torch.tensor([names.index(name) for name in models], dtype=torch.long)
     seen = torch.tensor([name in models for name in names], dtype=torch.bool)[labels]
     if not seen.any() or seen.all():
         raise ValueError('Confidence diagnostic requires both seen and unseen test images')
-    candidate = model_distances.argmin(1)
-    scores = family_probabilities(model_distances).gather(1, candidate[:, None]).squeeze(1)
-    family_prediction = family_distances.argmin(1)
+    candidate = model_values.argmin(1)
+    scores = family_probabilities(model_values).gather(1, candidate[:, None]).squeeze(1)
+    family_prediction = family_values.argmin(1)
     return dict(
         generator_indices=labels, is_seen=seen, confidence=scores,
         predicted_model_indices=candidate, model_correct=model_labels[candidate] == labels,
@@ -130,7 +131,8 @@ def plot_confidence(points, output):
         if suffix:
             title += '\nObserved score range; numeric values unchanged'
         fig.suptitle(title, fontsize=16)
-        fig.supxlabel('Maximum reciprocal-distance softmax score (uncalibrated)', y=.10)
+        quantity = 'angle' if points.get('metric') == 'exterior_angle' else 'distance'
+        fig.supxlabel(f'Maximum reciprocal-{quantity} softmax score (uncalibrated)', y=.10)
         handles = [Line2D([], [], marker='o', linestyle='', color=color, label=label)
                    for color, label in (('#167c73', 'Specific name correct'), ('#c75b3d', 'Specific name incorrect'))]
         fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(.5, .02), ncol=2, frameon=False)
@@ -143,7 +145,8 @@ def plot_confidence(points, output):
 
 
 @torch.no_grad()
-def evaluate_confidence(data, checkpoint, output_dir, batch_size=8, workers=8):
+def evaluate_confidence(data, checkpoint, output_dir, batch_size=8, workers=8, metric='geodesic'):
+    suffix = ANCHOR_METRICS[metric]
     if batch_size < 1 or workers < 0:
         raise ValueError('Invalid batch size or worker count')
     output = Path(output_dir)
@@ -160,8 +163,8 @@ def evaluate_confidence(data, checkpoint, output_dir, batch_size=8, workers=8):
     models_all, families_all, labels_all, sample_keys = [], [], [], []
     for batch in tqdm(loader, desc='All seen/held-out clean test images'):
         images, _ = model.encode_image(batch['pixel_values'].to(device))
-        models_all.append(pairwise_dist(images.double(), anchors.double(), config['curv']).cpu())
-        families_all.append(pairwise_dist(images.double(), families.double(), config['curv']).cpu())
+        models_all.append(anchor_measurements(images, anchors, config['curv'], metric).cpu())
+        families_all.append(anchor_measurements(images, families, config['curv'], metric).cpu())
         labels_all.append(torch.tensor([desc['class_names'].index(name) for name in batch['generator']]))
         sample_keys.extend(batch['sample_key'])
     if sample_keys != [key for key, _, _ in source.samples]:
@@ -174,17 +177,24 @@ def evaluate_confidence(data, checkpoint, output_dir, batch_size=8, workers=8):
         class_names=desc['class_names'], model_anchor_names=desc['seen_classes'],
         unseen_classes=desc['unseen_classes'], exploratory_classes=desc['exploratory_classes'],
         family_names=list(desc['family_groups']), family_groups=desc['family_groups'],
-        model_score='max_softmax_reciprocal_geodesic_distance', inverse_distance_epsilon=1e-8,
+        metric=metric,
         calibrated=False, family_readout='nearest_family_anchor', split='test', degradation='clean',
         test_scope='all_seen_unseen_and_exploratory',
     )
-    saved = dict(provenance, **points, sample_keys=sample_keys, model_distances=models, family_distances=families)
+    if metric == 'geodesic':
+        provenance.update(model_score='max_softmax_reciprocal_geodesic_distance', inverse_distance_epsilon=1e-8)
+    else:
+        provenance.update(model_score='max_softmax_reciprocal_exterior_angle', inverse_angle_epsilon=1e-8,
+                          angle_unit='radians')
+    saved = dict(provenance, **points, sample_keys=sample_keys,
+                 **{f'model_{suffix}': models, f'family_{suffix}': families})
     results = dict(provenance, **confidence_statistics(points, desc))
     output.mkdir(parents=True, exist_ok=True)
     atomic_torch_save(saved, output / 'confidence_points.pt')
     write_json(output / 'confidence_results.json', results)
     plot_confidence(saved, output)
-    summary = '\n'.join(f'{group}: {json.dumps(results[group], allow_nan=False)}' for group in ('seen', 'unseen'))
+    summary = f'Metric: {metric}\n' + '\n'.join(
+        f'{group}: {json.dumps(results[group], allow_nan=False)}' for group in ('seen', 'unseen'))
     (output / 'summary.txt').write_text(summary + '\n')
     print(summary)
     print(f'Points, metrics and plots: {output.resolve()}')
@@ -196,6 +206,7 @@ def main(argv=None):
     parser.add_argument('--checkpoint')
     parser.add_argument('--experiment')
     parser.add_argument('--output_dir', required=True)
+    parser.add_argument('--metric', choices=ANCHOR_METRICS, help='Inference metric (default: geodesic)')
     parser.add_argument('--points', help='Replot saved confidence_points.pt without model or image loading')
     parser.add_argument('--iabench_root')
     parser.add_argument('--iab_root')
@@ -203,15 +214,18 @@ def main(argv=None):
     parser.add_argument('--num_workers', type=int, default=8)
     args = parser.parse_args(argv)
     if args.points:
+        if args.metric is not None:
+            parser.error('--points uses the metric recorded in the saved tensor')
         saved = torch.load(args.points, map_location='cpu', weights_only=True)
+        suffix = ANCHOR_METRICS[saved.get('metric', 'geodesic')]
         desc = dict(class_names=saved['class_names'], seen_classes=saved['model_anchor_names'],
                     family_groups=saved['family_groups'])
-        points = prediction_points(saved['model_distances'], saved['family_distances'], saved['generator_indices'], desc)
+        points = prediction_points(saved[f'model_{suffix}'], saved[f'family_{suffix}'], saved['generator_indices'], desc)
         for key, value in points.items():
             match = (torch.allclose(saved[key], value, rtol=1e-10, atol=1e-12)
                      if value.is_floating_point() else torch.equal(saved[key], value))
             if not match:
-                raise ValueError('Saved confidence points do not match the stored distances and labels')
+                raise ValueError('Saved confidence points do not match the stored anchor measurements and labels')
         output = Path(args.output_dir)
         if output.exists() and any(output.iterdir()):
             raise ValueError(f'Use a fresh confidence output directory: {output}')
@@ -221,7 +235,8 @@ def main(argv=None):
     if not args.checkpoint or not args.experiment:
         parser.error('Inference requires --checkpoint and --experiment; use --points to replot')
     data = ExperimentData(args.experiment, args.iabench_root, args.iab_root)
-    evaluate_confidence(data, args.checkpoint, args.output_dir, args.batch_size, args.num_workers)
+    evaluate_confidence(data, args.checkpoint, args.output_dir, args.batch_size, args.num_workers,
+                        metric=args.metric or 'geodesic')
 
 
 if __name__ == '__main__':

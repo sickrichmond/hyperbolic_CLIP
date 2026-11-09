@@ -13,7 +13,7 @@ import numpy as np
 import torch
 
 from comparison.training import hierarchy_confidence as confidence
-from geometry.lorentz import exp_map0, pairwise_dist
+from geometry.lorentz import exp_map0, oxy_angle, pairwise_dist
 from tests import test_hierarchy_experiment as fixtures
 from tests.test_attribution_training import TinyModel
 from tests.test_iabench_training import PixelProcessor
@@ -146,6 +146,25 @@ class HierarchyConfidenceTests(unittest.TestCase):
             torch.save(saved, Path(tmp) / 'damaged.pt')
             with self.assertRaisesRegex(ValueError, 'do not match'):
                 confidence.main(['--points', str(Path(tmp) / 'damaged.pt'), '--output_dir', str(Path(tmp) / 'invalid')])
+            reads.clear()
+            angle_output = Path(tmp) / 'angle'
+            angle_result = confidence.evaluate_confidence(self.data, 'checkpoint.pt', angle_output,
+                                                          batch_size=7, workers=0, metric='exterior_angle')
+            self.assertEqual(reads, desc['splits']['test'])
+            self.assertEqual(angle_result['model_score'], 'max_softmax_reciprocal_exterior_angle')
+            angle_path = angle_output / 'confidence_points.pt'
+            angles = torch.load(angle_path, weights_only=True)
+            self.assertEqual(angles['angle_unit'], 'radians')
+            for key, anchor_set in (('model_angles', anchors), ('family_angles', families)):
+                expected = torch.stack([oxy_angle(a.double().expand_as(images), images.double())
+                                        for a in anchor_set], dim=1)
+                torch.testing.assert_close(angles[key], expected)
+            expected = angles['model_angles'].clamp_min(1e-8).reciprocal().softmax(1)
+            torch.testing.assert_close(angles['confidence'], expected.max(1).values)
+            torch.testing.assert_close(angles['predicted_model_indices'], angles['model_angles'].argmin(1))
+            torch.testing.assert_close(angles['predicted_family_indices'], angles['family_angles'].argmin(1))
+            with patch.object(confidence, 'load_model', side_effect=AssertionError('model loaded')):
+                confidence.main(['--points', str(angle_path), '--output_dir', str(Path(tmp) / 'angle_replot')])
 
     def test_slurm_launch_and_overrides(self):
         script = Path(confidence.__file__).resolve().parents[2] / 'slurm/slurm_plot_hierarchy_confidence.sh'
@@ -181,13 +200,18 @@ class HierarchyConfidenceTests(unittest.TestCase):
             self.assertIn(b'Set CKPT', missing.stderr)
             self.assertFalse(capture.exists())
             env['CKPT'] = str(ckpt)
+            env.pop('METRIC', None)
             subprocess.run(['bash', str(script)], env=env, check=True, capture_output=True)
             args = capture.read_text().splitlines()
             self.assertEqual(args[:2], ['-m', 'comparison.training.hierarchy_confidence'])
             self.assertEqual(args[args.index('--checkpoint') + 1], str(ckpt))
+            self.assertEqual(args[args.index('--metric') + 1], 'geodesic')
             self.assertEqual(args[args.index('--iabench_root') + 1], str(root / 'bench root'))
             self.assertEqual(args[args.index('--iab_root') + 1], str(root / 'iab root'))
             self.assertEqual(args[-1], '3')
+            subprocess.run(['bash', str(script)], env=dict(env, METRIC='exterior_angle'), check=True, capture_output=True)
+            args = capture.read_text().splitlines()
+            self.assertEqual(args[args.index('--metric') + 1], 'exterior_angle')
             invalid = subprocess.run(['bash', str(script), 'SD2'], env=env, capture_output=True)
             self.assertEqual(invalid.returncode, 2)
 
