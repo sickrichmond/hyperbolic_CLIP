@@ -3,6 +3,7 @@ from PIL import Image
 from torch.utils.data import Dataset
 
 from data.image_io import open_image_retry, retry_image_read
+from data.degradations import apply_jpeg99
 import re
 from io import BytesIO
 from PIL import ImageFilter
@@ -154,6 +155,7 @@ class ImageAttributionDataset(Dataset):
                  iabench_source=None):
         self.root_dir = root_dir  
         self.transform = transform  
+        self.jpeg99 = False
         self.num_images_per_semantic_per_class = num_images_per_semantic_per_class
 
         self.iabench_source = iabench_source
@@ -280,6 +282,8 @@ class ImageAttributionDataset(Dataset):
     def __getitem__(self, idx):
         img_path, label, semantic_label, semantic_subclass = self.samples[idx]
         image = self._open_image(img_path)
+        if self.jpeg99:
+            image = apply_jpeg99(image)
         if self.iabench_source is not None:
             if self.mode == 'test':
                 image = self.get_degraded_img(image)

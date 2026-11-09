@@ -6,6 +6,7 @@ from torch.utils.data import Dataset
 from transformers import CLIPImageProcessor
 
 from data.image_io import open_image_retry
+from data.degradations import apply_jpeg99
 
 # Mirrors the SEMANTIC_TO_SUPER mapping from IAB's download.py.
 # Flat semantics (COCO, ImageNet-1k) live directly under the generator dir.
@@ -58,6 +59,7 @@ class IABDataset(Dataset):
         max_per_class: Optional[int] = None,
     ):
         self.root = Path(root)
+        self.jpeg99 = False
         self.processor = CLIPImageProcessor.from_pretrained(processor_name)
         self.samples: list[tuple[Path, str]] = []  # (image_path, generator)
 
@@ -93,6 +95,8 @@ class IABDataset(Dataset):
     def __getitem__(self, idx: int) -> dict:
         path, generator = self.samples[idx]
         img = open_image_retry(path)
+        if self.jpeg99:
+            img = apply_jpeg99(img)
         pixel = self.processor(images=img, return_tensors="pt")["pixel_values"][0]
         return {
             "pixel_values": pixel,

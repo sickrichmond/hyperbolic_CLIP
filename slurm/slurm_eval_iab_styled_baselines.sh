@@ -1,5 +1,5 @@
 #!/bin/bash
-# One task per IAB baseline, every style, native preprocessing/prediction rules.
+# One task per IAB baseline, every style, JPEG99 before native preprocessing.
 # Submit: sbatch slurm/slurm_eval_iab_styled_baselines.sh /path/to/checkpoints.json
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -29,7 +29,7 @@ export IAB_EXCLUDE_GENERATORS=dalle3
 REPO="${REPO:-$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo}"
 DATA="${DATA:-$FAST/datasets/iab_styled_eval}"
 CHECKPOINTS="${1:-${CHECKPOINTS:-}}"
-LOGDIR="${LOGDIR:-$WORK/outputs/baselines_iab_styled_${SLURM_ARRAY_JOB_ID}}"
+LOGDIR="${LOGDIR:-$WORK/outputs/baselines_iab_styled_jpeg99_${SLURM_ARRAY_JOB_ID}}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 METHODS=(resnet50 dct hifi_net defl dna repmix patch ucf lida defake pose)
@@ -45,7 +45,7 @@ CHECKPOINTS="$(realpath "$CHECKPOINTS")"
 cd "$REPO"
 PYDEPS="${IAB_PYDEPS:-$HOME/iab_pydeps}"
 export PYTHONPATH="$REPO:$PYDEPS:${PYTHONPATH:-}"
-echo "Baseline: $METHOD | Dataset: $DATA | Checkpoints: $CHECKPOINTS"
+echo "Baseline: $METHOD | Dataset: $DATA | JPEG99 only | Checkpoints: $CHECKPOINTS"
 echo "Results: $LOGDIR/$METHOD | GPU: ${CUDA_VISIBLE_DEVICES:-?}"
 python -m comparison.training.test_baselines_styled \
     --method "$METHOD" --checkpoints "$CHECKPOINTS" \

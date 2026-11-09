@@ -26,6 +26,11 @@ def _compress(img, quality=65):
     return Image.open(buffer)
 
 
+def apply_jpeg99(image):
+    """Styled evaluation: one JPEG quality-99 round-trip at native resolution."""
+    return _compress(image, quality=99).convert("RGB")
+
+
 def _blur(img, sigma=2):
     return img.filter(ImageFilter.GaussianBlur(radius=sigma))
 

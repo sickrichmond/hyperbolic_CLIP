@@ -1,8 +1,9 @@
 """Evaluate IAB cone checkpoints on ROOT/style/generator/semantic/images.
 
-Every image is evaluated, without a train/test split, sample cap or additional
-corruptions. Predictions compete over ALL checkpoint classes. Balanced accuracy
-averages recalls only over generators present in each style.
+Every image is evaluated after JPEG quality-99 compression, without a train/test
+split or sample cap. There is no clean pass. Predictions compete over ALL
+checkpoint classes. Balanced accuracy averages recalls only over generators
+present in each style.
 
 Usage: python -m comparison.training.test_hypclip_styled --help
 """
@@ -75,6 +76,7 @@ def main(argv=None):
         for style, generators in styles:
             dataset = IABDataset(str(style), generators, list(SEMANTIC_TO_SUPER),
                                  processor_name=ckpt['clip_name'])
+            dataset.jpeg99 = True
             counts = Counter(generator for _, generator in dataset.samples)
             empty = [name for name in generators if not counts[name]]
             if empty:
@@ -86,7 +88,7 @@ def main(argv=None):
             if files != loaded:
                 raise ValueError(f'{style}: images outside the supported IAB semantic layout: '
                                  f'{sorted(str(p) for p in files - loaded)[:5]}')
-            print(f'\nStyle: {style.name} | images: {len(dataset)} | counts: {dict(counts)}')
+            print(f'\nStyle: {style.name} | JPEG99 only | images: {len(dataset)} | counts: {dict(counts)}')
             loader = torch.utils.data.DataLoader(
                 dataset, batch_size=args.batch_size, num_workers=args.num_workers,
                 shuffle=False, drop_last=False)
@@ -99,7 +101,8 @@ def main(argv=None):
                 'data_root': str(style.resolve()), 'style': style.name,
                 'class_names': class_names, 'evaluated_generators': generators,
                 'num_images': len(dataset), 'decision_rule': 'argmin exterior angle',
-                'preprocessing': 'checkpoint CLIP processor; no extra corruptions',
+                'evaluation_condition': 'jpeg99', 'jpeg_quality': 99,
+                'preprocessing': 'JPEG99 at native resolution before checkpoint CLIP processor',
                 'accuracy': acc, 'auc': auc, 'ap': ap, **extra,
                 'confusion_matrix': confusion.tolist(),
             }
@@ -107,7 +110,7 @@ def main(argv=None):
             style_output.mkdir(parents=True, exist_ok=True)
             path = style_output / 'metrics.json'
             path.write_text(json.dumps(result, indent=2) + '\n')
-            summary.append({'style': style.name, 'num_images': len(dataset),
+            summary.append({'style': style.name, 'num_images': len(dataset), 'jpeg_quality': 99,
                             'accuracy': acc, 'balanced_accuracy': extra['balanced_accuracy']})
             with (output / 'summary.csv').open('w', newline='') as stream:
                 writer = csv.DictWriter(stream, fieldnames=list(summary[0]))
@@ -117,7 +120,7 @@ def main(argv=None):
                   f"balanced accuracy={100 * extra['balanced_accuracy']:.2f}%")
             print(f'  saved → {path}')
 
-    print('\nStyle                        Balanced accuracy (%)')
+    print('\nJPEG99 only\nStyle                        Balanced accuracy (%)')
     for row in summary:
         print(f"{row['style']:<28} {100 * row['balanced_accuracy']:>8.2f}")
 

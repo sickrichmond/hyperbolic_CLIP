@@ -2,7 +2,8 @@
 
 Reuse native dataset adapters and Trainer.test. Predictions compete over the
 full IAB class map; balanced accuracy averages supported generators only.
-No split, sampling cap or additional corruption is applied.
+Every image receives JPEG quality-99 compression before native preprocessing.
+There is no clean pass, split or sampling cap.
 """
 import argparse
 from collections import Counter
@@ -113,6 +114,7 @@ def build_styled_loader(style, config, batch_size, num_workers, clip_preprocess=
     dataset = DATASET[config['model_name']](
         root_dir='', config=config, degraded=0, clip_preprocess=clip_preprocess)
     dataset.root_dir = str(style)
+    dataset.jpeg99 = True
     dataset.samples = collect_samples(style, config['class_names'],
                                       semantic_to_relpath, semantic_label_map)
     if config['model_name'] == 'repmix':
@@ -179,7 +181,7 @@ def main(argv=None):
         loader = build_styled_loader(style, config, args.batch_size, args.num_workers,
                                      clip_preprocess=clip_preprocess)
         counts = Counter(class_names[row[1]] for row in loader.dataset.samples)
-        print(f'\nBaseline: {args.method} | Style: {style.name} | images: {len(loader.dataset)} '
+        print(f'\nBaseline: {args.method} | Style: {style.name} | JPEG99 only | images: {len(loader.dataset)} '
               f'| counts: {dict(counts)}')
         metrics = trainer.test(loader)
         if metrics['conf_matrix'].shape != (len(class_names), len(class_names)):
@@ -188,7 +190,8 @@ def main(argv=None):
             'model_name': args.method, 'checkpoint': str(Path(args.checkpoint).resolve()),
             'data_root': str(style.resolve()), 'style': style.name,
             'class_names': class_names, 'evaluated_generators': generators,
-            'num_images': len(loader.dataset), 'preprocessing': 'native adapter; no extra corruptions',
+            'num_images': len(loader.dataset), 'evaluation_condition': 'jpeg99', 'jpeg_quality': 99,
+            'preprocessing': 'JPEG99 at native resolution before native adapter preprocessing',
             'config': config,
             **{key: value for key, value in metrics.items() if key not in ('acc', 'conf_matrix')},
             'accuracy': metrics['acc'], 'confusion_matrix': metrics['conf_matrix'].tolist(),
@@ -198,7 +201,7 @@ def main(argv=None):
         path = style_output / 'metrics.json'
         path.write_text(json.dumps(result, indent=2) + '\n')
         summary.append({'model': args.method, 'style': style.name,
-                        'num_images': len(loader.dataset), 'accuracy': metrics['acc'],
+                        'num_images': len(loader.dataset), 'jpeg_quality': 99, 'accuracy': metrics['acc'],
                         'balanced_accuracy': metrics['balanced_accuracy']})
         with (output / 'summary.csv').open('w', newline='') as stream:
             writer = csv.DictWriter(stream, fieldnames=list(summary[0]))

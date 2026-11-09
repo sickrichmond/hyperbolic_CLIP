@@ -177,7 +177,7 @@ exec bash "$1" "$2"
                     self.assertEqual(flags['--checkpoints'], str(path))
                     self.assertEqual(flags['--root_dir'], str(root / 'datasets/iab_styled_eval'))
                     self.assertEqual(flags['--log_dir'],
-                        str(root / f'outputs/baselines_iab_styled_123/{method}'))
+                        str(root / f'outputs/baselines_iab_styled_jpeg99_123/{method}'))
                     self.assertEqual(flags['--batch_size'], '8')
                     self.assertEqual(command['gpu'], '4')
             capture.unlink()
@@ -194,6 +194,7 @@ exec bash "$1" "$2"
         import torch
         from comparison.dataset.ImageAttributionDataset.dataset import model_class_to_label
         from comparison.training.attributors import ATTRIBUTOR
+        from data.degradations import apply_jpeg99
         from tests.test_iabench_baseline_evaluation import EvaluationFixture
         from tests.test_iabench_baselines import config_for
 
@@ -235,6 +236,8 @@ exec bash "$1" "$2"
                             patch.object(EvaluationFixture, 'forward', forward), \
                             patch('torch.cuda.is_available', return_value=False), \
                             patch('clip.load', side_effect=AssertionError('second CLIP load')), \
+                            patch('comparison.dataset.ImageAttributionDataset.dataset.apply_jpeg99',
+                                  wraps=apply_jpeg99) as jpeg, \
                             patch('comparison.training.logger.create_logger',
                                   return_value=logging.getLogger('styled-fixture')), \
                             contextlib.redirect_stdout(io.StringIO()):
@@ -242,10 +245,13 @@ exec bash "$1" "$2"
                             '--root_dir', str(root / 'data'), '--log_dir', str(output),
                             '--batch_size', '2', '--num_workers', '0'])
                     self.assertEqual(batch_sizes, [2, 1, 2, 1])
+                    self.assertEqual(jpeg.call_count, 6, 'exactly one JPEG99 pass per image')
                     for style in ('noir', 'watercolor'):
                         result = json.loads((output / style / 'metrics.json').read_text())
                         self.assertEqual(result['class_names'], names)
                         self.assertEqual(result['num_images'], 3)
+                        self.assertEqual(result['evaluation_condition'], 'jpeg99')
+                        self.assertEqual(result['jpeg_quality'], 99)
                         self.assertEqual(sum(result['support_per_class']), 3)
                         self.assertEqual(result['support_per_class'][names.index('SDXL')], 2)
                         self.assertEqual(result['balanced_accuracy'], 0.)
@@ -254,7 +260,9 @@ exec bash "$1" "$2"
                         if method == 'patch':
                             self.assertIn('acc_D_voted', result)
                     with (output / 'summary.csv').open() as stream:
-                        self.assertEqual(len(list(csv.DictReader(stream))), 2)
+                        rows = list(csv.DictReader(stream))
+                        self.assertEqual(len(rows), 2)
+                        self.assertTrue(all(row['jpeg_quality'] == '99' for row in rows))
 
 
 if __name__ == '__main__':

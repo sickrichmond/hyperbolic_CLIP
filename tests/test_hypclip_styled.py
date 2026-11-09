@@ -18,6 +18,32 @@ from comparison.training import test_hypclip_styled as evaluator
 
 
 class StyledEvaluationTests(unittest.TestCase):
+    @unittest.skipUnless(importlib.util.find_spec('PIL'), 'JPEG check needs Pillow')
+    def test_jpeg99_matches_reference_encode_and_preserves_source(self):
+        from PIL import Image
+        from data.degradations import apply_jpeg99, _compress
+
+        source = Image.new('RGB', (31, 27))
+        source.putdata([((i * 37) % 256, (i * 13) % 256, (i * 71) % 256)
+                        for i in range(31 * 27)])
+        for mode in ('RGB', 'RGBA', 'L'):
+            with self.subTest(mode=mode):
+                image = source.convert(mode)
+                original = image.tobytes()
+                buffer = io.BytesIO()
+                image.convert('RGB').save(buffer, format='JPEG', quality=99)
+                buffer.seek(0)
+                with Image.open(buffer) as decoded:
+                    expected = decoded.convert('RGB')
+                with patch('data.degradations._compress', wraps=_compress) as encode:
+                    actual = apply_jpeg99(image)
+                encode.assert_called_once_with(image, quality=99)
+                self.assertEqual(actual.size, image.size)
+                self.assertEqual(actual.mode, 'RGB')
+                self.assertEqual(actual.tobytes(), expected.tobytes())
+                self.assertNotEqual(actual.tobytes(), image.convert('RGB').tobytes())
+                self.assertEqual(image.tobytes(), original)
+
     def test_inventory_preserves_checkpoint_order_and_all_styles(self):
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
@@ -86,7 +112,7 @@ exec bash "$1"
                 self.assertEqual(args.root_dir, str(data))
                 self.assertEqual(args.num_workers, 0 if override else 8)
                 self.assertEqual(args.log_dir, env.get(
-                    'LOGDIR', str(root / 'outputs/hypclip_iab_styled_123')))
+                    'LOGDIR', str(root / 'outputs/hypclip_iab_styled_jpeg99_123')))
                 self.assertEqual(command['gpu'], '3')
             capture.unlink()
             checkpoint.unlink()
@@ -104,6 +130,7 @@ exec bash "$1"
         import torch
         from torch import nn
         from comparison.training import test_hypclip as shared
+        from data.degradations import apply_jpeg99
         from geometry.lorentz import exp_map0
 
         class TinyModel(nn.Module):
@@ -119,7 +146,7 @@ exec bash "$1"
             def __call__(self, images, **kwargs):
                 color = images.getpixel((0, 0))
                 return {'pixel_values': torch.tensor(
-                    [[.8, 0.] if color[0] else [0., .8]])}
+                    [[.8, 0.] if color[0] > color[1] else [0., .8]])}
 
         with tempfile.TemporaryDirectory() as root:
             root = Path(root)
@@ -141,14 +168,18 @@ exec bash "$1"
             with patch.object(shared.AttributionCLIP, 'from_checkpoint', return_value=TinyModel()), \
                     patch('data.iab_dataset.CLIPImageProcessor.from_pretrained',
                           return_value=Processor()), \
+                    patch('data.iab_dataset.apply_jpeg99', wraps=apply_jpeg99) as jpeg, \
                     patch('torch.cuda.is_available', return_value=False), \
                     contextlib.redirect_stdout(io.StringIO()):
                 evaluator.main(['--checkpoint', str(checkpoint), '--root_dir', str(root / 'data'),
                                 '--log_dir', str(root / 'results'), '--num_workers', '0',
                                 '--batch_size', '2'])
+            self.assertEqual(jpeg.call_count, 6, 'exactly one JPEG99 pass per image')
             for style in ('noir', 'watercolor'):
                 result = json.loads((root / 'results' / style / 'metrics.json').read_text())
                 self.assertEqual(result['num_images'], 3)
+                self.assertEqual(result['evaluation_condition'], 'jpeg99')
+                self.assertEqual(result['jpeg_quality'], 99)
                 self.assertEqual(result['class_names'], names)
                 self.assertEqual(result['support_per_class'], [0, 1, 2, 0])
                 self.assertEqual(result['balanced_accuracy'], .5)

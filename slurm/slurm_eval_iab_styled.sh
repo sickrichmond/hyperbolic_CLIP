@@ -1,5 +1,5 @@
 #!/bin/bash
-# Evaluate every style under DATA against all saved IAB checkpoint anchors.
+# Evaluate every style under DATA with JPEG99 only, against all saved IAB anchors.
 # Submit: CKPT=/path/to/checkpoint.pt sbatch slurm/slurm_eval_iab_styled.sh
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
@@ -27,7 +27,7 @@ export HF_DATASETS_OFFLINE=1
 REPO="${REPO:-$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo}"
 DATA="${DATA:-$FAST/datasets/iab_styled_eval}"
 CKPT="${CKPT:?Set CKPT to the IAB checkpoint to evaluate}"
-LOGDIR="${LOGDIR:-$WORK/outputs/hypclip_iab_styled_${SLURM_JOB_ID}}"
+LOGDIR="${LOGDIR:-$WORK/outputs/hypclip_iab_styled_jpeg99_${SLURM_JOB_ID}}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 
 cd "$REPO"
@@ -39,7 +39,7 @@ if [ ! -d "$DATA" ]; then
     echo "ERROR: styled dataset not found at $DATA"
     exit 1
 fi
-echo "Dataset: $DATA | Checkpoint: $CKPT | Results: $LOGDIR"
+echo "Dataset: $DATA | Checkpoint: $CKPT | JPEG99 only | Results: $LOGDIR"
 
 python -m comparison.training.test_hypclip_styled \
     --checkpoint "$CKPT" \
