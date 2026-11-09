@@ -68,22 +68,35 @@ class HierarchyConfidenceTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 confidence.prediction_points(invalid, families, labels, desc)
 
-    def test_every_point_unsmoothed_marginals_and_unchanged_scores(self):
+    def test_every_point_density_curves_and_unchanged_scores(self):
         import matplotlib.axes
         models, families, labels, desc = self.example()
         points = dict(confidence.prediction_points(models, families, labels, desc), model_anchor_names=desc['seen_classes'])
+        points['confidence'][points['is_seen']] = .0504
+        points['confidence'][~points['is_seen']] = torch.linspace(.0503, .0505, 12, dtype=torch.float64)
         before = {key: value.clone() for key, value in points.items() if isinstance(value, torch.Tensor)}
-        plotted = []
+        plotted, curves = [], []
         scatter = matplotlib.axes.Axes.scatter
+        plot = matplotlib.axes.Axes.plot
         def record(ax, x, y, **kwargs):
             plotted.append((np.asarray(x).copy(), np.asarray(y).copy()))
             return scatter(ax, x, y, **kwargs)
+        def record_curve(ax, x, y, **kwargs):
+            curves.append((x.copy(), y.copy()))
+            return plot(ax, x, y, **kwargs)
         with tempfile.TemporaryDirectory() as tmp, patch.object(matplotlib.axes.Axes, 'scatter', record), \
-                patch('scipy.stats.gaussian_kde', side_effect=AssertionError('KDE smoothing used')):
+                patch.object(matplotlib.axes.Axes, 'plot', record_curve):
             confidence.plot_confidence(points, tmp)
             self.assertEqual([len(x) for x, _ in plotted], [20, 12, 20, 12])
             np.testing.assert_array_equal(plotted[0][0], points['confidence'][points['is_seen']].numpy())
+            np.testing.assert_array_equal(plotted[1][0], points['confidence'][~points['is_seen']].numpy())
             self.assertEqual(int((plotted[1][1] < .5).sum()), 2)
+            self.assertEqual(len(curves), 4)
+            for (grid, density), detail_curve in zip(curves[:2], curves[2:]):
+                np.testing.assert_array_equal((grid, density), detail_curve)
+                self.assertTrue(np.isfinite(density).all())
+                area = np.sum(np.diff(grid) * (density[:-1] + density[1:]) / 2)
+                self.assertAlmostEqual(area, 1, places=3)
             for suffix in ('', '_detail'):
                 for extension in ('png', 'pdf'):
                     self.assertGreater((Path(tmp) / f'confidence_family{suffix}.{extension}').stat().st_size, 1000)

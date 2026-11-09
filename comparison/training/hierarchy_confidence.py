@@ -72,6 +72,7 @@ def plot_confidence(points, output):
     from matplotlib.lines import Line2D
     from matplotlib.ticker import MaxNLocator
     import numpy as np
+    from scipy.stats import gaussian_kde, norm
 
     seen = points['is_seen'].numpy()
     confidence = points['confidence'].numpy()
@@ -85,20 +86,29 @@ def plot_confidence(points, output):
     low, high = float(confidence.min()), float(confidence.max())
     padding = max((high - low) * .04, .0001)
     detail = (max(0., low - padding), min(1., high + padding))
+    bandwidth = confidence.std(ddof=1) * len(confidence) ** (-.2) if high > low else padding / 4
+    tail = max(padding, 4 * bandwidth)
+    grid = np.linspace(max(0., low - tail), min(1., high + tail), 512)
+    cohorts = ((seen, 'Seen generators', '#167c73'), (~seen, 'Held-out generators', '#c75b3d'))
+    densities = []
+    for mask, _, _ in cohorts:
+        scores = confidence[mask]
+        if np.ptp(scores) == 0:
+            densities.append(norm.pdf(grid, loc=scores[0], scale=bandwidth))
+        else:
+            densities.append(gaussian_kde(scores, bw_method=bandwidth / scores.std(ddof=1))(grid))
     for suffix, limits in (('', (0., 1.)), ('_detail', detail)):
         fig = plt.figure(figsize=(13, 7.5))
         layout = fig.add_gridspec(2, 2, height_ratios=[1, 2.5], hspace=.08, wspace=.13)
         marginals = []
-        for col, (mask, title, color) in enumerate(((seen, 'Seen generators', '#167c73'),
-                                                   (~seen, 'Held-out generators', '#c75b3d'))):
+        for col, ((mask, title, color), density) in enumerate(zip(cohorts, densities)):
             marginal = fig.add_subplot(layout[0, col])
             scatter = fig.add_subplot(layout[1, col], sharex=marginal)
             marginals.append(marginal)
-            weights = np.full(int(mask.sum()), 100 / int(mask.sum()))
-            marginal.hist(confidence[mask], bins=np.linspace(*limits, 51), weights=weights,
-                          histtype='stepfilled', color=color, alpha=.25)
+            marginal.fill_between(grid, density, color=color, alpha=.20)
+            marginal.plot(grid, density, color=color, linewidth=1.8)
             marginal.set_title(f'{title} (n={int(mask.sum()):,})', fontsize=13)
-            marginal.set_ylabel('Images per bin (%)' if col == 0 else '')
+            marginal.set_ylabel('Score density' if col == 0 else '')
             marginal.tick_params(axis='x', labelbottom=False)
             marginal.spines[['top', 'right']].set_visible(False)
             scatter.scatter(confidence[mask], rows[mask] + jitter[mask], c=colors[mask],
@@ -124,7 +134,7 @@ def plot_confidence(points, output):
         handles = [Line2D([], [], marker='o', linestyle='', color=color, label=label)
                    for color, label in (('#167c73', 'Specific name correct'), ('#c75b3d', 'Specific name incorrect'))]
         fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(.5, .02), ncol=2, frameon=False)
-        fig.text(.5, .005, 'All test images shown; unsmoothed histograms. Dotted reference, when in view: uniform score (1 / catalog size).',
+        fig.text(.5, .005, 'Curves estimate score density. Dotted reference, when visible, marks the uniform score (1 / catalog size).',
                  ha='center', fontsize=9)
         fig.subplots_adjust(left=.13, right=.98, top=.88, bottom=.20)
         for extension in ('png', 'pdf'):
