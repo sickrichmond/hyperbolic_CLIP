@@ -14,7 +14,8 @@
 #SBATCH --error=%x_%j.err
 
 set -euo pipefail
-module load anaconda3/2023.09-0
+module load python/3.11.7
+module load cuda/12.6
 
 REPO="${REPO:-$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo}"
 INCREFA_REPO="${INCREFA_REPO:-$WORK/IncreFA}"

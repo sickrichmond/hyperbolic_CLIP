@@ -153,6 +153,10 @@ class IncreFAStyledTests(unittest.TestCase):
 
     def test_launcher_uses_native_environment_and_separate_results(self):
         script = Path(__file__).resolve().parents[1] / 'slurm/slurm_eval_iab_styled_increfa.sh'
+        source = script.read_text()
+        self.assertIn('module load python/3.11.7', source)
+        self.assertIn('module load cuda/12.6', source)
+        self.assertNotIn('anaconda3/2023.09-0', source)
         stub = '''
 module() { :; }
 srun() { "$TEST_PYTHON" -c 'import json, os, sys; from pathlib import Path; Path(os.environ["CAPTURE"]).write_text(json.dumps({"argv": sys.argv[1:], "gpu": os.environ["CUDA_VISIBLE_DEVICES"]}))' "$@"; }
