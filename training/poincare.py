@@ -195,7 +195,7 @@ def extract_embeddings(model, loader, device):
         x_img, _ = model.encode_image(pixel)
         all_img.append(x_img.cpu())
         all_gt.extend(batch["generator"])
-        all_sem.extend(batch["semantic"])
+        all_sem.extend(batch.get("semantic", [""] * len(pixel)))
     return torch.cat(all_img, dim=0).numpy(), all_gt, all_sem
 
 

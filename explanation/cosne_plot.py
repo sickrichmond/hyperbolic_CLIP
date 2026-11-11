@@ -1,4 +1,4 @@
-"""Exact, tiled CO-SNE plot of non-DALL-E checkpoint image embeddings.
+"""Exact, tiled CO-SNE plot of HypCLIP image embeddings on IAB or IABench.
 
 Uses the affinities of Guo, Guo & Yu (CVPR 2022), with the optimizer behavior
 from before commit 900585d restored: Riemannian descent of the weighted KL
@@ -15,6 +15,8 @@ Diagnostics save the KL-only layout at iteration 500 and the final layout,
 each with radius summaries, 300-DPI PNG/PDFs and an offline interactive HTML.
 Replot saved results with --points FILE.points.pt --output_dir DIRECTORY;
 this does not load the model or run the optimizer.
+Add --radial-log-radius 0.75 for a circular crop in the radial log view.
+IABench checkpoints use the clean test rows from the matching split manifest.
 """
 
 import argparse
@@ -51,14 +53,17 @@ def parse_args():
     mode.add_argument("--checkpoint")
     mode.add_argument("--points", nargs="+", help="Replot saved .points.pt files without optimization")
     p.add_argument("--dataset_path")
-    p.add_argument("--captions_dir")
+    p.add_argument("--captions_dir", help="IAB captions directory (required for IAB)")
+    p.add_argument("--split_manifest", help="IABench manifest override; must match the checkpoint")
     p.add_argument("--output_dir", required=True)
+    p.add_argument("--radial-log-radius", type=float, metavar="R",
+                   help="Also save a radial log view cropped at display radius R (0 < R <= 1)")
     p.add_argument("--interactive", action=argparse.BooleanOptionalAction, default=True,
                    help="Save self-contained interactive HTML (default: enabled; requires plotly)")
     p.add_argument("--semantics", nargs="+", default=[
         "COCO", "cat", "dog", "wild", "FFHQ", "celebahq", "bedroom",
         "church", "classroom", "ImageNet-1k",
-    ])
+    ], help="IAB semantic categories")
     p.add_argument("--max-per-class", type=int, default=None,
                    help="Deterministic cap per generator; omit for every image")
     p.add_argument("--resume", action="store_true")
@@ -74,8 +79,10 @@ def parse_args():
     p.add_argument("--learning-rate", type=float, default=None,
                    help="Shared KL and radius learning rate (default: N / (20 * lambda-kl))")
     args = p.parse_args()
-    if args.checkpoint and (not args.dataset_path or not args.captions_dir):
-        p.error("--checkpoint requires --dataset_path and --captions_dir")
+    if args.checkpoint and not args.dataset_path:
+        p.error("--checkpoint requires --dataset_path")
+    if args.radial_log_radius is not None and not 0 < args.radial_log_radius <= 1:
+        p.error("--radial-log-radius must be in (0, 1]")
     if args.points and args.resume:
         p.error("--resume applies to optimization; --points only renders saved coordinates")
     return args
@@ -92,11 +99,9 @@ def _validate_args(args):
         raise ValueError("lambda-radius must be nonnegative and learning-rate positive")
 
 
-def _select_subset(dataset, cap, seed):
-    if cap is None:
-        return
+def _subset_indices(samples, cap, seed):
     by_generator = {}
-    for index, (_, generator, _) in enumerate(dataset.samples):
+    for index, (_, generator, _) in enumerate(samples):
         by_generator.setdefault(generator, []).append(index)
     for generator, indices in by_generator.items():
         if len(indices) < cap:
@@ -104,7 +109,7 @@ def _select_subset(dataset, cap, seed):
     selected = set()
     for generator, indices in by_generator.items():
         selected.update(random.Random(f"{seed}:{generator}").sample(indices, cap))
-    dataset.samples = [row for index, row in enumerate(dataset.samples) if index in selected]
+    return sorted(selected)
 
 
 def _pair_d2(u, v, u_sq=None, v_sq=None):
@@ -255,23 +260,41 @@ def _save_static(fig, path):
     plt.close(fig)
 
 
-def _plot(y, labels, path, completed=None):
+def _plot(y, labels, path, completed=None, radial_log_radius=None):
     fig, ax = plt.subplots(figsize=(15, 12))
     label_array = np.asarray(labels)
+    iteration = "" if completed is None else f"; iteration {completed}"
+    title = f"CO-SNE of hyperbolic image embeddings ({len(y)} images{iteration})"
+    radius = 1.0
+    visible = np.ones(len(y), dtype=bool)
+    if radial_log_radius is not None:
+        radius = radial_log_radius
+        radii = np.linalg.norm(y, axis=1)
+        depth = np.arctanh(radii)  # The factor of 2 cancels in the normalization.
+        display = depth / (depth.max() or 1)
+        scale = np.divide(display, radii, out=np.zeros_like(radii), where=radii > 0)
+        y = y * scale[:, None]
+        visible = display <= radius
+        title = f"CO-SNE radial log view ({len(y):,} images{iteration})"
+        ax.set_axis_off()
+        fig.text(0.5, 0.02,
+                 f"Circular crop at display radius {radius:g}. "
+                 f"{visible.sum():,} of {len(y):,} points shown. "
+                 "Display radii are normalized over all points.", ha="center")
     for name, color in _class_colors(labels).items():
-        mask = label_array == name
+        mask = (label_array == name) & visible
         ax.scatter(y[mask, 0], y[mask, 1], label=name, color=color,
                    s=2, alpha=0.3, rasterized=True)
-    ax.add_patch(plt.Circle((0, 0), 1, fill=False, color="black", linewidth=1))
-    iteration = "" if completed is None else f"; iteration {completed}"
-    ax.set(xlim=(-1.02, 1.02), ylim=(-1.02, 1.02),
-           title=f"CO-SNE of hyperbolic image embeddings ({len(y)} images{iteration})")
+    ax.add_patch(plt.Circle((0, 0), radius, fill=False, color="black", linewidth=1))
+    limit = 1.02 * radius
+    ax.set(xlim=(-limit, limit), ylim=(-limit, limit), title=title)
     ax.set_aspect("equal")
     legend = ax.legend(bbox_to_anchor=(1.02, 0.5), loc="center left",
-                       markerscale=5, fontsize=9, frameon=False)
+                       markerscale=5, fontsize=9, frameon=False,
+                       title="Image generator" if radial_log_radius is not None else None)
     for marker in legend.findobj(matplotlib.collections.PathCollection):
         marker.set_alpha(1)
-    fig.tight_layout()
+    fig.tight_layout(rect=(0, 0.04, 1, 1) if radial_log_radius is not None else None)
     _save_static(fig, path)
 
 
@@ -308,6 +331,7 @@ def _interactive_figure(y, manifest, completed=None):
 
     labels = np.asarray([row[1] for row in manifest])
     radii = np.linalg.norm(y, axis=1)
+    semantic_hover = "<br>Semantic: %{customdata[2]}" if any(row[2] for row in manifest) else ""
     fig = go.Figure()
     for name, color in _class_colors(labels).items():
         indices = np.flatnonzero(labels == name)
@@ -317,7 +341,7 @@ def _interactive_figure(y, manifest, completed=None):
             x=y[indices, 0], y=y[indices, 1], mode="markers", name=name,
             marker=dict(color=color, size=3, opacity=0.3), customdata=metadata,
             hovertemplate=(f"<b>{escape(name)}</b><br>Row: %{{customdata[0]}}"
-                           "<br>Image: %{customdata[1]}<br>Semantic: %{customdata[2]}"
+                           "<br>Image: %{customdata[1]}" + semantic_hover +
                            "<br>Radius: %{customdata[3]:.8f}"
                            "<br>x: %{x:.8f}<br>y: %{y:.8f}<extra></extra>")))
     iteration = "" if completed is None else f"; iteration {completed}"
@@ -336,7 +360,7 @@ def _interactive_figure(y, manifest, completed=None):
     return fig
 
 
-def _render_plots(prefix, y, manifest, completed=None, interactive=True):
+def _render_plots(prefix, y, manifest, completed=None, interactive=True, radial_log_radius=None):
     labels = [row[1] for row in manifest]
     _plot(y, labels, Path(f"{prefix}.png"), completed)
     _plot_classes(y, labels, Path(f"{prefix}.classes.png"), completed)
@@ -345,10 +369,13 @@ def _render_plots(prefix, y, manifest, completed=None, interactive=True):
             str(Path(f"{prefix}.html")), include_plotlyjs=True, full_html=True,
             config={"scrollZoom": True, "responsive": True, "displaylogo": False})
     formats = "png,pdf,classes.png,classes.pdf" + (",html" if interactive else "")
+    if radial_log_radius is not None:
+        _plot(y, labels, Path(f"{prefix}.radial-log.png"), completed, radial_log_radius)
+        formats += ",radial-log.png,radial-log.pdf"
     print(f"Saved plots: {prefix}.{{{formats}}}", flush=True)
 
 
-def _replot(points_paths, output_dir, interactive=True):
+def _replot(points_paths, output_dir, interactive=True, radial_log_radius=None):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     for source in map(Path, points_paths):
@@ -360,11 +387,12 @@ def _replot(points_paths, output_dir, interactive=True):
                 or any(len(row) != 3 for row in manifest)):
             raise ValueError(f"Invalid saved CO-SNE coordinates or manifest: {source}")
         stem = source.name.removesuffix(".points.pt") if source.name.endswith(".points.pt") else source.stem
-        _render_plots(output_dir / stem, y, manifest, saved.get("completed"), interactive)
+        _render_plots(output_dir / stem, y, manifest, saved.get("completed"),
+                      interactive, radial_log_radius)
 
 
 def _save_diagnostics(prefix, y, manifest, settings, completed, input_radii,
-                      stop_reason=None, interactive=True):
+                      stop_reason=None, interactive=True, radial_log_radius=None):
     coordinates = y.detach().cpu().numpy()
     output_radii = np.linalg.norm(coordinates, axis=1)
     summary = {
@@ -384,7 +412,7 @@ def _save_diagnostics(prefix, y, manifest, settings, completed, input_radii,
           f"median={radii['median']:.8f} max={radii['max']:.8f} "
           f"fraction>=0.999={radii['fraction_ge_0.999']:.1%} "
           f"radius_MAE={summary['radius_mae']:.8f}", flush=True)
-    _render_plots(prefix, coordinates, manifest, completed, interactive)
+    _render_plots(prefix, coordinates, manifest, completed, interactive, radial_log_radius)
     print(f"Saved diagnostics: {prefix}.{{points.pt,radii.json}}", flush=True)
 
 
@@ -394,12 +422,11 @@ def main():
     if args.interactive:
         import plotly.graph_objects  # Fail before a long run if HTML dependencies are missing.
     if args.points:
-        _replot(args.points, args.output_dir, args.interactive)
+        _replot(args.points, args.output_dir, args.interactive, args.radial_log_radius)
         return
 
-    from torch.utils.data import DataLoader
+    from torch.utils.data import DataLoader, Subset
 
-    from data.iab_clip_dataset import IABCLIPDataset
     from models.attribution_clip import AttributionCLIP
     from training.poincare import extract_embeddings, lorentz_to_poincare
 
@@ -413,11 +440,17 @@ def main():
     signal.signal(signal.SIGUSR1, request_stop)
     signal.signal(signal.SIGTERM, request_stop)
     ckpt_path = Path(args.checkpoint).resolve()
+    ckpt_stat = ckpt_path.stat()
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    dataset_kind = ckpt.get("dataset", "iab")
+    if dataset_kind not in {"iab", "iabench"}:
+        raise ValueError(f"Unsupported CO-SNE checkpoint dataset: {dataset_kind!r}")
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = ckpt_path.stem.removeprefix("attribution_22cls_")
     selection = "all" if args.max_per_class is None else f"perclass{args.max_per_class}"
-    base_prefix = output_dir / f"cosne_plot_{stem}_{selection}_seed{args.seed}"
+    split_tag = "_iabench_test" if dataset_kind == "iabench" else ""
+    base_prefix = output_dir / f"cosne_plot_{stem}{split_tag}_{selection}_seed{args.seed}"
     embedding_path = Path(f"{base_prefix}.embeddings.pt")
     prefix = Path(f"{base_prefix}.cosne-v4")
     affinity_path = Path(f"{prefix}.affinities.pt")
@@ -429,38 +462,50 @@ def main():
         raise ValueError("Older CO-SNE optimizer state cannot resume as cosne-v4; start a new run without --resume")
     if state_path.exists() and not args.resume:
         raise FileExistsError(f"Existing optimizer state: {state_path}; use --resume")
-    ckpt_stat = ckpt_path.stat()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     curv = ckpt.get("curv", 1.0)
     if curv <= 0:
         raise ValueError(f"Invalid checkpoint curvature: {curv}")
 
     root = Path(args.dataset_path).resolve()
-    generators = sorted(
-        (p.name for p in root.iterdir() if p.is_dir()
-         and not re.sub(r"[^a-z0-9]", "", p.name.lower()).startswith("dalle")),
-        key=lambda name: (name != "real", name),
-    )
-    if not generators:
-        raise ValueError(f"No non-DALL-E generator directories in {root}")
-    dataset = IABCLIPDataset(
-        root=str(root), captions_dir=args.captions_dir, generators=generators,
-        semantics=args.semantics, processor_name=ckpt["clip_name"], split="all",
-        seed=args.seed, require_caption=False,
-    )
-    _select_subset(dataset, args.max_per_class, args.seed)
-    manifest = [(str(path), gen, sem) for path, gen, sem in dataset.samples]
-    n = len(manifest)
-    if n <= args.perplexity:
-        raise ValueError(f"Need more than perplexity={args.perplexity} images; got {n}")
     signature = {
         "checkpoint": str(ckpt_path), "checkpoint_size": ckpt_stat.st_size,
         "checkpoint_mtime_ns": ckpt_stat.st_mtime_ns, "dataset": str(root),
-        "captions_dir": str(Path(args.captions_dir).resolve()),
-        "semantics": tuple(args.semantics), "seed": args.seed,
-        "max_per_class": args.max_per_class, "curv": curv,
+        "seed": args.seed, "max_per_class": args.max_per_class, "curv": curv,
     }
+    if dataset_kind == "iabench":
+        from data.iabench_dataset import load_checkpoint_test_view
+
+        dataset = load_checkpoint_test_view(str(root), ckpt, args.split_manifest)
+        manifest = [(name, gen, "") for _, gen, name in dataset.samples]
+        signature.update(split="test", split_manifest_digest=ckpt["split_manifest_digest"])
+    else:
+        from data.iab_clip_dataset import IABCLIPDataset
+
+        if not args.captions_dir or args.split_manifest:
+            raise ValueError("IAB checkpoints require --captions_dir; --split_manifest is for IABench")
+        generators = sorted(
+            (p.name for p in root.iterdir() if p.is_dir()
+             and not re.sub(r"[^a-z0-9]", "", p.name.lower()).startswith("dalle")),
+            key=lambda name: (name != "real", name),
+        )
+        if not generators:
+            raise ValueError(f"No non-DALL-E generator directories in {root}")
+        dataset = IABCLIPDataset(
+            root=str(root), captions_dir=args.captions_dir, generators=generators,
+            semantics=args.semantics, processor_name=ckpt["clip_name"], split="all",
+            seed=args.seed, require_caption=False,
+        )
+        manifest = [(str(path), gen, sem) for path, gen, sem in dataset.samples]
+        signature.update(captions_dir=str(Path(args.captions_dir).resolve()),
+                         semantics=tuple(args.semantics))
+    if args.max_per_class is not None:
+        indices = _subset_indices(manifest, args.max_per_class, args.seed)
+        dataset = Subset(dataset, indices)
+        manifest = [manifest[i] for i in indices]
+    n = len(manifest)
+    if n <= args.perplexity:
+        raise ValueError(f"Need more than perplexity={args.perplexity} images; got {n}")
 
     if embedding_path.exists():
         cached = torch.load(embedding_path, map_location="cpu", weights_only=False)
@@ -549,9 +594,10 @@ def main():
         y = (torch.randn((n, 2), generator=rng, dtype=x.dtype) * 0.01).to(device)
         completed = 0
 
+    render_options = dict(interactive=args.interactive, radial_log_radius=args.radial_log_radius)
     if completed == 500:
         _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii,
-                          interactive=args.interactive)
+                          **render_options)
     elif completed > 500 and not Path(f"{stage1_prefix}.points.pt").exists():
         print(f"Iteration-500 snapshot unavailable: resuming from iteration {completed}. "
               "A new run is needed to capture the KL-only layout.", flush=True)
@@ -576,13 +622,13 @@ def main():
                                "points": y.cpu()}, state_path)
         if completed == 500:
             _save_diagnostics(stage1_prefix, y, manifest, settings, completed, input_radii,
-                              interactive=args.interactive)
+                              **render_options)
         if stop_requested:
             print("CO-SNE paused; resubmit with --resume", flush=True)
             raise SystemExit(75)
 
     _save_diagnostics(prefix, y, manifest, settings, completed, input_radii,
-                      "max_iterations", interactive=args.interactive)
+                      "max_iterations", **render_options)
 
 
 if __name__ == "__main__":

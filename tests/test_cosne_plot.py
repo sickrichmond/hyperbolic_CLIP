@@ -17,7 +17,7 @@ from checkpoint_io import atomic_torch_save
 from explanation import cosne_plot
 from explanation.cosne_plot import (
     _bandwidths, _class_colors, _exact_step, _interactive_figure, _pair_d2,
-    _save_diagnostics, _select_subset,
+    _save_diagnostics, _subset_indices,
 )
 
 
@@ -178,17 +178,68 @@ def test_coincident_points_and_boundary_projection():
 
 
 def test_subset_is_balanced_and_reproducible():
-    class Dataset:
-        def __init__(self):
-            self.samples = [(f"{gen}/{i}.png", gen, "COCO")
-                            for gen in ("real", "other") for i in range(10)]
+    samples = [(f"{gen}/{i}.png", gen, "COCO")
+               for gen in ("real", "other") for i in range(10)]
+    indices = _subset_indices(samples, 4, 42)
+    assert indices == sorted(indices) == _subset_indices(samples, 4, 42)
+    assert [samples[i][1] for i in indices] == ["real"] * 4 + ["other"] * 4
 
-    first, second = Dataset(), Dataset()
-    _select_subset(first, 4, 42)
-    _select_subset(second, 4, 42)
-    assert first.samples == second.samples
-    assert [g for _, g, _ in first.samples].count("real") == 4
-    assert [g for _, g, _ in first.samples].count("other") == 4
+
+def test_iabench_checkpoint_uses_clean_manifest_test_rows():
+    from data.iabench_dataset import IABenchDataset, manifest_digest
+    from tests.test_iabench_training import PixelProcessor, TinyModel, save_arrow
+
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        save_arrow(root)
+        dataset = IABenchDataset(directory, processor_name=None)
+        split = dataset.make_split_manifest()
+        split_path = root / "split.json"
+        split_path.write_text(json.dumps(split))
+        ckpt_path = root / "checkpoint.pt"
+        model = TinyModel()
+        atomic_torch_save(dict(dataset="iabench", clip_name="synthetic",
+                               split_manifest="old/location.json",
+                               split_manifest_digest=manifest_digest(split),
+                               dataset_digest=dataset.dataset_digest, class_names=split["class_names"],
+                               lora_state=model.clip.state_dict(),
+                               projection=model.projection.state_dict()), ckpt_path)
+        argv = ["cosne_plot", "--checkpoint", str(ckpt_path), "--dataset_path", directory,
+                "--split_manifest", str(split_path), "--output_dir", directory,
+                "--max-per-class", "2", "--perplexity", "2", "--num_workers", "0",
+                "--no-interactive", "--radial-log-radius", "0.75"]
+        with patch.object(sys, "argv", argv), patch.object(cosne_plot.signal, "signal"), \
+                patch.object(cosne_plot.torch.cuda, "is_available", return_value=False), \
+                patch("models.attribution_clip.AttributionCLIP.from_checkpoint", return_value=model), \
+                patch("data.iabench_dataset.CLIPImageProcessor.from_pretrained",
+                      return_value=PixelProcessor()), \
+                patch.object(cosne_plot, "_save_diagnostics") as diagnostics, \
+                redirect_stdout(io.StringIO()):
+            cosne_plot.main()
+        rows = [(dataset.file_names[i], dataset.source_labels[i], "") for i in split["test"]]
+        expected = [rows[i] for i in _subset_indices(rows, 2, 42)]
+        cached = torch.load(next(root.glob("*_iabench_test_*.embeddings.pt")), weights_only=True)
+        assert cached["manifest"] == expected
+        assert cached["signature"]["split_manifest_digest"] == manifest_digest(split)
+        assert [call.args[4] for call in diagnostics.call_args_list] == [500, 1000]
+        assert all(call.kwargs["radial_log_radius"] == 0.75 for call in diagnostics.call_args_list)
+
+
+def test_radial_log_keeps_angles_and_crops_after_normalizing():
+    coordinates = np.array([[0., 0.], [0.3, 0.4], [-0.9, 0.]])
+    original = coordinates.copy()
+    with patch.object(cosne_plot, "_save_static") as save:
+        cosne_plot._plot(coordinates, ["real", "other", "third"], Path("unused.png"),
+                         radial_log_radius=0.75)
+    fig = save.call_args.args[0]
+    ax = fig.axes[0]
+    expected = coordinates[1] * (np.arctanh(0.5) / np.arctanh(0.9)) / 0.5
+    assert np.array_equal(ax.collections[0].get_offsets(), [[0., 0.]])
+    assert np.allclose(ax.collections[1].get_offsets(), [expected])
+    assert len(ax.collections[2].get_offsets()) == 0
+    assert ax.patches[0].radius == 0.75 and "2 of 3 points shown" in fig.texts[0].get_text()
+    assert np.array_equal(coordinates, original)
+    cosne_plot.plt.close(fig)
 
 
 def test_diagnostics_preserve_coordinates():
@@ -205,7 +256,7 @@ def test_diagnostics_preserve_coordinates():
                                         (1000, "", "max_iterations")):
             prefix = Path(directory) / f"diagnostic{suffix}"
             _save_diagnostics(prefix, coordinates, manifest, settings,
-                              completed, input_radii, stop)
+                              completed, input_radii, stop, radial_log_radius=0.75)
             saved = torch.load(f"{prefix}.points.pt", weights_only=True)
             assert torch.equal(saved["coordinates"], original)
             assert saved["manifest"] == manifest and saved["settings"] == settings
@@ -217,11 +268,11 @@ def test_diagnostics_preserve_coordinates():
             assert summary["output"]["fraction_ge_0.999"] == 1 / 3
             assert abs(summary["radius_mae"] - 0.2 / 3) < 1e-12
             assert abs(summary["squared_radius_mse"] - 0.2**4 / 3) < 1e-12
-            for suffix in (".png", ".classes.png"):
+            for suffix in (".png", ".classes.png", ".radial-log.png"):
                 assert Path(f"{prefix}{suffix}").read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
                 with Image.open(f"{prefix}{suffix}") as image:
                     assert all(abs(dpi - 300) < 1 for dpi in image.info["dpi"])
-            for suffix in (".pdf", ".classes.pdf"):
+            for suffix in (".pdf", ".classes.pdf", ".radial-log.pdf"):
                 assert Path(f"{prefix}{suffix}").read_bytes().startswith(b"%PDF-")
             html = Path(f"{prefix}.html").read_text()
             assert "Plotly.newPlot" in html and "scattergl" in html
@@ -229,6 +280,7 @@ def test_diagnostics_preserve_coordinates():
         source = Path(f"{prefix}.points.pt")
         original_bytes = source.read_bytes()
         with patch.object(sys, "argv", ["cosne_plot", "--points", str(source),
+                                        "--radial-log-radius", "0.75",
                                         "--output_dir", str(Path(directory) / "replot")]), \
                 patch.object(cosne_plot, "_exact_step", side_effect=AssertionError("Optimizer called")), \
                 patch.object(cosne_plot, "_render_plots") as render:
@@ -236,13 +288,14 @@ def test_diagnostics_preserve_coordinates():
             assert render.call_count == 1
             assert np.array_equal(render.call_args.args[1], original.numpy())
             assert render.call_args.args[2] == manifest and render.call_args.args[3] == 1000
+            assert render.call_args.args[-1] == 0.75
         assert source.read_bytes() == original_bytes
         # Legacy saved results may not have iteration or stopping metadata.
         legacy = Path(directory) / "legacy.points.pt"
         atomic_torch_save({"coordinates": coordinates, "manifest": manifest}, legacy)
         with patch.object(cosne_plot, "_render_plots") as render:
             cosne_plot._replot([legacy], Path(directory) / "replot", interactive=False)
-            assert render.call_args.args[3:] == (None, False)
+            assert render.call_args.args[3:] == (None, False, None)
     assert torch.equal(coordinates, original)
     assert np.array_equal(input_radii, original_radii)
 
@@ -275,6 +328,8 @@ if __name__ == "__main__":
     test_main_runs_1000_iterations_and_resumes()
     test_coincident_points_and_boundary_projection()
     test_subset_is_balanced_and_reproducible()
+    test_iabench_checkpoint_uses_clean_manifest_test_rows()
+    test_radial_log_keeps_angles_and_crops_after_normalizing()
     test_diagnostics_preserve_coordinates()
     test_colors_and_interactive_coordinates()
     print("CO-SNE checks passed")

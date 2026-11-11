@@ -1,6 +1,9 @@
 #!/bin/bash
 # CINECA Leonardo. Full: sbatch slurm/slurm_cosne_plot.sh /path/to/checkpoint.pt
 # Subset: sbatch slurm/slurm_cosne_plot.sh /path/to/checkpoint.pt --max-per-class 1000
+# IABench: DATA="$SCRATCH/datasets/IABench_images" sbatch slurm/slurm_cosne_plot.sh /path/to/checkpoint.pt
+# If the saved IABench manifest moved, pass --split_manifest /path/to/splits.json.
+# Add --radial-log-radius 0.75 for the circular crop.
 # Continue after timeout: repeat the command with --resume.
 # Install plotting extras in the active environment: python -m pip install colorcet plotly
 # Diagnostics: .iter500.* captures the KL-only stage; 300-DPI PNG/PDF,
@@ -27,7 +30,7 @@
 set -euo pipefail
 
 if [ "$#" -lt 1 ] || [ ! -f "$1" ]; then
-    echo "Usage: sbatch slurm/slurm_cosne_plot.sh /path/to/checkpoint.pt [--max-per-class N] [--resume]" >&2
+    echo "Usage: sbatch slurm/slurm_cosne_plot.sh /path/to/checkpoint.pt [CO-SNE options]" >&2
     exit 2
 fi
 CKPT=$(realpath "$1")
@@ -43,7 +46,7 @@ export TRANSFORMERS_OFFLINE=1
 export HF_DATASETS_OFFLINE=1
 
 REPO=$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo
-DATA=$FAST/datasets/iab_dataset
+DATA=${DATA:-$FAST/datasets/iab_dataset}
 CAPS=$WORK/hyp_fine_tuning/iab_captions
 OUT=${OUT:-$WORK/hyp_fine_tuning/outputs/cosne}
 

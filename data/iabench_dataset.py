@@ -194,3 +194,19 @@ class IABenchDataset(Dataset):
         return {"pixel_values": pixel, "generator": label,
                 "is_real": torch.tensor(label.casefold() == "real", dtype=torch.bool),
                 "file_name": name}
+
+
+def load_checkpoint_test_view(root, checkpoint, split_manifest=None):
+    """Return the clean test view bound to a HypCLIP checkpoint's training manifest."""
+    path = split_manifest or checkpoint.get("split_manifest")
+    if not path:
+        raise ValueError("IABench requires the training split manifest")
+    manifest = json.loads(Path(path).read_text())
+    if manifest_digest(manifest) != checkpoint.get("split_manifest_digest"):
+        raise ValueError("IABench manifest digest differs from the checkpoint")
+    if manifest["class_names"] != list(checkpoint["class_names"]):
+        raise ValueError("IABench manifest and checkpoint class orders differ")
+    if manifest["dataset_digest"] != checkpoint.get("dataset_digest"):
+        raise ValueError("IABench dataset digest differs from the checkpoint")
+    dataset = IABenchDataset(root, processor_name=checkpoint["clip_name"])
+    return dataset.split_view(manifest, "test")

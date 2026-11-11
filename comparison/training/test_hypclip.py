@@ -17,7 +17,6 @@ import os
 import argparse
 import datetime
 import json
-from pathlib import Path
 
 import torch
 from tqdm import tqdm
@@ -115,22 +114,11 @@ def load_anchors(ckpt, model, curv, device, class_names=None):
 
 def load_iabench_test_dataset(args, ckpt):
     """Bind test rows to the checkpoint's manifest before loading the backbone."""
-    from data.iabench_dataset import IABenchDataset, manifest_digest
+    from data.iabench_dataset import load_checkpoint_test_view
 
     if args.use_semantic_split or args.num_images_per_semantic_per_class != 2000:
         raise ValueError("IABench has no semantic split/cap; use the saved manifest")
-    path = args.split_manifest or ckpt.get('split_manifest')
-    if not path:
-        raise ValueError("IABench evaluation requires the training split manifest")
-    manifest = json.loads(Path(path).read_text())
-    if manifest_digest(manifest) != ckpt.get('split_manifest_digest'):
-        raise ValueError("IABench manifest digest differs from the checkpoint")
-    if manifest['class_names'] != list(ckpt['class_names']):
-        raise ValueError("IABench manifest and checkpoint class orders differ")
-    if manifest['dataset_digest'] != ckpt.get('dataset_digest'):
-        raise ValueError("IABench dataset digest differs from the checkpoint")
-    dataset = IABenchDataset(args.root_dir, processor_name=ckpt['clip_name'])
-    test = dataset.split_view(manifest, 'test')
+    test = load_checkpoint_test_view(args.root_dir, ckpt, args.split_manifest)
     test.pre_resize = args.pre_resize
     return test
 
