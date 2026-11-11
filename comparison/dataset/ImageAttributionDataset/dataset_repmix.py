@@ -66,7 +66,7 @@ class RepmixDataset(ImageAttributionDataset):
         'y_gan': y_gan, 'y_semantic':y_semantic,
         'y_det': np.int64(y_gan != next(v for k, v in self.model_class_to_label.items() if k.casefold() == "real")), 'beta': beta.clone()}
 
-        if self.iabench_source is not None:
+        if y_semantics[0] is None:
             for key in ("semantic_label", "y_semantic"):
                 y_out.pop(key)
         return y_out  

@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 from comparison.training import test_baselines_styled as evaluator
 from comparison.training.scripts.styled_checkpoints import discover_checkpoints, main as make_map
+from data import omnifake
 
 
 class StyledBaselineTests(unittest.TestCase):
@@ -162,7 +163,7 @@ exec bash "$1" "$2"
             capture = root / 'command.json'
             env = dict(os.environ, WORK=str(root), FAST=str(root), TEST_PYTHON=sys.executable,
                        CAPTURE=str(capture), CUDA_VISIBLE_DEVICES='4', SLURM_ARRAY_JOB_ID='123')
-            for key in ('REPO', 'DATA', 'LOGDIR', 'BATCH_SIZE', 'NUM_WORKERS'):
+            for key in ('REPO', 'DATA', 'LOGDIR', 'BATCH_SIZE', 'NUM_WORKERS', 'EVAL_DATASET'):
                 env.pop(key, None)
             for index, method in enumerate(evaluator.METHODS):
                 with self.subTest(method=method):
@@ -186,6 +187,43 @@ exec bash "$1" "$2"
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(capture.exists())
 
+            (root / 'datasets/omnifake_iab_test/val').mkdir(parents=True)
+            for index, method in enumerate(evaluator.OMNIFAKE_METHODS):
+                with self.subTest(dataset='omnifake', method=method):
+                    subprocess.run(['bash', '-c', stub, '_', str(script), str(path)],
+                        env=dict(env, SCRATCH=str(root), EVAL_DATASET='omnifake',
+                                 SLURM_ARRAY_TASK_ID=str(index)), check=True,
+                        capture_output=True, text=True)
+                    command = json.loads(capture.read_text())
+                    self.assertEqual(command['argv'][-1], '--omnifake')
+                    flags = dict(zip(command['argv'][2:-1:2], command['argv'][3:-1:2]))
+                    self.assertEqual(flags['--method'], method)
+                    self.assertEqual(flags['--root_dir'], str(root / 'datasets/omnifake_iab_test'))
+                    self.assertEqual(flags['--log_dir'],
+                        str(root / f'outputs/baselines_iab_omnifake_123/{method}'))
+                    self.assertEqual(command['gpu'], '4')
+
+    def test_omnifake_inventory_uses_iab_indices_and_only_val(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+                omnifake, 'IMAGES_PER_GENERATOR', 1):
+            root = Path(directory)
+            for folder in omnifake.OMNIFAKE_TO_IAB:
+                path = root / 'val' / folder / 'sample.png'
+                path.parent.mkdir(parents=True)
+                path.touch()
+            names = ['real', *reversed(omnifake.OMNIFAKE_TO_IAB.values())]
+            samples = evaluator.collect_omnifake_samples(root, names)
+            self.assertEqual(len(samples), 10)
+            for path, index, *semantics in samples:
+                self.assertEqual(Path(path).parent.parent, root / 'val')
+                self.assertEqual(names[index], omnifake.OMNIFAKE_TO_IAB[Path(path).parent.name])
+                self.assertEqual(semantics, [None, None])
+            with self.assertRaisesRegex(ValueError, 'missing OmniFake labels'):
+                evaluator.collect_omnifake_samples(root, names[:-1])
+            (root / 'val/GPT4_o/sample.png').unlink()
+            with self.assertRaisesRegex(ValueError, 'expected 1 test images'):
+                evaluator.collect_omnifake_samples(root, names)
+
     @unittest.skipUnless(all(importlib.util.find_spec(name) for name in
         ('torch', 'torchvision', 'PIL', 'transformers', 'datasets', 'yaml', 'sklearn')),
         'CPU inference requires the baseline training dependencies')
@@ -208,6 +246,10 @@ exec bash "$1" "$2"
                     folder.mkdir(parents=True)
                     for i in range(count):
                         Image.new('RGB', (260, 270), (80, 40, 120)).save(folder / f'{i}.png')
+            for generator in omnifake.OMNIFAKE_TO_IAB:
+                folder = root / 'omnifake' / 'val' / generator
+                folder.mkdir(parents=True)
+                Image.new('RGB', (270, 520), (80, 40, 120)).save(folder / 'sample.png')
             for method in evaluator.METHODS:
                 with self.subTest(method=method):
                     config = config_for(method)
@@ -263,6 +305,32 @@ exec bash "$1" "$2"
                         rows = list(csv.DictReader(stream))
                         self.assertEqual(len(rows), 2)
                         self.assertTrue(all(row['jpeg_quality'] == '99' for row in rows))
+
+                    batch_sizes.clear()
+                    output = root / 'omnifake_results' / method
+                    with patch.dict(ATTRIBUTOR.data, {method: EvaluationFixture}), \
+                            patch.object(EvaluationFixture, 'forward', forward), \
+                            patch.object(omnifake, 'IMAGES_PER_GENERATOR', 1), \
+                            patch('torch.cuda.is_available', return_value=False), \
+                            patch('clip.load', side_effect=AssertionError('second CLIP load')), \
+                            patch('comparison.dataset.ImageAttributionDataset.dataset.apply_jpeg99',
+                                  side_effect=AssertionError('OmniFake images must be unmodified')), \
+                            patch('comparison.training.logger.create_logger',
+                                  return_value=logging.getLogger('omnifake-fixture')), \
+                            contextlib.redirect_stdout(io.StringIO()):
+                        evaluator.main(['--omnifake', '--method', method, '--checkpoint', str(checkpoint),
+                            '--root_dir', str(root / 'omnifake'), '--log_dir', str(output),
+                            '--batch_size', '4', '--num_workers', '0'])
+                    self.assertEqual(batch_sizes, [4, 4, 2])
+                    result = json.loads((output / 'metrics.json').read_text())
+                    self.assertEqual(result['class_names'], names)
+                    self.assertEqual(result['num_images'], 10)
+                    self.assertEqual(result['evaluation_condition'], 'clean')
+                    self.assertNotIn('jpeg_quality', result)
+                    self.assertEqual(result['semantic_acc'], {})
+                    self.assertEqual(result['support_per_class'],
+                        [int(name in omnifake.OMNIFAKE_TO_IAB.values()) for name in names])
+                    self.assertEqual(sum(row[names.index('real')] for row in result['confusion_matrix']), 10)
 
 
 if __name__ == '__main__':

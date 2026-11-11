@@ -302,6 +302,9 @@ class ImageAttributionDataset(Dataset):
         if self.mode and self.mode == "test":  
             image = self.get_degraded_img(image)  
 
+        if semantic_label is None:
+            return {"image": image, "label": label}
+
         semantic_superclass = self.subclass_to_superclass.get(semantic_subclass, None)  
 
         return {  

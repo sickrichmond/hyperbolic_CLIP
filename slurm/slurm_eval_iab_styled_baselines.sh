@@ -1,6 +1,7 @@
 #!/bin/bash
-# One task per IAB baseline, every style, JPEG99 before native preprocessing.
+# One task per IAB baseline. EVAL_DATASET=omnifake selects the clean test subset.
 # Submit: sbatch slurm/slurm_eval_iab_styled_baselines.sh /path/to/checkpoints.json
+# OmniFake task 11 is TwinNeXt and requires an omnidfa entry in the map.
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --job-name=eval_iab_styled_baselines
@@ -27,27 +28,46 @@ export HF_DATASETS_OFFLINE=1
 export IAB_EXCLUDE_GENERATORS=dalle3
 
 REPO="${REPO:-$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo}"
-DATA="${DATA:-$FAST/datasets/iab_styled_eval}"
 CHECKPOINTS="${1:-${CHECKPOINTS:-}}"
-LOGDIR="${LOGDIR:-$WORK/outputs/baselines_iab_styled_jpeg99_${SLURM_ARRAY_JOB_ID}}"
 NUM_WORKERS="${NUM_WORKERS:-8}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 METHODS=(resnet50 dct hifi_net defl dna repmix patch ucf lida defake pose)
+EVAL_ARGS=()
+case "${EVAL_DATASET:-styled}" in
+    styled)
+        DATA="${DATA:-$FAST/datasets/iab_styled_eval}"
+        TEST_DIR="$DATA"
+        RESULT_PREFIX=baselines_iab_styled_jpeg99
+        CONDITION="JPEG99 only"
+        ;;
+    omnifake)
+        DATA="${DATA:-$SCRATCH/datasets/omnifake_iab_test}"
+        TEST_DIR="$DATA/val"
+        RESULT_PREFIX=baselines_iab_omnifake
+        CONDITION="OmniFake test split"
+        EVAL_ARGS+=(--omnifake)
+        METHODS+=(omnidfa)
+        ;;
+    *) echo "EVAL_DATASET must be styled or omnifake" >&2; exit 1 ;;
+esac
+LOGDIR="${LOGDIR:-$WORK/outputs/${RESULT_PREFIX}_${SLURM_ARRAY_JOB_ID}}"
 TASK="${SLURM_ARRAY_TASK_ID:?Submit this script as a Slurm array}"
-[[ "$TASK" =~ ^(0|[1-9]|10)$ ]] || { echo "Invalid array index: $TASK" >&2; exit 1; }
+[[ "$TASK" =~ ^(0|[1-9]|10|11)$ && "$TASK" -lt "${#METHODS[@]}" ]] || {
+    echo "Invalid array index: $TASK" >&2; exit 1;
+}
 METHOD="${METHODS[$TASK]}"
 [[ -n "$CHECKPOINTS" && -f "$CHECKPOINTS" ]] || {
     echo "Pass a checkpoint map: sbatch $0 /absolute/path/to/checkpoints.json" >&2; exit 1;
 }
-[[ -d "$DATA" ]] || { echo "Styled dataset not found: $DATA" >&2; exit 1; }
+[[ -d "$TEST_DIR" ]] || { echo "Dataset not found: $TEST_DIR" >&2; exit 1; }
 # Resolve before cd so relative map paths refer to the submission directory.
 CHECKPOINTS="$(realpath "$CHECKPOINTS")"
 cd "$REPO"
 PYDEPS="${IAB_PYDEPS:-$HOME/iab_pydeps}"
 export PYTHONPATH="$REPO:$PYDEPS:${PYTHONPATH:-}"
-echo "Baseline: $METHOD | Dataset: $DATA | JPEG99 only | Checkpoints: $CHECKPOINTS"
+echo "Baseline: $METHOD | Dataset: $DATA | $CONDITION | Checkpoints: $CHECKPOINTS"
 echo "Results: $LOGDIR/$METHOD | GPU: ${CUDA_VISIBLE_DEVICES:-?}"
 python -m comparison.training.test_baselines_styled \
     --method "$METHOD" --checkpoints "$CHECKPOINTS" \
     --root_dir "$DATA" --log_dir "$LOGDIR/$METHOD" \
-    --batch_size "$BATCH_SIZE" --num_workers "$NUM_WORKERS"
+    --batch_size "$BATCH_SIZE" --num_workers "$NUM_WORKERS" "${EVAL_ARGS[@]}"

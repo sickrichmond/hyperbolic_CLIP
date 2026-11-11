@@ -1,9 +1,9 @@
-"""Evaluate IAB baselines on every image in ROOT/STYLE/GENERATOR/SEMANTIC.
+"""Evaluate IAB baselines on styled IAB or the shared OmniFake test subset.
 
 Reuse native dataset adapters and Trainer.test. Predictions compete over the
 full IAB class map; balanced accuracy averages supported generators only.
-Every image receives JPEG quality-99 compression before native preprocessing.
-There is no clean pass, split or sampling cap.
+Styled IAB receives JPEG99 before native preprocessing. OmniFake uses the
+unmodified images from its official val (test) split.
 """
 import argparse
 from collections import Counter
@@ -13,9 +13,11 @@ import json
 from pathlib import Path
 
 from comparison.training.test_hypclip_styled import discover_styles
+from data.omnifake import OMNIFAKE_TO_IAB, discover_test_samples
 
 METHODS = ('resnet50', 'dct', 'hifi_net', 'defl', 'dna', 'repmix', 'patch', 'ucf',
            'lida', 'defake', 'pose')
+OMNIFAKE_METHODS = (*METHODS, 'omnidfa')
 
 
 def load_checkpoint_map(path):
@@ -23,7 +25,7 @@ def load_checkpoint_map(path):
     entries = json.loads(path.read_text())
     if not isinstance(entries, dict) or not entries:
         raise ValueError('Checkpoint map must be a nonempty JSON object: {method: path}')
-    unknown = set(entries) - set(METHODS)
+    unknown = set(entries) - set(OMNIFAKE_METHODS)
     if unknown:
         raise ValueError(f'Unknown baselines in checkpoint map: {sorted(unknown)}')
     resolved = {}
@@ -46,7 +48,7 @@ def prepare_config(checkpoint, method, fallback, class_names):
         raise ValueError(f'Configuration must describe baseline {method}')
     for metadata in (checkpoint, config):
         if metadata.get('dataset', 'iab') != 'iab':
-            raise ValueError('Styled IAB evaluation requires an IAB checkpoint/config')
+            raise ValueError('Evaluation requires an IAB checkpoint/config')
         if metadata.get('model_name', method) != method:
             raise ValueError('Checkpoint and requested baseline differ')
         for key in ('class_names', 'output_class_names'):
@@ -102,21 +104,27 @@ def collect_samples(style, class_names, semantic_paths, semantic_labels):
     return samples
 
 
-def build_styled_loader(style, config, batch_size, num_workers, clip_preprocess=None):
+def collect_omnifake_samples(root, class_names):
+    class_indices = {name: index for index, name in enumerate(class_names)}
+    missing = set(OMNIFAKE_TO_IAB.values()) - class_indices.keys()
+    if missing:
+        raise ValueError(f'Active IAB class map is missing OmniFake labels: {sorted(missing)}')
+    return [(str(path), class_indices[label], None, None)
+            for path, label in discover_test_samples(root)]
+
+
+def build_native_loader(root, samples, config, batch_size, num_workers, *,
+                        jpeg99, clip_preprocess=None):
     from torch.utils.data import DataLoader
     from comparison.dataset.ImageAttributionDataset import DATASET
-    from comparison.dataset.ImageAttributionDataset.dataset import (
-        semantic_label_map, semantic_to_relpath,
-    )
 
     # Native adapters construct their transforms/hierarchy; replace enumeration
     # so the ordinary IAB filename filter and train/test split cannot drop rows.
     dataset = DATASET[config['model_name']](
         root_dir='', config=config, degraded=0, clip_preprocess=clip_preprocess)
-    dataset.root_dir = str(style)
-    dataset.jpeg99 = True
-    dataset.samples = collect_samples(style, config['class_names'],
-                                      semantic_to_relpath, semantic_label_map)
+    dataset.root_dir = str(root)
+    dataset.jpeg99 = jpeg99
+    dataset.samples = samples
     if config['model_name'] == 'repmix':
         dataset.N = len(dataset.samples)
     dataset.set_test()
@@ -127,7 +135,9 @@ def build_styled_loader(style, config, batch_size, num_workers, clip_preprocess=
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--method', choices=METHODS, required=True)
+    parser.add_argument('--method', choices=OMNIFAKE_METHODS, required=True)
+    parser.add_argument('--omnifake', action='store_true',
+                        help='Evaluate the shared test classes under ROOT/val without JPEG99')
     checkpoints = parser.add_mutually_exclusive_group(required=True)
     checkpoints.add_argument('--checkpoint')
     checkpoints.add_argument('--checkpoints', help='JSON object mapping baseline names to checkpoints')
@@ -139,6 +149,8 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.batch_size < 1 or args.num_workers < 0:
         parser.error('batch_size must be positive and num_workers must be non-negative')
+    if args.method == 'omnidfa' and not args.omnifake:
+        parser.error('TwinNeXt + CE is available here with --omnifake')
     if args.checkpoints:
         mapping = load_checkpoint_map(args.checkpoints)
         if args.method not in mapping:
@@ -151,20 +163,33 @@ def main(argv=None):
     args = parse_args(argv)
     import torch
     import yaml
-    from comparison.dataset.ImageAttributionDataset.dataset import model_class_to_label
+    from comparison.dataset.ImageAttributionDataset.dataset import (
+        model_class_to_label, semantic_label_map, semantic_to_relpath,
+    )
     from comparison.training.attributors import ATTRIBUTOR
     from comparison.training.logger import create_logger
     from comparison.training.test import init_seed
     from comparison.training.trainer.trainer import Trainer
 
     class_names = list(model_class_to_label)
-    styles = discover_styles(args.root_dir, class_names)
+    if args.omnifake:
+        samples = collect_omnifake_samples(args.root_dir, class_names)
+        evaluations = [(Path(args.root_dir), list(OMNIFAKE_TO_IAB.values()))]
+    else:
+        evaluations = discover_styles(args.root_dir, class_names)
     checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     config_name = 'dna_default' if args.method == 'dna' else args.method
     config_path = Path(args.config) if args.config else (
         Path(__file__).parent / 'config/model' / f'{config_name}.yaml')
     config = prepare_config(checkpoint, args.method,
                             yaml.safe_load(config_path.read_text()), class_names)
+    provenance = {}
+    if args.method == 'omnidfa':
+        from comparison.training.omnidfa import omnidfa_report_provenance, validate_omnidfa_checkpoint
+
+        validate_omnidfa_checkpoint(checkpoint)
+        config['pretrained'] = False
+        provenance = omnidfa_report_provenance(config)
     init_seed(config.get('manualSeed', 42), torch.cuda.is_available())
     if args.method not in ATTRIBUTOR.data:
         raise RuntimeError(f'{args.method} is unavailable; check the optional dependency import warnings')
@@ -177,31 +202,45 @@ def main(argv=None):
     trainer = Trainer(config, model, None, None, logger, log_dir=str(output), test_mode=True)
     clip_preprocess = model.semantic_extractor.clip_preprocess if args.method == 'defl' else None
     summary = []
-    for style, generators in styles:
-        loader = build_styled_loader(style, config, args.batch_size, args.num_workers,
-                                     clip_preprocess=clip_preprocess)
-        counts = Counter(class_names[row[1]] for row in loader.dataset.samples)
-        print(f'\nBaseline: {args.method} | Style: {style.name} | JPEG99 only | images: {len(loader.dataset)} '
+    for root, generators in evaluations:
+        if args.omnifake:
+            condition = {'dataset': 'OmniFake', 'split': 'val', 'evaluation_condition': 'clean',
+                         'omnifake_to_iab': OMNIFAKE_TO_IAB,
+                         'preprocessing': 'native adapter preprocessing'}
+            summary_condition = {'dataset': 'OmniFake', 'evaluation_condition': 'clean'}
+            result_dir = output
+            description = 'OmniFake test split'
+        else:
+            samples = collect_samples(root, class_names, semantic_to_relpath, semantic_label_map)
+            condition = {'style': root.name, 'evaluation_condition': 'jpeg99', 'jpeg_quality': 99,
+                         'preprocessing': 'JPEG99 at native resolution before native adapter preprocessing'}
+            summary_condition = {'style': root.name}
+            result_dir = output / root.name
+            description = f'Style: {root.name} | JPEG99 only'
+        loader = build_native_loader(root, samples, config, args.batch_size, args.num_workers,
+                                     jpeg99=not args.omnifake, clip_preprocess=clip_preprocess)
+        counts = Counter(class_names[row[1]] for row in samples)
+        print(f'\nBaseline: {args.method} | {description} | images: {len(loader.dataset)} '
               f'| counts: {dict(counts)}')
         metrics = trainer.test(loader)
         if metrics['conf_matrix'].shape != (len(class_names), len(class_names)):
             raise ValueError('Prediction head does not match the full IAB label space')
         result = {
             'model_name': args.method, 'checkpoint': str(Path(args.checkpoint).resolve()),
-            'data_root': str(style.resolve()), 'style': style.name,
+            'data_root': str(root.resolve()), **condition, **provenance,
             'class_names': class_names, 'evaluated_generators': generators,
-            'num_images': len(loader.dataset), 'evaluation_condition': 'jpeg99', 'jpeg_quality': 99,
-            'preprocessing': 'JPEG99 at native resolution before native adapter preprocessing',
+            'num_images': len(loader.dataset),
             'config': config,
             **{key: value for key, value in metrics.items() if key not in ('acc', 'conf_matrix')},
             'accuracy': metrics['acc'], 'confusion_matrix': metrics['conf_matrix'].tolist(),
         }
-        style_output = output / style.name
-        style_output.mkdir(parents=True, exist_ok=True)
-        path = style_output / 'metrics.json'
+        result_dir.mkdir(parents=True, exist_ok=True)
+        path = result_dir / 'metrics.json'
         path.write_text(json.dumps(result, indent=2) + '\n')
-        summary.append({'model': args.method, 'style': style.name,
-                        'num_images': len(loader.dataset), 'jpeg_quality': 99, 'accuracy': metrics['acc'],
+        summary_row = {'model': args.method, **summary_condition, 'num_images': len(loader.dataset)}
+        if not args.omnifake:
+            summary_row['jpeg_quality'] = 99
+        summary.append({**summary_row, 'accuracy': metrics['acc'],
                         'balanced_accuracy': metrics['balanced_accuracy']})
         with (output / 'summary.csv').open('w', newline='') as stream:
             writer = csv.DictWriter(stream, fieldnames=list(summary[0]))

@@ -3,6 +3,7 @@
 Run: python -m tests.test_omnidfa
 """
 from copy import deepcopy
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -15,10 +16,10 @@ from torch.nn import functional as F
 from torchvision import transforms as T
 import yaml
 
-from comparison.training import train, test
+from comparison.training import train, test, test_baselines_styled
 from comparison.training.attributors.attributor_omnidfa import OmniDFAAttributor
 from comparison.training.omnidfa import (
-    CROSS_ENTROPY_PROTOCOL, PROTOTYPE_PROTOCOL, OmniDFABatchSampler,
+    CROSS_ENTROPY_PROTOCOL, PROTOCOL, PROTOTYPE_PROTOCOL, OmniDFABatchSampler,
     configure_omnidfa, prepare_omnidfa_train_loader,
     validate_omnidfa_checkpoint,
 )
@@ -28,6 +29,7 @@ from comparison.dataset.ImageAttributionDataset.dataset import model_class_to_la
 from comparison.dataset.ImageAttributionDataset.dataset_omnidfa import OmniDFADataset
 from data.degradations import apply_degradation, omnidfa_augment
 from data.export_iabench import export_images
+from data import omnifake
 from tests.test_iabench_baselines import make_data
 
 
@@ -162,6 +164,41 @@ class OmniDFATests(unittest.TestCase):
                                         {'logits': torch.tensor([[1., 0.]] * 4)})
         self.assertEqual(metrics['acc'], 0.75)
         self.assertEqual(metrics['balanced_accuracy'], 0.5)
+
+    def test_omnifake_evaluation_uses_saved_iab_head_and_both_views(self):
+        names = list(model_class_to_label)
+        config = dict(configuration(), **PROTOCOL, dataset='iab', class_names=names,
+                      num_classes=len(names), real_class_index=names.index('real'))
+        checkpoint = dict(PROTOCOL, model_name='omnidfa', dataset='iab', class_names=names,
+                          num_classes=len(names), output_class_names=names, training_config=config,
+                          train_counts=[1] * len(names), train_digest='train')
+
+        def offline_backbone(pretrained, out_features):
+            self.assertFalse(pretrained)
+            return TinyTwin(pretrained, out_features)
+
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(omnifake, 'IMAGES_PER_GENERATOR', 1), \
+                patch('comparison.training.attributors.attributor_omnidfa.TwinNeXt', offline_backbone):
+            root = Path(directory)
+            for folder in omnifake.OMNIFAKE_TO_IAB:
+                path = root / 'data' / 'val' / folder / 'image.png'
+                path.parent.mkdir(parents=True)
+                Image.new('RGB', (360, 480), (80, 40, 120)).save(path)
+            model = OmniDFAAttributor(dict(config, pretrained=False))
+            checkpoint['model_state_dict'] = model.state_dict()
+            for index, weights in enumerate((checkpoint, legacy_checkpoint(checkpoint))):
+                file = root / 'model.pth'
+                torch.save(weights, file)
+                output = root / f'results_{index}'
+                test_baselines_styled.main(['--omnifake', '--method', 'omnidfa',
+                    '--checkpoint', str(file), '--root_dir', str(root / 'data'),
+                    '--log_dir', str(output), '--batch_size', '4', '--num_workers', '0'])
+                result = json.loads((output / 'metrics.json').read_text())
+                self.assertEqual(result['attribution_protocol'], weights['attribution_protocol'])
+                self.assertEqual(result['class_names'], names)
+                self.assertEqual(result['num_images'], 10)
+                self.assertEqual(len(result['confusion_matrix']), len(names))
 
     def test_iabench_views_preserve_training_membership_and_export_parity(self):
         with tempfile.TemporaryDirectory() as directory:
