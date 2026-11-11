@@ -195,6 +195,21 @@ class AttributionTrainingTests(unittest.TestCase):
         self.assertLess(lengths[1], 0.01)
         self.assertGreater(lengths[2], 0.99)
 
+    def test_iab_hierarchy_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint, _, _ = run_tiny_training(trainer, directory, [
+                "--generators", "mid-6.0", "grok3", "real", "FLUX",
+                "--hierarchy", "increfa", "--anchor_init", "random", "--target_norm", "2.5",
+            ], manifest=True)
+        self.assertEqual(checkpoint["hierarchy"], "increfa")
+        self.assertEqual(checkpoint["class_names"], ["real", "mid-6.0", "grok3", "FLUX"])
+        self.assertEqual(checkpoint["family_names"], ["real", "autoregressive", "diffusion", "unknown"])
+        self.assertEqual(checkpoint["family_of"], [0, 3, 1, 2])
+        self.assertEqual(checkpoint["anchor_scope"], "families")
+        self.assertEqual(checkpoint["geodesic_margin"], 1.25)
+        self.assertEqual(checkpoint["family_tangent"].shape, (4, 4))
+        self.assertTrue(torch.isfinite(checkpoint["family_tangent"]).all())
+
     def test_training_modes_and_dataset_paths(self):
         cases = [
             (["--anchor_init", "random", "--anchors_only",

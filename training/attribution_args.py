@@ -10,7 +10,7 @@ def parse_args(argv=None, dataset="iab"):
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.set_defaults(dataset=dataset)
     p.add_argument("--hierarchy", choices=["none", "increfa"], default="none",
-                   help="Optional IABench class-to-family cone hierarchy.")
+                   help="Optional class-to-family cone hierarchy for IAB and IABench.")
     p.add_argument("--family_init_norm", type=float, default=1.2,
                    help="Initial tangent norm of random learnable family anchors.")
     p.add_argument("--family_depth_margin", type=float, default=0.5,
@@ -170,8 +170,9 @@ def validate_args(args, family_groups=None):
         raise ValueError("Anchor weight, norm weight, norm target and derived geodesic margin "
                          "must be finite and non-negative")
     if args.hierarchy != "none":
-        if args.dataset != "iabench" and not (args.dataset == "hybrid" and family_groups is not None):
-            raise ValueError("--hierarchy increfa is supported only for IABench")
+        if args.dataset not in ("iab", "iabench") and not (
+                args.dataset == "hybrid" and family_groups is not None):
+            raise ValueError("--hierarchy increfa requires IAB, IABench, or a hybrid taxonomy")
         if args.anchor_init != "random" or args.freeze_anchors:
             raise ValueError("--hierarchy increfa requires learnable random class anchors")
         settings = (args.curv, args.min_radius, args.family_init_norm,
@@ -193,7 +194,7 @@ def validate_args(args, family_groups=None):
                     minimum <= lo <= args.anchor_init_norm <= hi):
                 raise ValueError("--anchor_norm_range must respect the cone domain and contain initial class depth")
         if args.generators is not None:
-            increfa_mapping(args.generators, family_groups)
+            increfa_mapping(args.generators, family_groups, dataset=args.dataset)
     if args.profile_steps < 0:
         raise ValueError("--profile_steps must be non-negative")
     if args.profile_steps and not args.diag_plot_dir:

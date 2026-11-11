@@ -168,7 +168,7 @@ class AnchorState:
                 print(f"  drift scale s={F.softplus(self.anchor_drift).item():.3f} (learned)")
 
         if args.hierarchy != "none":
-            self.family_names, mapping = increfa_mapping(class_names, family_groups)
+            self.family_names, mapping = increfa_mapping(class_names, family_groups, dataset=args.dataset)
             self.family_of = torch.tensor(mapping, dtype=torch.long, device=device)
             # Keep class initialization and global RNG consumption unchanged.
             g = torch.Generator().manual_seed(args.seed + 1)

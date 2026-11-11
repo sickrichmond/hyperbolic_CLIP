@@ -60,8 +60,12 @@ class FamilyHierarchyTests(unittest.TestCase):
         for options, message in cases:
             with self.subTest(options=options), self.assertRaisesRegex(ValueError, message):
                 validate_args(parse_args(base + options, dataset="iabench"))
-        with self.assertRaisesRegex(ValueError, "only for IABench"):
-            validate_args(parse_args(base + ["--captions_dir", "x"]))
+        with self.assertRaisesRegex(ValueError, "hybrid taxonomy"):
+            validate_args(parse_args(base, dataset="hybrid"))
+        iab = base + ["--captions_dir", "x"]
+        validate_args(parse_args(iab))
+        with self.assertRaisesRegex(ValueError, "no family.*E4S"):
+            validate_args(parse_args(iab + ["--generators", "real", "E4S"]))
 
     def test_family_formula_and_gradients(self):
         for curv in (0.5, 1.0, 2.0):

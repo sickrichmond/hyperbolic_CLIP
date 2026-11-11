@@ -1,11 +1,21 @@
-"""Corrected IABench cone-training taxonomy, independent of baseline groupings.
+"""IAB and IABench cone-training taxonomies, independent of baseline groupings.
 
-Based on https://github.com/Ant0ny44/IncreFA/blob/main/configs/iabench_families.json
-CogView4 is diffusion (https://github.com/zai-org/CogView4). Midjourney and
-Nano Banana share an operational unknown group, not a claim of shared ancestry.
-The legacy increfa option/function names are retained for CLI compatibility.
+The IABench map adapts https://github.com/Ant0ny44/IncreFA/blob/main/configs/iabench_families.json
+and uses the diffusion label for CogView4 (https://github.com/zai-org/CogView4).
+The unknown groups are shared training labels for models of unclear architecture.
 """
 import math
+
+
+IAB_FAMILIES = {
+    "real": ("real",),
+    "autoregressive": ("4o", "grok3", "infinity", "janus-pro"),
+    "diffusion": (
+        "CogView3_PLUS", "FLUX", "KANDINSKY", "PIXART", "PLAYGROUND_2_5",
+        "SD1_5", "SD2_1", "SD3", "SD3_5", "SDXL", "dalle3", "hidream", "hunyuan",
+    ),
+    "unknown": ("gemini", "ideogram", "kling", "mid-5.2", "mid-6.0"),
+}
 
 
 INCREFA_FAMILIES = {
@@ -31,9 +41,11 @@ INCREFA_FAMILIES = {
 }
 
 
-def increfa_mapping(class_names, family_groups=None):
+def increfa_mapping(class_names, family_groups=None, *, dataset="iabench"):
     """Return active families and indices aligned with the exact class order."""
-    groups = INCREFA_FAMILIES if family_groups is None else family_groups
+    groups = family_groups
+    if groups is None:
+        groups = IAB_FAMILIES if dataset == "iab" else INCREFA_FAMILIES
     parent = {name: family for family, names in groups.items() for name in names}
     if len(parent) != sum(len(names) for names in groups.values()):
         raise ValueError("A generator cannot belong to multiple families")

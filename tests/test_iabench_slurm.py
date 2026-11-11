@@ -2,6 +2,7 @@
 
 Run: python -m tests.test_iabench_slurm
 """
+from collections import Counter
 from contextlib import redirect_stderr
 import io
 import json
@@ -13,11 +14,12 @@ import tempfile
 import unittest
 
 from training.attribution_args import anchor_margin_scale, parse_args, validate_args
+from training.families import increfa_mapping
 
 
 class IABenchSlurmTests(unittest.TestCase):
     def test_cli_accepts_depth_and_rejects_explicit_margin(self):
-        for dataset, hierarchy, scale in (("iab", "none", 1.), ("iabench", "none", 1.),
+        for dataset, hierarchy, scale in (("iab", "none", 1.), ("iab", "increfa", .5), ("iabench", "none", 1.),
                                           ("iabench", "increfa", .5), ("hybrid", "increfa", .5)):
             base = ["--dataset_path", "unused", "--hierarchy", hierarchy, "--anchor_init", "random"]
             if dataset == "iab":
@@ -193,7 +195,7 @@ exec bash "$1"
             capture = root / "command.json"
             env = dict(os.environ, WORK=str(root), FAST=str(root / "fast"), SLURM_JOB_ID="123",
                        SLURM_TEST_PYTHON=sys.executable, SLURM_TEST_CAPTURE=str(capture))
-            for key in ("CKPT", "AUGMENT", "AUG_POLICY", "OPTIMIZER", "ANCHOR_INIT",
+            for key in ("CKPT", "AUGMENT", "AUG_POLICY", "OPTIMIZER", "ANCHOR_INIT", "HIERARCHY",
                         "LAMBDA_NORM", "LAMBDA_ANCHOR", "GEODESIC_MARGIN", "TARGET_NORM", "NUM_EPOCHS"):
                 env.pop(key, None)
             for settings, suffix in (({}, ""), ({"AUGMENT": "1"}, "_corruption"),
@@ -201,12 +203,16 @@ exec bash "$1"
                     ({"LAMBDA_ANCHOR": "0.2", "TARGET_NORM": "3", "NUM_EPOCHS": "30"}, ""),
                     ({"LAMBDA_NORM": "0.5"}, "_norm0p5"),
                     ({"TARGET_NORM": "2.5", "GEODESIC_MARGIN": "3"}, ""),
+                    ({"HIERARCHY": "increfa"}, "_hierarchy_increfa"),
+                    ({"HIERARCHY": "increfa", "AUGMENT": "1"}, "_corruption_hierarchy_increfa"),
+                    ({"HIERARCHY": "increfa", "AUGMENT": "1", "AUG_POLICY": "omnidfa",
+                      "TARGET_NORM": "2.5"}, "_omnidfa_hierarchy_increfa"),
                     ({"CKPT": str(base / "mean checkpoint.pt")}, ""),
                     ({"CKPT": str(base / "mean aug checkpoint.pt"), "AUGMENT": "1"}, "_corruption"),
                     ({"CKPT": str(base / "mean omni checkpoint.pt"), "AUGMENT": "1",
                       "AUG_POLICY": "omnidfa"}, "_omnidfa")):
                 with self.subTest(settings=settings):
-                    subprocess.run(["bash", "-c", stub, "_", str(script)],
+                    completed = subprocess.run(["bash", "-c", stub, "_", str(script)],
                         env=dict(env, **settings), check=True, capture_output=True, text=True)
                     argv = json.loads(capture.read_text())
                     self.assertEqual(argv[0], "train_attribution.py")
@@ -218,9 +224,16 @@ exec bash "$1"
                     self.assertEqual(args.target_norm, float(settings.get("TARGET_NORM", 1)))
                     self.assertEqual(args.train_augment, settings.get("AUGMENT") == "1")
                     self.assertEqual(args.aug_policy, settings.get("AUG_POLICY", "corruption"))
+                    self.assertEqual(args.hierarchy, settings.get("HIERARCHY", "none"))
+                    if args.hierarchy == "increfa":
+                        families, indices = increfa_mapping(args.generators, dataset="iab")
+                        self.assertEqual(families, ["real", "autoregressive", "diffusion", "unknown"])
+                        self.assertEqual(Counter(indices), {0: 1, 1: 4, 2: 12, 3: 5})
                     weight = settings.get("LAMBDA_ANCHOR", "1").replace(".", "p")
                     target = settings.get("TARGET_NORM", "1").replace(".", "p")
-                    margin = format(args.target_norm, ".17g").replace(".", "p")
+                    z = args.target_norm / 2 if args.hierarchy == "increfa" else args.target_norm
+                    self.assertIn(f"geodesic_margin={z:.17g},", completed.stdout)
+                    margin = format(z, ".17g").replace(".", "p")
                     if "CKPT" in settings:
                         self.assertEqual(args.output, settings["CKPT"])
                     else:
@@ -233,6 +246,11 @@ exec bash "$1"
                         env=dict(env, NUM_EPOCHS=epochs), capture_output=True, text=True)
                     self.assertEqual(result.returncode, 2)
                     self.assertFalse(capture.exists())
+            result = subprocess.run(["bash", "-c", stub, "_", str(script)],
+                env=dict(env, HIERARCHY="unknown"), capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("HIERARCHY must be none or increfa", result.stderr)
+            self.assertFalse(capture.exists())
 
 
 if __name__ == "__main__":

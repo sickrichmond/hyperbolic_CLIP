@@ -56,8 +56,8 @@ class IABAnchorSweepTests(unittest.TestCase):
                        SWEEP_TEST_PYTHON=sys.executable, SWEEP_TEST_STUB=str(stub),
                        SWEEP_TEST_CAPTURE=str(capture), CKPT="must-not-be-used.pt",
                        NUM_EPOCHS="1", AUGMENT="0", AUG_POLICY="corruption", OPTIMIZER="sgd",
-                       ANCHOR_INIT="text", LAMBDA_NORM="99", LAMBDA_ANCHOR="99", TARGET_NORM="99",
-                       GEODESIC_MARGIN="99")
+                       ANCHOR_INIT="text", HIERARCHY="increfa", LAMBDA_NORM="99",
+                       LAMBDA_ANCHOR="99", TARGET_NORM="99", GEODESIC_MARGIN="99")
             for key in ("DATA", "CAPS", "OUT", "MANIFEST", "DIAG_PLOT_DIR", "SWEEP_TEST_FAIL"):
                 env.pop(key, None)
             outputs = set()
@@ -71,6 +71,7 @@ class IABAnchorSweepTests(unittest.TestCase):
                     args = parse_args(calls[0]["argv"][1:])
                     validate_args(args)
                     self.assertEqual((args.lambda_anchor, args.target_norm), (weight, tau))
+                    self.assertEqual(args.hierarchy, "none")
                     self.assertNotIn("--geodesic_margin", calls[0]["argv"])
                     self.assertEqual((args.num_epochs, args.lambda_neg, args.lambda_norm, args.norm_mode),
                                      (30, 1, .5, "floor"))

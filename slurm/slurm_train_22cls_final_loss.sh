@@ -6,8 +6,9 @@
 #
 # Submit: sbatch slurm/slurm_train_22cls_final_loss.sh
 #         sbatch --export=ALL,AUGMENT=1,AUG_POLICY=omnidfa slurm/slurm_train_22cls_final_loss.sh
+#         sbatch --export=ALL,HIERARCHY=increfa slurm/slurm_train_22cls_final_loss.sh
 # Defaults: OPTIMIZER=adamw, ANCHOR_INIT=random, LAMBDA_NORM=1, LAMBDA_ANCHOR=1.
-# The trainer derives z from radial-depth TARGET_NORM (default 1).
+# The trainer uses z=TARGET_NORM in flat mode and z=TARGET_NORM/2 with IncreFA.
 # Checkpoint names include the NUM_EPOCHS budget (default 20).
 # CKPT overrides the output path, e.g. to keep mean and maximum experiments separate.
 # The trainer rejects concurrent writers and existing augmentation/hierarchy conflicts.
@@ -47,6 +48,7 @@ DIAG_PLOT_DIR=${DIAG_PLOT_DIR:-$WORK/hyp_fine_tuning/viz/final_loss_${SLURM_JOB_
 # Validation is clean; report the augmentation policy with robustness results.
 AUGMENT=${AUGMENT:-0}
 AUG_POLICY=${AUG_POLICY:-corruption}
+HIERARCHY=${HIERARCHY:-none}
 OPTIMIZER=${OPTIMIZER:-adamw}
 LAMBDA_NORM=${LAMBDA_NORM:-1}
 LAMBDA_ANCHOR=${LAMBDA_ANCHOR:-1}
@@ -67,6 +69,12 @@ case "$ANCHOR_INIT" in
     text|image_centroid|text_free|random) ;;
     *) echo "ERROR: ANCHOR_INIT must be text, image_centroid, text_free, or random (got: $ANCHOR_INIT)" >&2; exit 2 ;;
 esac
+HIERARCHY_SUFFIX=
+case "$HIERARCHY" in
+    none) ;;
+    increfa) HIERARCHY_SUFFIX=_hierarchy_increfa ;;
+    *) echo "ERROR: HIERARCHY must be none or increfa (got: $HIERARCHY)" >&2; exit 2 ;;
+esac
 for name in LAMBDA_NORM LAMBDA_ANCHOR TARGET_NORM; do
     if [[ ! "${!name}" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$ ]]; then
         echo "ERROR: $name must be a non-negative number (got: ${!name})" >&2
@@ -75,7 +83,8 @@ for name in LAMBDA_NORM LAMBDA_ANCHOR TARGET_NORM; do
 done
 
 LAMBDA_TAG=${LAMBDA_ANCHOR//./p}
-Z=$(LC_ALL=C awk -v tau="$TARGET_NORM" 'BEGIN { printf "%.17g", tau }')
+Z=$(LC_ALL=C awk -v tau="$TARGET_NORM" -v hierarchy="$HIERARCHY" \
+    'BEGIN { printf "%.17g", (hierarchy == "increfa" ? tau / 2 : tau) }')
 MARGIN_TAG=${Z//./p}
 TARGET_TAG=${TARGET_NORM//./p}
 RUN_TAG="anchor${LAMBDA_TAG}_z${MARGIN_TAG}_tau${TARGET_TAG}_${ANCHOR_INIT}_${OPTIMIZER}_ep${NUM_EPOCHS}"
@@ -85,17 +94,17 @@ fi
 if [ "$AUGMENT" = 1 ]; then
     AUG_FLAG="--train_augment --aug_policy $AUG_POLICY"
     if [ "$AUG_POLICY" = omnidfa ]; then
-        CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_omnidfa_vitl14.pt}
+        CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_omnidfa${HIERARCHY_SUFFIX}_vitl14.pt}
     else
-        CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_corruption_vitl14.pt}
+        CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_corruption${HIERARCHY_SUFFIX}_vitl14.pt}
     fi
 else
     AUG_FLAG=
-    CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}_vitl14.pt}
+    CKPT=${CKPT:-$OUT/attribution_22cls_${RUN_TAG}${HIERARCHY_SUFFIX}_vitl14.pt}
 fi
 
 echo "Training with optimizer=$OPTIMIZER, lambda_norm=$LAMBDA_NORM, lambda_anchor=$LAMBDA_ANCHOR, target_norm=$TARGET_NORM, geodesic_margin=$Z, anchor_init=$ANCHOR_INIT"
-echo "Training with AUGMENT=$AUGMENT, AUG_POLICY=$AUG_POLICY → $CKPT"
+echo "Training with AUGMENT=$AUGMENT, AUG_POLICY=$AUG_POLICY, HIERARCHY=$HIERARCHY → $CKPT"
 
 mkdir -p "$OUT"
 cd "$REPO"
@@ -116,6 +125,7 @@ python train_attribution.py \
     --semantics       COCO cat dog wild FFHQ celebahq bedroom church classroom ImageNet-1k \
     --clip_name       openai/clip-vit-large-patch14 \
     --anchor_init "$ANCHOR_INIT" \
+    --hierarchy "$HIERARCHY" \
     --lora_target 'vision_model\.encoder\.layers\.[0-9]+\.self_attn\.(q_proj|v_proj)' \
     --lora_r          16 \
     --lora_alpha      32 \
