@@ -1,6 +1,6 @@
 """Evaluate an external, static IAB IncreFA checkpoint on styled JPEG99 images.
 
-Run with the IncreFA virtual environment. Its native trainer supplies the model,
+Run with the hyp_fine_tuning environment. IncreFA's native trainer supplies the model,
 family setup, label mapping and image transform. Scores are fractions in JSON/CSV.
 """
 import argparse

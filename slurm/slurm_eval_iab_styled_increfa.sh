@@ -16,6 +16,7 @@
 set -euo pipefail
 module load python/3.11.7
 module load cuda/12.6
+source "$WORK/hyp_fine_tuning/bin/activate"
 
 REPO="${REPO:-$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo}"
 INCREFA_REPO="${INCREFA_REPO:-$WORK/IncreFA}"
@@ -28,12 +29,11 @@ NUM_WORKERS="${NUM_WORKERS:-8}"
 test -r "$CKPT"
 test -r "$INCREFA_REPO/train.py"
 test -d "$DATA"
-test -x "$INCREFA_REPO/.venv/bin/python"
 cd "$INCREFA_REPO"
 export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1 HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 OMP_NUM_THREADS=4
 echo "Checkpoint: $CKPT | JPEG99 only | Results: $LOGDIR"
-srun "$INCREFA_REPO/.venv/bin/python" -u -m comparison.training.test_increfa_styled \
+srun "$WORK/hyp_fine_tuning/bin/python" -u -m comparison.training.test_increfa_styled \
     --increfa_dir "$INCREFA_REPO" --checkpoint "$CKPT" \
     --root_dir "$DATA" --log_dir "$LOGDIR" \
     --batch_size "$BATCH_SIZE" --num_workers "$NUM_WORKERS"

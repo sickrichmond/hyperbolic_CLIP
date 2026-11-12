@@ -151,7 +151,7 @@ class IncreFAStyledTests(unittest.TestCase):
                     dataset[0]
                 self.assertEqual(failed.call_count, 8)
 
-    def test_launcher_uses_native_environment_and_separate_results(self):
+    def test_launcher_uses_usual_environment_and_separate_results(self):
         script = Path(__file__).resolve().parents[1] / 'slurm/slurm_eval_iab_styled_increfa.sh'
         source = script.read_text()
         self.assertIn('module load python/3.11.7', source)
@@ -159,17 +159,21 @@ class IncreFAStyledTests(unittest.TestCase):
         self.assertNotIn('anaconda3/2023.09-0', source)
         stub = '''
 module() { :; }
-srun() { "$TEST_PYTHON" -c 'import json, os, sys; from pathlib import Path; Path(os.environ["CAPTURE"]).write_text(json.dumps({"argv": sys.argv[1:], "gpu": os.environ["CUDA_VISIBLE_DEVICES"]}))' "$@"; }
+srun() { "$TEST_PYTHON" -c 'import json, os, sys; from pathlib import Path; Path(os.environ["CAPTURE"]).write_text(json.dumps({"argv": sys.argv[1:], "gpu": os.environ["CUDA_VISIBLE_DEVICES"], "activated": os.environ.get("INCREFA_TEST_ACTIVE")}))' "$@"; }
 export -f module srun
 exec bash "$@"
 '''
         with tempfile.TemporaryDirectory(prefix='increfa styled ') as directory:
             root = Path(directory)
             native = root / 'IncreFA'
-            python = native / '.venv/bin/python'
+            python = root / 'hyp_fine_tuning/bin/python'
             python.parent.mkdir(parents=True)
             python.touch()
             python.chmod(0o755)
+            (python.parent / 'activate').write_text('export INCREFA_TEST_ACTIVE=1\n')
+            broken_python = native / '.venv/bin/python'
+            broken_python.parent.mkdir(parents=True)
+            broken_python.symlink_to(root / 'missing-anaconda/bin/python')
             (native / 'train.py').touch()
             data = root / 'datasets/iab_styled_eval'
             data.mkdir(parents=True)
@@ -185,6 +189,7 @@ exec bash "$@"
                            check=True, capture_output=True, text=True)
             result = json.loads(capture.read_text())
             self.assertEqual(result['gpu'], '3')
+            self.assertEqual(result['activated'], '1')
             self.assertEqual(result['argv'][:4], [str(python), '-u', '-m',
                                                 'comparison.training.test_increfa_styled'])
             flags = dict(zip(result['argv'][4::2], result['argv'][5::2]))
