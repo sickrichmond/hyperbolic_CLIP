@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: sbatch slurm/slurm_eval_iab_family_hypclip.sh HYPCLIP_CHECKPOINT
+# Usage: sbatch slurm/slurm_eval_iab_family_hypclip.sh [--output-dir DIR] HYPCLIP_CHECKPOINT
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
@@ -13,22 +13,28 @@
 #SBATCH --error=%x_%j.err
 
 set -euo pipefail
+OUTPUT_DIR=
+if [[ "${1:-}" == --output-dir ]]; then
+    [[ -n "${2:-}" ]] || { echo "--output-dir requires a directory" >&2; exit 2; }
+    OUTPUT_DIR="$2"
+    shift 2
+fi
 if (( $# != 1 )) || [[ ! -f "$1" ]]; then
-    echo "Usage: sbatch $0 HYPCLIP_CHECKPOINT" >&2
+    echo "Usage: sbatch $0 [--output-dir DIR] HYPCLIP_CHECKPOINT" >&2
     exit 2
 fi
 CKPT="$(realpath "$1")"
 REPO="${REPO:-$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo}"
 DATA="${DATA:-$SCRATCH/datasets/IABench_images}"
 MANIFEST="${SPLIT_MANIFEST:-$WORK/hyp_fine_tuning/checkpoints/attribution_iabench_random_vitl14.splits.json}"
-LOGDIR="${LOGDIR:-$WORK/outputs/iab_family_hypclip_${SLURM_JOB_ID}}"
+LOGDIR="${OUTPUT_DIR:-${LOGDIR:-$WORK/outputs/iab_family_hypclip_${SLURM_JOB_ID}}}"
 [[ -d "$DATA" && -f "$MANIFEST" ]] || {
     echo "Expected IABench data at $DATA and a manifest at $MANIFEST" >&2
     exit 2
 }
 DATA="$(realpath "$DATA")"
 MANIFEST="$(realpath "$MANIFEST")"
-LOGDIR="$(realpath -m "$LOGDIR")"
+LOGDIR="$(realpath -m -- "$LOGDIR")"
 
 module load python/3.11.7
 module load cuda/12.6

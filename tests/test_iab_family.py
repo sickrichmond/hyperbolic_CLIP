@@ -134,7 +134,7 @@ exec bash "$@"
             hypclip = ['bash', '-c', stub, '_', str(hypclip_script)]
 
             def capture(command, **overrides):
-                result = subprocess.run(command, env=dict(env, **overrides), check=True,
+                result = subprocess.run(command, cwd=work, env=dict(env, **overrides), check=True,
                                         capture_output=True, text=True)
                 argv, exclusion = json.loads(result.stdout.splitlines()[-1])
                 self.assertEqual(argv[:4], ['-u', '-m', 'comparison.training.iab_family', 'evaluate'])
@@ -154,7 +154,9 @@ exec bash "$@"
                 self.assertNotIn('--checkpoint', flags)
 
             for command, overrides in ((hypclip, {}), ([*hypclip, str(checkpoint)], {}),
-                                       (baseline, {'SLURM_ARRAY_TASK_ID': '11'})):
+                                       (baseline, {'SLURM_ARRAY_TASK_ID': '11'}),
+                                       ([*hypclip, '--output-dir'], {}),
+                                       ([*baseline, '--output-dir'], {'SLURM_ARRAY_TASK_ID': '0'})):
                 result = subprocess.run(command, env=dict(env, **overrides),
                                         capture_output=True, text=True)
                 self.assertEqual(result.returncode, 2)
@@ -165,11 +167,13 @@ exec bash "$@"
             self.assertEqual(flags['--checkpoint'], str(checkpoint))
             self.assertNotIn('--checkpoints', flags)
             self.assertEqual(flags['--output-dir'], str(work / 'outputs/iab_family_hypclip_456'))
-            shared = str(work / 'shared results')
-            flags, _ = capture([*hypclip, str(checkpoint)], LOGDIR=shared)
-            self.assertEqual(flags['--output-dir'], shared)
-            flags, _ = capture(baseline, SLURM_ARRAY_TASK_ID='0', LOGDIR=shared)
-            self.assertEqual(flags['--output-dir'], shared)
+            shared = 'shared results'
+            flags, _ = capture([*hypclip, '--output-dir', shared, str(checkpoint)])
+            self.assertEqual(flags['--output-dir'], str(work / shared))
+            flags, _ = capture([*baseline, '--output-dir', shared, str(custom_map)],
+                               SLURM_ARRAY_TASK_ID='0', LOGDIR=str(work / 'old results'))
+            self.assertEqual(flags['--output-dir'], str(work / shared))
+            self.assertEqual(flags['--checkpoints'], str(custom_map))
 
 
 @unittest.skipUnless(find_spec('torch'), 'requires PyTorch')

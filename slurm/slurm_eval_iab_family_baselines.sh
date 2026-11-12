@@ -1,5 +1,5 @@
 #!/bin/bash
-# Usage: sbatch slurm/slurm_eval_iab_family_baselines.sh [BASELINE_MAP]
+# Usage: sbatch slurm/slurm_eval_iab_family_baselines.sh [--output-dir DIR] [BASELINE_MAP]
 #SBATCH --account=EUHPC_D35_189
 #SBATCH --partition=boost_usr_prod
 #SBATCH --qos=boost_qos_lprod
@@ -14,8 +14,14 @@
 #SBATCH --error=%x_%A_%a.err
 
 set -euo pipefail
+OUTPUT_DIR=
+if [[ "${1:-}" == --output-dir ]]; then
+    [[ -n "${2:-}" ]] || { echo "--output-dir requires a directory" >&2; exit 2; }
+    OUTPUT_DIR="$2"
+    shift 2
+fi
 if (( $# > 1 )); then
-    echo "Usage: sbatch $0 [BASELINE_MAP]" >&2
+    echo "Usage: sbatch $0 [--output-dir DIR] [BASELINE_MAP]" >&2
     exit 2
 fi
 TASK="${SLURM_ARRAY_TASK_ID:-}"
@@ -26,7 +32,7 @@ METHOD="${METHODS[$TASK]}"
 REPO="${REPO:-$WORK/hyp_fine_tuning/hyperbolic_CLIP_riccardo}"
 DATA="${DATA:-$SCRATCH/datasets/IABench_images}"
 MANIFEST="${SPLIT_MANIFEST:-$WORK/hyp_fine_tuning/checkpoints/attribution_iabench_random_vitl14.splits.json}"
-LOGDIR="${LOGDIR:-$WORK/outputs/iab_family_baselines_${SLURM_ARRAY_JOB_ID}}"
+LOGDIR="${OUTPUT_DIR:-${LOGDIR:-$WORK/outputs/iab_family_baselines_${SLURM_ARRAY_JOB_ID}}}"
 MAP="${1:-$REPO/comparison/training/config/iab_styled_final_checkpoints.json}"
 [[ -f "$MAP" ]] || { echo "Missing baseline checkpoint map: $MAP" >&2; exit 2; }
 [[ -d "$DATA" && -f "$MANIFEST" ]] || {
@@ -35,7 +41,7 @@ MAP="${1:-$REPO/comparison/training/config/iab_styled_final_checkpoints.json}"
 }
 DATA="$(realpath "$DATA")"
 MANIFEST="$(realpath "$MANIFEST")"
-LOGDIR="$(realpath -m "$LOGDIR")"
+LOGDIR="$(realpath -m -- "$LOGDIR")"
 MAP="$(realpath "$MAP")"
 
 module load python/3.11.7
