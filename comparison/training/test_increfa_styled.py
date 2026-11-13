@@ -1,4 +1,4 @@
-"""Evaluate an external, static IAB IncreFA checkpoint on styled JPEG99 images.
+"""Evaluate an external, static IAB IncreFA checkpoint on styled IAB or OmniFake.
 
 Run with the hyp_fine_tuning environment. IncreFA's native trainer supplies the model,
 family setup, label mapping and image transform. Scores are fractions in JSON/CSV.
@@ -10,6 +10,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+from runpy import run_path
 import sys
 import time
 
@@ -79,11 +80,23 @@ def collect_samples(style, names):
     return samples
 
 
+def omnifake_queries(root, names):
+    # Load the shared inventory without occupying IncreFA's native data namespace.
+    inventory = run_path(str(Path(__file__).resolve().parents[2] / 'data/omnifake.py'))
+    mapping = inventory['OMNIFAKE_TO_IAB']
+    indices = {name: i for i, name in enumerate(names)}
+    missing = set(mapping.values()) - indices.keys()
+    if missing:
+        raise ValueError(f'Checkpoint is missing OmniFake labels: {sorted(missing)}')
+    return [(path, indices[name]) for path, name in inventory['discover_test_samples'](root)], mapping
+
+
 class StyledDataset:
-    def __init__(self, samples, transform, names):
+    def __init__(self, samples, transform, names, *, jpeg99=True):
         self.samples = samples
         self.transform = transform
         self.names = names
+        self.jpeg99 = jpeg99
 
     def __len__(self):
         return len(self.samples)
@@ -102,11 +115,12 @@ class StyledDataset:
                     raise
                 time.sleep(0.5 * (attempt + 1))
         # External IncreFA owns the data.* namespace, so encode JPEG here.
-        buffer = BytesIO()
-        image.save(buffer, format='JPEG', quality=99)
-        buffer.seek(0)
-        with Image.open(buffer) as compressed:
-            image = compressed.convert('RGB')
+        if self.jpeg99:
+            buffer = BytesIO()
+            image.save(buffer, format='JPEG', quality=99)
+            buffer.seek(0)
+            with Image.open(buffer) as compressed:
+                image = compressed.convert('RGB')
         if self.names[label] == 'grok3':
             width, height = image.size
             if width > 100 and height > 50:
@@ -137,6 +151,7 @@ def parse_args(argv=None):
     parser.add_argument('--checkpoint', required=True)
     parser.add_argument('--root_dir', required=True)
     parser.add_argument('--log_dir', required=True)
+    parser.add_argument('--omnifake', action='store_true', help='Use ROOT/val with no added JPEG compression')
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=8)
     args = parser.parse_args(argv)
@@ -159,7 +174,14 @@ def main(argv=None):
     sys.path.insert(0, str(args.increfa_dir))
     checkpoint = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     names = checkpoint_classes(checkpoint)
-    styles = discover_styles(args.root_dir, names)
+    if args.omnifake:
+        from comparison.training.metrics.base_metrics_class import calculate_metrics_for_test
+
+        samples, mapping = omnifake_queries(args.root_dir, names)
+        supported = set(mapping.values())
+        evaluations = [(args.root_dir, [name for name in names if name in supported])]
+    else:
+        evaluations = discover_styles(args.root_dir, names)
     model, transform, names = restore_model(checkpoint)
     device = checkpoint['config']['device']
     del checkpoint
@@ -167,38 +189,63 @@ def main(argv=None):
     print(f'Checkpoint: {args.checkpoint}\nClasses: {names}\nResults: {args.log_dir}', flush=True)
     summary = []
     with torch.no_grad():
-        for style, generators in styles:
-            dataset = StyledDataset(collect_samples(style, names), transform, names)
+        for root, generators in evaluations:
+            if not args.omnifake:
+                samples = collect_samples(root, names)
+            dataset = StyledDataset(samples, transform, names, jpeg99=not args.omnifake)
             loader = DataLoader(dataset, batch_size=args.batch_size,
                                 num_workers=args.num_workers, pin_memory=True,
                                 shuffle=False, drop_last=False)
             count = len(names)
             matrix = torch.zeros(count * count, dtype=torch.long)
+            all_logits, all_labels = [], []
             for images, labels in loader:
                 logits, _ = model(images.to(device), y_gt=None, store_samples=False)
                 if logits.ndim != 2 or logits.shape[1] < count:
                     raise ValueError('Prediction head does not cover all checkpoint classes')
-                predictions = logits[:, :count].argmax(dim=1).cpu()
-                matrix += torch.bincount(labels * count + predictions, minlength=count * count)
+                logits = logits[:, :count].cpu()
+                if args.omnifake:
+                    all_logits.append(logits.float())
+                    all_labels.append(labels)
+                else:
+                    predictions = logits.argmax(dim=1)
+                    matrix += torch.bincount(labels * count + predictions, minlength=count * count)
+            if args.omnifake:
+                auc, _, ap, confusion, _, metrics = calculate_metrics_for_test(
+                    torch.cat(all_labels), torch.cat(all_logits))
+                matrix = confusion.tolist()
+                condition = {
+                    'dataset': 'OmniFake', 'split': 'val', 'omnifake_to_iab': mapping,
+                    'evaluation_condition': 'clean', 'preprocessing': 'native IncreFA IAB preprocessing',
+                    'auc': float(auc), 'ap': float(ap),
+                    'support_per_class': metrics['support_per_class'],
+                    'recall_per_class': metrics['recall_per_class'],
+                }
+                output = args.log_dir
+                summary_keys = ('model_name', 'dataset', 'num_images', 'accuracy', 'balanced_accuracy')
+            else:
+                matrix = matrix.reshape(count, count).tolist()
+                condition = {
+                    'style': root.name, 'evaluation_condition': 'jpeg99', 'jpeg_quality': 99,
+                    'preprocessing': 'JPEG99 before native IncreFA IAB preprocessing',
+                }
+                output = args.log_dir / root.name
+                summary_keys = ('model_name', 'style', 'num_images', 'jpeg_quality',
+                                'accuracy', 'balanced_accuracy')
             report = {
                 'model_name': 'increfa', 'checkpoint': str(args.checkpoint),
-                'data_root': str(style), 'style': style.name, 'class_names': names,
-                'evaluated_generators': generators, 'evaluation_condition': 'jpeg99',
-                'jpeg_quality': 99, 'decision_rule': 'argmax native generator logits',
-                'preprocessing': 'JPEG99 before native IncreFA IAB preprocessing',
-                **summarize(matrix.reshape(count, count).tolist(), names),
+                'data_root': str(root), 'class_names': names, 'evaluated_generators': generators,
+                'decision_rule': 'argmax native generator logits',
+                **condition, **summarize(matrix, names),
             }
-            output = args.log_dir / style.name
             output.mkdir(parents=True, exist_ok=True)
             (output / 'metrics.json').write_text(json.dumps(report, indent=2) + '\n')
-            summary.append({key: report[key] for key in
-                            ('model_name', 'style', 'num_images', 'jpeg_quality',
-                             'accuracy', 'balanced_accuracy')})
+            summary.append({key: report[key] for key in summary_keys})
             with (args.log_dir / 'summary.csv').open('w', newline='') as stream:
                 writer = csv.DictWriter(stream, fieldnames=list(summary[0]))
                 writer.writeheader()
                 writer.writerows(summary)
-            print(f'{style.name:<28} accuracy={100 * report["accuracy"]:.2f}% '
+            print(f'{root.name:<28} accuracy={100 * report["accuracy"]:.2f}% '
                   f'balanced_accuracy={100 * report["balanced_accuracy"]:.2f}%', flush=True)
 
 

@@ -5,6 +5,7 @@ from io import BytesIO
 import json
 import os
 from pathlib import Path
+from runpy import run_path
 import subprocess
 import sys
 import tempfile
@@ -111,6 +112,28 @@ class IncreFAStyledTests(unittest.TestCase):
         self.assertAlmostEqual(report['balanced_accuracy'], (1 / 2 + 3 / 4) / 2)
         self.assertIsNone(report['per_class_recall']['real'])
 
+    def test_omnifake_inventory_preserves_native_data_package_and_checkpoint_order(self):
+        native_data = ModuleType('data')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            inventory = run_path(str(Path(evaluator.__file__).parents[2] / 'data/omnifake.py'))
+            mapping = inventory['OMNIFAKE_TO_IAB']
+            inventory['discover_test_samples'].__globals__['IMAGES_PER_GENERATOR'] = 1
+            names = ['real', *reversed(mapping.values())]
+            for folder in mapping:
+                path = root / 'val' / folder / 'sample.png'
+                path.parent.mkdir(parents=True)
+                path.touch()
+            with patch.dict(sys.modules, data=native_data), patch.object(
+                    evaluator, 'run_path', return_value=inventory):
+                samples, actual_mapping = evaluator.omnifake_queries(root, names)
+                self.assertIs(sys.modules['data'], native_data)
+                self.assertEqual(actual_mapping, mapping)
+                self.assertEqual(len(samples), 10)
+                self.assertTrue(all(names[label] == mapping[path.parent.name] for path, label in samples))
+                with self.assertRaisesRegex(ValueError, 'missing OmniFake labels'):
+                    evaluator.omnifake_queries(root, names[:-1])
+
     @unittest.skipUnless(importlib.util.find_spec('PIL'), 'Pillow is unavailable')
     def test_jpeg99_before_native_crop_transform_and_read_retries(self):
         from PIL import Image
@@ -133,6 +156,8 @@ class IncreFAStyledTests(unittest.TestCase):
             self.assertEqual(actual.tobytes(), expected.tobytes())
             with Image.open(path) as source:
                 self.assertEqual(source.mode, 'RGBA')
+            clean = evaluator.StyledDataset([(path, 0)], lambda image: image, ['SDXL'], jpeg99=False)
+            self.assertEqual(clean[0][0].tobytes(), original.convert('RGB').tobytes())
             open_image = Image.open
             calls = []
 
@@ -183,7 +208,8 @@ exec bash "$@"
             env = dict(os.environ, WORK=str(root), FAST=str(root), CKPT=str(checkpoint_path),
                        CAPTURE=str(capture), TEST_PYTHON=sys.executable,
                        CUDA_VISIBLE_DEVICES='3', SLURM_JOB_ID='456')
-            for key in ('INCREFA_REPO', 'REPO', 'DATA', 'LOGDIR', 'BATCH_SIZE', 'NUM_WORKERS'):
+            for key in ('INCREFA_REPO', 'REPO', 'DATA', 'LOGDIR', 'BATCH_SIZE', 'NUM_WORKERS',
+                        'EVAL_DATASET'):
                 env.pop(key, None)
             subprocess.run(['bash', '-c', stub, '_', str(script)], env=env,
                            check=True, capture_output=True, text=True)
@@ -206,6 +232,16 @@ exec bash "$@"
             self.assertEqual(flags['--checkpoint'], str(checkpoint_path))
             self.assertEqual(flags['--root_dir'], str(data))
             self.assertEqual(flags['--log_dir'], str(explicit_output))
+            omni = root / 'datasets/omnifake_iab_test'
+            (omni / 'val').mkdir(parents=True)
+            subprocess.run(['bash', '-c', stub, '_', str(script)],
+                           env=dict(env, EVAL_DATASET='omnifake', SCRATCH=str(root)),
+                           check=True, capture_output=True, text=True)
+            command = json.loads(capture.read_text())['argv']
+            self.assertEqual(command[-1], '--omnifake')
+            flags = dict(zip(command[4:-1:2], command[5:-1:2]))
+            self.assertEqual(flags['--root_dir'], str(omni))
+            self.assertEqual(flags['--log_dir'], str(root / 'outputs/increfa_omnifake_456'))
 
 
 if __name__ == '__main__':
