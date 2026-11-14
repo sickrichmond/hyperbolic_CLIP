@@ -94,10 +94,9 @@ class DNAAttributor(AbstractAttributor):
         if inference:  
             input_img_batch, label_batch = input_data['image'], input_data['label']
             input_img = input_img_batch.reshape((-1, 3, input_img_batch.size(-2), input_img_batch.size(-1))).to(self.device)
-            prob, _, raw_logits = self.backbone(input_img, include_raw_logits=True)
+            prob, _ = self.extract_features(input_img)
             out = {
                 'logits': prob, 
-                'raw_logits': raw_logits,
                 'cls': torch.argmax(prob, dim=1)
             }    
 

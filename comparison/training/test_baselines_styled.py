@@ -20,7 +20,7 @@ METHODS = ('resnet50', 'dct', 'hifi_net', 'defl', 'dna', 'repmix', 'patch', 'ucf
 OMNIFAKE_METHODS = (*METHODS, 'omnidfa')
 
 
-def load_checkpoint_map(path):
+def load_checkpoint_map(path, *, method=None):
     path = Path(path)
     entries = json.loads(path.read_text())
     if not isinstance(entries, dict) or not entries:
@@ -28,6 +28,10 @@ def load_checkpoint_map(path):
     unknown = set(entries) - set(OMNIFAKE_METHODS)
     if unknown:
         raise ValueError(f'Unknown baselines in checkpoint map: {sorted(unknown)}')
+    if method is not None:
+        if method not in entries:
+            raise ValueError(f'Checkpoint map has no entry for {method}')
+        entries = {method: entries[method]}
     resolved = {}
     for method, filename in entries.items():
         if not isinstance(filename, str) or not filename.strip():

@@ -50,14 +50,13 @@ class Simple_CNN(nn.Module):
         )
         self.pretrain = pretrain
 
-    def forward(self, input, *, include_raw_logits=False):
+    def forward(self, input):
         embedding = self.main(input)
         feature = self.pool(embedding)
         feature = feature.view(feature.shape[0], -1)
-        logits = self.classification_head(feature)
-        cls_out = logits if self.pretrain else F.softmax(logits, dim=1)
-        if include_raw_logits:
-            return cls_out, embedding, logits
+        cls_out = self.classification_head(feature)
+        if not self.pretrain:
+            cls_out = F.softmax(cls_out, dim=1)
         return cls_out, embedding
 
 class SupConNet(nn.Module):

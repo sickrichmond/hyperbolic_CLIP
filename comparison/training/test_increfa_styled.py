@@ -63,6 +63,13 @@ def restore_model(checkpoint):
     return trainer.model, trainer.dataset.transform, names
 
 
+def generator_logits(model, images, count):
+    logits, _ = model(images, y_gt=None, store_samples=False)
+    if logits.ndim != 2 or logits.shape[1] < count:
+        raise ValueError('Prediction head does not cover all checkpoint classes')
+    return logits[:, :count]
+
+
 def collect_samples(style, names):
     samples = []
     for label, name in enumerate(names):
@@ -200,10 +207,7 @@ def main(argv=None):
             matrix = torch.zeros(count * count, dtype=torch.long)
             all_logits, all_labels = [], []
             for images, labels in loader:
-                logits, _ = model(images.to(device), y_gt=None, store_samples=False)
-                if logits.ndim != 2 or logits.shape[1] < count:
-                    raise ValueError('Prediction head does not cover all checkpoint classes')
-                logits = logits[:, :count].cpu()
+                logits = generator_logits(model, images.to(device), count).cpu()
                 if args.omnifake:
                     all_logits.append(logits.float())
                     all_labels.append(labels)

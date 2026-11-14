@@ -38,13 +38,17 @@ class QueryFingerprints:
     def __getitem__(self, index):
         from data.degradations import apply_jpeg99
         from data.image_io import open_image_retry
-        from lida.fingerprint import NORMALIZE, low_bit_fingerprint
-
         path, label, *_ = self.samples[index]
         image = open_image_retry(path)
         if self.jpeg99:
             image = apply_jpeg99(image)
-        return NORMALIZE(low_bit_fingerprint(image, self.size, self.mode)), label
+        return fingerprint_image(image, self.size, self.mode), label
+
+
+def fingerprint_image(image, size, mode):
+    from lida.fingerprint import NORMALIZE, low_bit_fingerprint
+
+    return NORMALIZE(low_bit_fingerprint(image, size, mode))
 
 
 class RetryGalleryReads:
@@ -58,6 +62,24 @@ class RetryGalleryReads:
         from data.image_io import retry_image_read
 
         return retry_image_read(lambda: self.dataset[index])
+
+
+def restore_gallery(checkpoint, gallery_root, class_names):
+    from lida.data import FingerprintDataset, class_of
+    from lida.model import LIDAEncoder
+
+    database = checkpoint["database"]
+    gallery_paths = []
+    for name in class_names:
+        paths = database.get(name)
+        if not paths or any(class_of(path) != name or ".." in Path(path).parts for path in paths):
+            raise ValueError(f"Invalid registered gallery for {name!r}")
+        gallery_paths.extend(paths)
+    fp = dict(size=checkpoint["image_size"], mode=checkpoint["fingerprint"])
+    gallery = RetryGalleryReads(FingerprintDataset(str(gallery_root), gallery_paths, class_names, **fp))
+    encoder = LIDAEncoder(imagenet_init=False)
+    encoder.backbone.load_state_dict(checkpoint["backbone"], strict=True)
+    return encoder, gallery, fp
 
 
 def main(argv=None):
@@ -79,28 +101,15 @@ def main(argv=None):
 
     import numpy as np
     import torch
-    from lida.data import FingerprintDataset, class_of
-    from lida.model import LIDAEncoder
     from lida.retrieval import class_scores, extract_features, rank1_map, summarize
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     class_names = list(checkpoint["class_names"])
     if not class_names or len(set(class_names)) != len(class_names):
         raise ValueError("Checkpoint requires a nonempty, unique class order")
-    database = checkpoint["database"]
-    gallery_paths = []
-    for name in class_names:
-        paths = database.get(name)
-        if not paths or any(class_of(path) != name or ".." in Path(path).parts for path in paths):
-            raise ValueError(f"Invalid registered gallery for {name!r}")
-        gallery_paths.extend(paths)
-
     queries = list(external_queries(args.dataset, args.query_root, class_names))
-    fp = dict(size=checkpoint["image_size"], mode=checkpoint["fingerprint"])
-    gallery = RetryGalleryReads(FingerprintDataset(str(args.gallery_root), gallery_paths, class_names, **fp))
+    encoder, gallery, fp = restore_gallery(checkpoint, args.gallery_root, class_names)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    encoder = LIDAEncoder(imagenet_init=False)
-    encoder.backbone.load_state_dict(checkpoint["backbone"], strict=True)
     encoder.to(device)
     run = dict(device=device, batch_size=args.batch_size, num_workers=args.num_workers)
     g_feat, g_lab = extract_features(encoder, gallery, desc="gallery", **run)

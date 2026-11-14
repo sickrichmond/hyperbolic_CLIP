@@ -2,21 +2,26 @@
 import argparse
 from collections import Counter
 import csv
+from functools import partial
 import json
 import math
+import os
 from pathlib import Path
+import sys
 from tempfile import NamedTemporaryFile
 
-from comparison.training.test_baselines_styled import METHODS as BASELINES
-from comparison.training.test_baselines_styled import load_checkpoint_map, prepare_config
+from comparison.training.test_baselines_styled import (
+    METHODS as STYLED_BASELINES, load_checkpoint_map, prepare_config,
+)
 from training.families import IAB_FAMILIES, INCREFA_FAMILIES, increfa_mapping
 
 
+BASELINES = (*STYLED_BASELINES, 'increfa')
 METHODS = ('hypclip', *BASELINES)
 FAMILIES = tuple(IAB_FAMILIES)
-BASELINE_RULES = ('summed_logits', 'top_generator_family')
+BASELINE_RULES = ('summed_probabilities', 'top_generator_family')
 HYPCLIP_RULES = ('minimum_exterior_angle', 'nearest_geodesic_anchor')
-PROTOCOL = 'iab-family-iabench-unseen-v1'
+PROTOCOL = 'iab-family-iabench-unseen-v2'
 IAB_CLASSES = {name for group in IAB_FAMILIES.values() for name in group} - {'dalle3'}
 # IABench labels for generator releases already present in the 22-class IAB runs.
 SEEN_RELEASES = {
@@ -66,23 +71,20 @@ def load_cohort(root, split_manifest):
     return test, cohort
 
 
-def baseline_predictions(outputs, family_of, method):
+def baseline_predictions(scores, family_of, method):
     import torch
 
-    native = outputs['logits']
-    raw = outputs['raw_logits'] if method == 'dna' else native
-    if (native.ndim != (4 if method == 'patch' else 2) or raw.shape != native.shape
-            or native.shape[1] != len(family_of) or not torch.isfinite(native).all()
-            or (method == 'dna' and not torch.isfinite(raw).all())):
+    if (scores.ndim != (4 if method == 'patch' else 2)
+            or scores.shape[1] != len(family_of) or not torch.isfinite(scores).all()):
         raise ValueError(f'{method}: invalid scores for the IAB generator head')
+    # DNA already returns post-softmax probabilities from its native head.
+    probabilities = scores.float() if method == 'dna' else scores.float().softmax(dim=1)
     if method == 'patch':
-        native = native.softmax(dim=1).mean(dim=(2, 3))
-        raw = raw.mean(dim=(2, 3))
-    elif method == 'repmix':
-        native = native.softmax(dim=1)
-    mapping = torch.as_tensor(family_of, device=raw.device)
-    sums = torch.stack([raw[:, mapping == i].sum(dim=1) for i in range(len(FAMILIES))], dim=1)
-    return dict(zip(BASELINE_RULES, (sums.argmax(dim=1), mapping[native.argmax(dim=1)])))
+        probabilities = probabilities.mean(dim=(2, 3))
+    mapping = torch.as_tensor(family_of, device=scores.device)
+    sums = torch.stack([probabilities[:, mapping == i].sum(dim=1) for i in range(len(FAMILIES))], dim=1)
+    top = probabilities if method in ('patch', 'repmix') else scores
+    return dict(zip(BASELINE_RULES, (sums.argmax(dim=1).tolist(), mapping[top.argmax(dim=1)].tolist())))
 
 
 def baseline_batches(method, checkpoint, source, args):
@@ -121,10 +123,110 @@ def baseline_batches(method, checkpoint, source, args):
             generators = [source.class_names[i] for i in batch['label'].reshape(-1).tolist()]
             batch = {key: value.to(trainer.device) if isinstance(value, torch.Tensor) else value
                      for key, value in batch.items()}
-            predictions = baseline_predictions(trainer.inference(batch), family_of, method)
-            yield generators, {key: values.tolist() for key, values in predictions.items()}
+            yield generators, baseline_predictions(trainer.inference(batch)['logits'], family_of, method)
 
     return class_names, FAMILIES, batches()
+
+
+class ExternalQueries:
+    def __init__(self, source, transform, retry):
+        self.source = source
+        self.transform = transform
+        self.retry = retry
+
+    def __len__(self):
+        return len(self.source)
+
+    def __getitem__(self, index):
+        row, _, _ = self.source.samples[index]
+        image = self.retry(lambda: self.source._read_image(row))
+        return self.transform(image), index
+
+
+def lida_batches(checkpoint, source, args):
+    import torch
+    from comparison.training.evaluate_lida_retrieval import fingerprint_image, restore_gallery
+    from data.image_io import retry_image_read
+    from lida.retrieval import class_scores, extract_features
+
+    names = checkpoint.get('class_names', [])
+    if len(names) != len(IAB_CLASSES) or set(names) != IAB_CLASSES or checkpoint.get('step') != 0:
+        raise ValueError("Expected Igor's full IAB LIDA retrieval checkpoint (T0)")
+    _, mapping = increfa_mapping(names, dataset='iab')
+    encoder, gallery, fp = restore_gallery(checkpoint, args.gallery_root, names)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    run = dict(device=device, batch_size=args.batch_size, num_workers=args.num_workers)
+
+    def batches():
+        encoder.to(device)
+        gallery_features, gallery_labels = extract_features(encoder, gallery, desc='gallery', **run)
+        if (len(gallery_features) != len(gallery) or len(gallery_labels) != len(gallery)
+                or set(gallery_labels.tolist()) != set(range(len(names)))):
+            raise ValueError('LIDA feature extraction did not cover the registered IAB gallery')
+        queries = ExternalQueries(source, partial(fingerprint_image, **fp), retry_image_read)
+        features, indices = extract_features(encoder, queries, desc='IABench', **run)
+        if len(features) != len(queries) or indices.tolist() != list(range(len(queries))):
+            raise ValueError('LIDA feature extraction changed IABench query order or coverage')
+        for start in range(0, len(features), 256):
+            block = slice(start, start + 256)
+            # Native class scores aggregate cosine retrieval against the saved IAB gallery.
+            scores, similarities = class_scores(features[block], gallery_features, gallery_labels, len(names))
+            del similarities
+            generators = [name for _, name, _ in source.samples[block]]
+            yield generators, baseline_predictions(torch.as_tensor(scores), mapping, 'lida')
+
+    return list(names), FAMILIES, batches()
+
+
+def increfa_batches(checkpoint, source, args):
+    from torch.utils.data import DataLoader
+    from comparison.training.test_increfa_styled import checkpoint_classes, generator_logits, restore_model
+    from data.image_io import retry_image_read
+
+    names = checkpoint_classes(checkpoint)
+    if set(names) != IAB_CLASSES:
+        raise ValueError('Expected the static 22-class IAB IncreFA checkpoint')
+    _, mapping = increfa_mapping(names, dataset='iab')
+    device = checkpoint['config']['device']
+    native_path = str(args.increfa_dir)
+    if not (args.increfa_dir / 'train.py').is_file():
+        raise ValueError('increfa-dir must contain the native train.py')
+
+    def batches():
+        # IncreFA resolves its own data, model and relative config paths from its checkout.
+        cwd = Path.cwd()
+        native_roots = {'data', 'models', 'train', 'logger'}
+        existing = {name: module for name, module in sys.modules.copy().items()
+                    if name.partition('.')[0] in native_roots}
+        for name in existing:
+            del sys.modules[name]
+        sys.path.insert(0, native_path)
+        try:
+            os.chdir(native_path)
+            model, transform, _ = restore_model(checkpoint)
+            dataset = ExternalQueries(source, transform, retry_image_read)
+            # Workers inherit the loaded IABench reader while IncreFA owns the data namespace.
+            loader = DataLoader(dataset, batch_size=args.batch_size, num_workers=args.num_workers,
+                                shuffle=False, drop_last=False,
+                                multiprocessing_context='fork' if args.num_workers else None)
+            offset = 0
+            for images, indices in loader:
+                end = offset + len(indices)
+                if indices.tolist() != list(range(offset, end)):
+                    raise ValueError('IncreFA loader changed IABench query order')
+                generators = [name for _, name, _ in source.samples[offset:end]]
+                scores = generator_logits(model, images.to(device), len(names))
+                yield generators, baseline_predictions(scores, mapping, 'increfa')
+                offset = end
+        finally:
+            os.chdir(cwd)
+            sys.path.remove(native_path)
+            for name in list(sys.modules):
+                if name.partition('.')[0] in native_roots:
+                    del sys.modules[name]
+            sys.modules.update(existing)
+
+    return names, FAMILIES, batches()
 
 
 def validate_hypclip_checkpoint(checkpoint):
@@ -240,11 +342,12 @@ def evaluate(args):
     method = args.method
     path = args.checkpoint
     if path is None:
-        mapping = load_checkpoint_map(args.checkpoints)
-        if method not in mapping:
-            raise ValueError(f'Checkpoint map has no entry for {method}')
+        mapping = load_checkpoint_map(args.checkpoints, method=method)
         path = Path(mapping[method])
     path = path.expanduser().resolve(strict=True)
+    args.root_dir = args.root_dir.resolve()
+    if method == 'lida' and args.gallery_root == args.root_dir:
+        raise ValueError('LIDA requires separate IAB gallery and IABench query roots')
     source, cohort = load_cohort(args.root_dir, args.split_manifest)
     checkpoint = torch.load(path, map_location='cpu', weights_only=False)
     rules = HYPCLIP_RULES if method == 'hypclip' else BASELINE_RULES
@@ -252,8 +355,9 @@ def evaluate(args):
     output.mkdir(parents=True, exist_ok=True)
     print(f'{method}: {cohort["num_scored_images"]} scored / {len(source)} total test images', flush=True)
     with torch.no_grad():
-        if method == 'hypclip':
-            classes, family_names, batches = hypclip_batches(checkpoint, source, args)
+        external_batches = {'hypclip': hypclip_batches, 'lida': lida_batches, 'increfa': increfa_batches}
+        if method in external_batches:
+            classes, family_names, batches = external_batches[method](checkpoint, source, args)
         else:
             classes, family_names, batches = baseline_batches(method, checkpoint, source, args)
         epoch = checkpoint.get('epoch')
@@ -265,6 +369,10 @@ def evaluate(args):
                   readout_family_order=list(family_names), cohort=cohort,
                   data_root=str(args.root_dir.resolve()), split_manifest=str(args.split_manifest.resolve()),
                   rules=metrics)
+    if method == 'lida':
+        report.update(implementation='igor_lida_retrieval', gallery_root=str(args.gallery_root))
+    if method == 'increfa':
+        report.update(implementation='static_iab_increfa', increfa_dir=str(args.increfa_dir))
     write_json(output / 'metrics.json', report, immutable=True)
     for rule, scores in metrics.items():
         print(f'{method} {rule}: {scores["accuracy"]:.2%}', flush=True)
@@ -326,13 +434,23 @@ def parse_args(argv=None):
     evaluation.add_argument('--output-dir', type=Path, required=True)
     evaluation.add_argument('--batch-size', type=int, default=8)
     evaluation.add_argument('--num-workers', type=int, default=8)
+    evaluation.add_argument('--gallery-root', type=Path, help="IAB gallery root for Igor's LIDA")
+    evaluation.add_argument('--increfa-dir', type=Path, help='Native static IAB IncreFA checkout')
     commands.add_parser('summarize').add_argument('--output-dir', type=Path, required=True)
     args = parser.parse_args(argv)
     if args.command == 'evaluate':
         if args.batch_size < 1 or args.num_workers < 0:
             evaluation.error('batch-size must be positive and num-workers must be non-negative')
-        if args.method == 'hypclip' and args.checkpoint is None:
-            evaluation.error('hypclip requires --checkpoint')
+        if args.method in ('hypclip', 'lida', 'increfa') and args.checkpoint is None:
+            evaluation.error(f'{args.method} requires --checkpoint')
+        if args.method == 'lida':
+            if args.gallery_root is None or not args.gallery_root.is_dir():
+                evaluation.error('lida requires --gallery-root pointing to the IAB gallery')
+            args.gallery_root = args.gallery_root.resolve()
+        if args.method == 'increfa':
+            if args.increfa_dir is None:
+                evaluation.error('increfa requires --increfa-dir')
+            args.increfa_dir = args.increfa_dir.resolve()
     return args
 
 
